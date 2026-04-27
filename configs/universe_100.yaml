@@ -1,0 +1,118 @@
+# 100-symbol research universe.
+#
+# 52 user-required tickers (must always be tracked) + 48 additions chosen for
+# liquidity, sector breadth, and benchmark/regime coverage. The CLI honors
+# whatever lives here.
+
+name: universe_100
+benchmark: SPY
+
+required:
+  - META
+  - COIN
+  - AMZN
+  - INTC
+  - SNPS
+  - DUOL
+  - AVGO
+  - MSFT
+  - SNAP
+  - MRVL
+  - SQNS
+  - TW
+  - TSM
+  - ADBE
+  - INTU
+  - UBER
+  - CRM
+  - GOOG
+  - NOW
+  - LLY
+  - SFM
+  - SBET
+  - MNDY
+  - ALSN
+  - NVDA
+  - NFLX
+  - AAPL
+  - SMCI
+  - ARM
+  - CRWD
+  - QCOM
+  - DELL
+  - IBM
+  - PANW
+  - GE
+  - RDDT
+  - RBLX
+  - DASH
+  - UNH
+  - ABNB
+  - ZM
+  - DBX
+  - CRWV
+  - ORCL
+  - AMD
+  - NBIS
+  - SPOT
+  - MDB
+  - AMAT
+  - MU
+  - LRCX
+  - ASML
+
+additions:
+  # Mega-cap & adjacent tech / growth (12)
+  - GOOGL
+  - TSLA
+  - PLTR
+  - SHOP
+  - SNOW
+  - DDOG
+  - NET
+  - ZS
+  - OKTA
+  - PYPL
+  - SQ
+  - DKNG
+  # Financials (7)
+  - BRK-B
+  - JPM
+  - BAC
+  - GS
+  - V
+  - MA
+  - AXP
+  # Consumer (8)
+  - COST
+  - WMT
+  - HD
+  - MCD
+  - NKE
+  - DIS
+  - KO
+  - PEP
+  # Healthcare / staples (6)
+  - JNJ
+  - PFE
+  - ABBV
+  - MRK
+  - TMO
+  - PG
+  # Industrial / Energy / Comms (8)
+  - BA
+  - CAT
+  - DE
+  - HON
+  - RTX
+  - XOM
+  - CVX
+  - VZ
+  # Sector ETFs and broad benchmarks (7)
+  - SPY
+  - QQQ
+  - XLK
+  - XLF
+  - XLE
+  - XLV
+  - XLI

@@ -1,0 +1,68 @@
+# Default trading-system configuration
+project_root: null  # auto-resolved if null
+
+paths:
+  data_raw: data/raw
+  data_bronze: data/bronze
+  data_silver: data/silver
+  data_gold: data/gold
+  reports: reports
+  duckdb: data/warehouse.duckdb
+
+# The universe is loaded from a separate file so it can be swapped per run.
+universe_file: configs/universe_100.yaml
+
+data:
+  start_date: "2015-01-01"
+  end_date: null   # null = today
+  source: yfinance
+
+backtest:
+  initial_cash: 100000.0
+  commission_bps: 1.0          # 1 basis point
+  slippage_bps: 2.0            # 2 basis points
+  spread_bps: 1.0
+  signal_delay_days: 1         # signal at t executes at t+1 open
+  long_only: true
+  max_gross_exposure: 1.0
+  max_position_weight: 0.10    # 10% per-position cap with 100-symbol universe
+
+risk:
+  max_drawdown_kill_switch: 0.25
+  vol_target_annual: 0.15
+  per_trade_risk: 0.01
+
+model:
+  type: lightgbm
+  target: forward_return_5d
+  horizon_days: 5
+  walk_forward:
+    train_years: 4
+    test_years: 1
+    step_years: 1
+  params:
+    num_leaves: 63
+    learning_rate: 0.05
+    n_estimators: 400
+    min_child_samples: 30
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 5
+
+decision:
+  # Map normalized model score to BUY/HOLD/SELL.
+  buy_threshold: 0.0050        # >+0.5% expected 5d return
+  sell_threshold: -0.0050
+  rsi_overbought: 75.0
+  rsi_oversold: 25.0
+  min_avg_dollar_volume_20: 5000000
+
+mlflow:
+  tracking_uri: file:./reports/mlruns
+  experiment: trading-system
+
+api_keys:
+  fred: ${FRED_API_KEY}
+  openai: ${OPENAI_API_KEY}
+  newsapi: ${NEWSAPI_KEY}
+  sec_user_agent: "research-bot research@example.com"

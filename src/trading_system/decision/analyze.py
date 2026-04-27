@@ -1,0 +1,274 @@
+"""Single-symbol decision pipeline.
+
+`analyze_symbol(ticker)` runs the full system on one ticker:
+  1. Loads (or refreshes) OHLCV for the universe — context matters for cross-sectional features.
+  2. Builds the feature matrix.
+  3. Loads the latest model from the registry, or falls back to a rule-based score.
+  4. Produces 5d and 20d forecasts, a BUY/HOLD/SELL stance, and a confidence band.
+  5. Collects groundings (technical, regime, cross-sectional, events, model + SHAP).
+  6. Writes a markdown report and a JSON audit record under reports/decisions/.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import polars as pl
+
+from ..config import Config, get_config
+from ..features import build_feature_matrix
+from ..models.model_registry import list_models, load_model
+from ..models.predict import predict_with_model
+from ..models.shap_analysis import compute_shap_summary
+from ..utils import get_logger
+from .groundings import (
+    technical_grounding,
+    regime_grounding,
+    cross_section_grounding,
+    event_grounding,
+    model_grounding,
+)
+from .report import write_decision_report
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class DecisionResult:
+    ticker: str
+    as_of: str
+    stance: str           # BUY | HOLD | SELL
+    confidence: float     # 0..1
+    forecast_5d: float
+    forecast_20d: float
+    score_source: str     # "model" | "rules"
+    rationale: list[str]  # human-readable bullet reasons
+    groundings: dict[str, Any]
+    report_path: str | None = None
+    json_path: str | None = None
+    decision_payload: dict | None = field(default=None)
+
+
+def _load_or_build_features(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame]:
+    bronze = cfg.path("data_bronze") / "ohlcv_daily.parquet"
+    if not bronze.exists():
+        from ..ingestion import ingest_universe
+        ingest_universe(cfg)
+    ohlcv = pl.read_parquet(bronze)
+    feats = cfg.path("data_gold") / "features.parquet"
+    if feats.exists():
+        features = pl.read_parquet(feats)
+    else:
+        features = build_feature_matrix(ohlcv, benchmark=cfg["universe"]["benchmark"])
+    return ohlcv, features
+
+
+def _load_events(cfg: Config) -> pl.DataFrame | None:
+    p = cfg.path("data_silver") / "events.parquet"
+    if p.exists():
+        return pl.read_parquet(p)
+    return None
+
+
+def _rule_based_score(row: dict) -> tuple[float, list[str]]:
+    """Fallback if no model available. Returns (expected_5d_return, reasons)."""
+    reasons = []
+    score = 0.0
+    # Trend
+    if (row.get("mom_20d") or 0) > 0:
+        score += 0.0030; reasons.append("20d momentum positive")
+    if (row.get("mom_60d") or 0) > 0:
+        score += 0.0020; reasons.append("60d momentum positive")
+    if (row.get("sma_gap_200") or 0) > 0:
+        score += 0.0020; reasons.append("price above 200d SMA")
+    # Mean reversion if oversold
+    rsi = row.get("rsi_14")
+    if rsi is not None and rsi < 30:
+        score += 0.0040; reasons.append(f"RSI={rsi:.1f} oversold")
+    elif rsi is not None and rsi > 75:
+        score -= 0.0040; reasons.append(f"RSI={rsi:.1f} overbought")
+    # Drawdown / breakout
+    bo = row.get("breakout_20") or 0
+    if bo > 0:
+        score += 0.0020; reasons.append("breakout above 20d high")
+    if (row.get("dd_from_high_60") or 0) < -0.20:
+        score -= 0.0020; reasons.append("deep drawdown from 60d high")
+    # Volatility penalty
+    v = row.get("vol_20d") or 0
+    if v > 0.60:
+        score -= 0.0015; reasons.append(f"high realized vol {v:.2f}")
+    return score, reasons
+
+
+def _confidence(score: float, all_scores: np.ndarray | None) -> float:
+    if all_scores is None or len(all_scores) < 30:
+        return float(min(1.0, abs(score) / 0.05))
+    sd = float(np.std(all_scores))
+    if sd <= 1e-9:
+        return 0.5
+    z = abs(score) / sd
+    return float(min(1.0, z / 3.0))
+
+
+def _stance(
+    score: float,
+    confidence: float,
+    feature_row: dict,
+    cfg: Config,
+) -> tuple[str, list[str]]:
+    d = cfg.get("decision", {})
+    buy_thr = d.get("buy_threshold", 0.005)
+    sell_thr = d.get("sell_threshold", -0.005)
+    rsi_ob = d.get("rsi_overbought", 75.0)
+    rsi_os = d.get("rsi_oversold", 25.0)
+    min_adv = d.get("min_avg_dollar_volume_20", 5_000_000)
+
+    reasons: list[str] = []
+    if (feature_row.get("avg_dollar_volume_20") or 0) < min_adv:
+        reasons.append(f"liquidity below floor (${min_adv:,.0f}/day) — forcing HOLD")
+        return "HOLD", reasons
+
+    rsi = feature_row.get("rsi_14")
+    if score >= buy_thr:
+        if rsi is not None and rsi > rsi_ob:
+            reasons.append(f"score positive but RSI={rsi:.1f} overbought; downgrade to HOLD")
+            return "HOLD", reasons
+        reasons.append(f"score {score:+.4f} ≥ {buy_thr:+.4f} buy threshold")
+        return "BUY", reasons
+    if score <= sell_thr:
+        if rsi is not None and rsi < rsi_os:
+            reasons.append(f"score negative but RSI={rsi:.1f} oversold; downgrade to HOLD")
+            return "HOLD", reasons
+        reasons.append(f"score {score:+.4f} ≤ {sell_thr:+.4f} sell threshold")
+        return "SELL", reasons
+    reasons.append(f"score {score:+.4f} within neutral band")
+    return "HOLD", reasons
+
+
+def analyze_symbol(
+    ticker: str,
+    cfg: Config | None = None,
+    write_report: bool = True,
+) -> DecisionResult:
+    cfg = cfg or get_config()
+    ticker = ticker.upper()
+    universe = [t.upper() for t in cfg["universe"]["tickers"]]
+
+    if ticker not in universe:
+        logger.warning(
+            f"{ticker} not in configured universe ({len(universe)} symbols). "
+            "Adding it to this run only."
+        )
+
+    ohlcv, features = _load_or_build_features(cfg)
+    if ticker not in features["ticker"].unique().to_list():
+        # Try to fetch this ticker on the fly so single-symbol queries work even
+        # if the universe doesn't include it yet.
+        from ..ingestion.market_data import fetch_ohlcv
+        extra = fetch_ohlcv([ticker], start=cfg["data"]["start_date"], end=cfg["data"].get("end_date"))
+        if extra.is_empty():
+            raise ValueError(f"No data found for {ticker}.")
+        ohlcv = pl.concat([ohlcv, extra], how="diagonal_relaxed").unique(subset=["date", "ticker"])
+        features = build_feature_matrix(ohlcv, benchmark=cfg["universe"]["benchmark"])
+
+    last_date = features["date"].max()
+    row_df = features.filter((pl.col("ticker") == ticker) & (pl.col("date") == last_date))
+    if row_df.is_empty():
+        raise ValueError(f"No feature row for {ticker} on {last_date}.")
+    row = row_df.to_dicts()[0]
+
+    # ---- Score ----
+    score: float | None = None
+    score_source = "rules"
+    feature_columns = None
+    shap_summary = None
+    rule_reasons: list[str] = []
+
+    models_avail = list_models(registry=cfg.path("reports") / "models")
+    if models_avail:
+        try:
+            model, art = load_model(models_avail[-1], registry=cfg.path("reports") / "models")
+            feature_columns = [c for c in art.feature_columns if c in features.columns]
+            preds_today = predict_with_model(
+                features.filter(pl.col("date") == last_date), model, feature_columns
+            )
+            srow = preds_today.filter(pl.col("ticker") == ticker)
+            if not srow.is_empty():
+                score = float(srow["score"][0])
+                score_source = "model"
+                shap_summary = compute_shap_summary(model, features.tail(20_000), feature_columns)
+        except Exception as e:
+            logger.warning(f"Model inference failed, falling back to rules: {e}")
+
+    if score is None:
+        score, rule_reasons = _rule_based_score(row)
+
+    # 20d horizon: scale 5d forecast by sqrt(4) when model returns 5d, otherwise rule estimate
+    forecast_5d = score
+    forecast_20d = score * 4.0 * 0.65  # diminishing returns assumption
+
+    # Confidence: distribution-aware if model
+    all_scores = None
+    if score_source == "model":
+        try:
+            preds_today = predict_with_model(
+                features.filter(pl.col("date") == last_date), model, feature_columns
+            )
+            all_scores = preds_today["score"].to_numpy()
+        except Exception:
+            all_scores = None
+    confidence = _confidence(score, all_scores)
+
+    # ---- Stance ----
+    stance, stance_reasons = _stance(score, confidence, row, cfg)
+
+    # ---- Groundings ----
+    events = _load_events(cfg)
+    groundings = {
+        "technical": technical_grounding(features, ticker),
+        "regime": regime_grounding(features, ticker),
+        "cross_section": cross_section_grounding(features, ticker),
+        "events": event_grounding(events, ticker),
+        "model": model_grounding(score if score_source == "model" else None, feature_columns, shap_summary),
+    }
+
+    rationale = stance_reasons + (rule_reasons if score_source == "rules" else [])
+    if score_source == "model":
+        rationale.append(
+            f"Model score {score:+.4f} (5d expected return); confidence {confidence:.2f}"
+        )
+
+    result = DecisionResult(
+        ticker=ticker,
+        as_of=str(last_date),
+        stance=stance,
+        confidence=confidence,
+        forecast_5d=float(forecast_5d),
+        forecast_20d=float(forecast_20d),
+        score_source=score_source,
+        rationale=rationale,
+        groundings=groundings,
+    )
+
+    if write_report:
+        md_path, json_path = write_decision_report(result, cfg.path("reports") / "decisions")
+        result.report_path = str(md_path)
+        result.json_path = str(json_path)
+
+    result.decision_payload = asdict(result)
+    return result
+
+
+def analyze_all(cfg: Config | None = None) -> list[DecisionResult]:
+    """Run analyze_symbol over the configured universe."""
+    cfg = cfg or get_config()
+    out = []
+    for t in cfg["universe"]["tickers"]:
+        try:
+            out.append(analyze_symbol(t, cfg=cfg))
+        except Exception as e:
+            logger.warning(f"analyze_symbol({t}) failed: {e}")
+    return out
