@@ -10,6 +10,7 @@ from .backtesting import compute_metrics, run_vectorized_backtest, summarize
 from .backtesting.slippage import CostModel
 from .config import get_config
 from .decision import analyze_symbol, analyze_all
+from .decision.explain import explain_report, DEEPSEEK_DEFAULT_MODEL
 from .features import build_feature_matrix
 from .ingestion import ingest_universe
 from .models.shap_analysis import compute_shap_summary
@@ -128,7 +129,21 @@ def train(config: str = "configs/default.yaml"):
     rprint(f"[green]Wrote {len(oos)} OOS predictions to {out}[/green]")
 
     if models:
+        from trading_system.models.model_registry import save_model as _save_model
         last = models[-1]["model"]
+        stamp = wf.get("train_years", "wf")
+        model_name = f"ranker_{int(__import__('time').time())}"
+        reg_path = cfg.path("reports") / "models"
+        _save_model(
+            last,
+            name=model_name,
+            feature_columns=spec.feature_columns,
+            target=spec.target,
+            metadata={"walk_forward_folds": len(models), "oos_rows": len(oos)},
+            registry=reg_path,
+        )
+        rprint(f"[green]Model saved -> {reg_path / model_name}[/green]")
+
         sh = compute_shap_summary(last, feat, spec.feature_columns)
         sh_out = cfg.path("reports") / "shap_summary.csv"
         sh_out.parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +221,35 @@ def analyze_all_cmd(config: str = "configs/default.yaml"):
         rprint("[green]Top BUY signals (by confidence):[/green]")
         for r in buys[:15]:
             rprint(f"  {r.ticker}  conf={r.confidence:.2f}  5d={r.forecast_5d * 100:+.2f}%")
+
+
+@app.command()
+def explain(
+    report: str = typer.Argument(..., help="Path to a reports/decisions/<TICKER>_<stamp>.md file"),
+    model: str = typer.Option(DEEPSEEK_DEFAULT_MODEL, "--model", help="DeepSeek model name"),
+):
+    """Explain a decision report in plain English using DeepSeek V4."""
+    from pathlib import Path
+    import os
+
+    # Resolve relative paths from project root
+    cfg = get_config()
+    p = Path(report)
+    if not p.is_absolute():
+        p = cfg.project_root / p
+    if not p.exists():
+        # Last-ditch: glob for the latest report for a ticker name
+        candidates = sorted((cfg.project_root / "reports" / "decisions").glob(f"{report}*.md"))
+        if candidates:
+            p = candidates[-1]
+            rprint(f"[dim]Resolved to: {p}[/dim]")
+        else:
+            rprint(f"[red]Report not found: {report}[/red]")
+            raise typer.Exit(1)
+
+    rprint(f"[bold]Explaining:[/bold] {p.name}  [dim](model={model})[/dim]\n")
+    text = explain_report(p, api_key=os.environ.get("DEEPSEEK_API_KEY"), model=model)
+    rprint(text)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,32 @@ import yaml
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 
+def _load_dotenv(root: Path) -> None:
+    """Load key=value pairs from <root>/.env into os.environ (no-op if absent).
+
+    Only sets variables that are NOT already in the environment, so shell
+    exports always take precedence over .env values.
+    """
+    env_file = root / ".env"
+    if not env_file.exists():
+        return
+    with open(env_file) as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            # Skip placeholder values only
+            if val in ("", "your_deepseek_api_key_here", "your_fred_key", "your_newsapi_key"):
+                continue
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
 def _expand_env(obj: Any) -> Any:
     if isinstance(obj, str):
         return _ENV_PATTERN.sub(lambda m: os.environ.get(m.group(1), ""), obj)
@@ -38,6 +64,7 @@ class Config:
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":
         root = find_project_root()
+        _load_dotenv(root)  # auto-load .env before expanding ${VAR} placeholders
         cfg_path = Path(path) if path else root / "configs" / "default.yaml"
         with open(cfg_path) as f:
             raw = yaml.safe_load(f)

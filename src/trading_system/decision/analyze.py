@@ -14,6 +14,7 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import os
 
 import numpy as np
 import polars as pl
@@ -32,6 +33,7 @@ from .groundings import (
     model_grounding,
 )
 from .report import write_decision_report
+from .explain import explain_report, DEEPSEEK_DEFAULT_MODEL
 
 logger = get_logger(__name__)
 
@@ -193,7 +195,7 @@ def analyze_symbol(
             model, art = load_model(models_avail[-1], registry=cfg.path("reports") / "models")
             feature_columns = [c for c in art.feature_columns if c in features.columns]
             preds_today = predict_with_model(
-                features.filter(pl.col("date") == last_date), model, feature_columns
+                model, features.filter(pl.col("date") == last_date), feature_columns
             )
             srow = preds_today.filter(pl.col("ticker") == ticker)
             if not srow.is_empty():
@@ -215,7 +217,7 @@ def analyze_symbol(
     if score_source == "model":
         try:
             preds_today = predict_with_model(
-                features.filter(pl.col("date") == last_date), model, feature_columns
+                model, features.filter(pl.col("date") == last_date), feature_columns
             )
             all_scores = preds_today["score"].to_numpy()
         except Exception:
@@ -257,8 +259,30 @@ def analyze_symbol(
         md_path, json_path = write_decision_report(result, cfg.path("reports") / "decisions")
         result.report_path = str(md_path)
         result.json_path = str(json_path)
+        result.decision_payload = asdict(result)
 
-    result.decision_payload = asdict(result)
+        # Re-write JSON now that report_path / json_path / decision_payload are populated
+        import json as _json
+        json_path.write_text(_json.dumps(asdict(result), indent=2, default=str))
+
+        # ---- DeepSeek AI narration (auto-appended to the report) ----
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if api_key:
+            logger.info(f"Requesting DeepSeek narration for {ticker}…")
+            try:
+                narration = explain_report(md_path, api_key=api_key, model=DEEPSEEK_DEFAULT_MODEL)
+                # Append narration section to the markdown file
+                separator = "\n\n---\n\n## 🤖 AI Analysis (DeepSeek)\n\n"
+                with open(md_path, "a") as f:
+                    f.write(separator + narration + "\n")
+                logger.info(f"DeepSeek narration appended to {md_path.name}")
+            except Exception as e:
+                logger.warning(f"DeepSeek narration failed (non-fatal): {e}")
+        else:
+            logger.debug("DEEPSEEK_API_KEY not set — skipping AI narration")
+    else:
+        result.decision_payload = asdict(result)
+
     return result
 
 

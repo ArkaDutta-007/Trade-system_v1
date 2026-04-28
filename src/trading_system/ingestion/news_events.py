@@ -1,4 +1,9 @@
-"""News and event ingestion. Returns rows in the structured event schema."""
+"""News and event ingestion. Returns rows in the structured event schema.
+
+Raw headlines are fetched from NewsAPI, then optionally enriched by the
+DeepSeek LLM extractor (llm_extractor.py) if DEEPSEEK_API_KEY is set.
+Without the key the system falls back to naive rule-based sentiment.
+"""
 from __future__ import annotations
 
 import os
@@ -10,6 +15,7 @@ import polars as pl
 import requests
 
 from ..utils import get_logger
+from .llm_extractor import batch_enrich_events
 
 logger = get_logger(__name__)
 
@@ -93,4 +99,6 @@ def fetch_news(
 
     if not rows:
         return _empty_events()
+    # Enrich with DeepSeek LLM (or fall back to naive_sentiment) ─────────────
+    rows = batch_enrich_events(rows, api_key=os.environ.get("DEEPSEEK_API_KEY"))
     return pl.DataFrame(rows, schema=EVENT_SCHEMA)

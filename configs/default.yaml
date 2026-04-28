@@ -63,6 +63,7 @@ mlflow:
 
 api_keys:
   fred: ${FRED_API_KEY}
-  openai: ${OPENAI_API_KEY}
+  # openai key removed — replaced by DeepSeek V4 for all LLM tasks
+  deepseek: ${DEEPSEEK_API_KEY}
   newsapi: ${NEWSAPI_KEY}
   sec_user_agent: "research-bot research@example.com"
