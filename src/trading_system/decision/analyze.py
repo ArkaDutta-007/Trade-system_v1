@@ -22,6 +22,7 @@ import polars as pl
 from ..config import Config, get_config
 from ..features import build_feature_matrix
 from ..models.model_registry import list_models, load_model
+from ..models.model_registry import best_ensemble_artifact
 from ..models.predict import predict_with_model
 from ..models.shap_analysis import compute_shap_summary
 from ..utils import get_logger
@@ -192,16 +193,46 @@ def analyze_symbol(
     models_avail = list_models(registry=cfg.path("reports") / "models")
     if models_avail:
         try:
-            model, art = load_model(models_avail[-1], registry=cfg.path("reports") / "models")
+            # Prefer ensemble artifact over individual model
+            preferred = best_ensemble_artifact(registry=cfg.path("reports") / "models")
+            model_name = preferred if preferred else models_avail[-1]
+            model, art = load_model(model_name, registry=cfg.path("reports") / "models")
             feature_columns = [c for c in art.feature_columns if c in features.columns]
-            preds_today = predict_with_model(
-                model, features.filter(pl.col("date") == last_date), feature_columns
-            )
-            srow = preds_today.filter(pl.col("ticker") == ticker)
-            if not srow.is_empty():
-                score = float(srow["score"][0])
-                score_source = "model"
-                shap_summary = compute_shap_summary(model, features.tail(20_000), feature_columns)
+            is_ensemble = art.metadata.get("model_type") == "ensemble"
+
+            if is_ensemble:
+                # EnsembleModel.predict() returns dict; use best variant
+                X_today = features.filter(pl.col("date") == last_date)
+                X_sub = X_today.drop_nulls(subset=feature_columns)
+                X_arr = X_sub.select(feature_columns).to_numpy()
+                import numpy as _np
+                X_arr = X_arr.astype(_np.float64)
+                all_preds = model.predict(X_arr)
+                best_variant = art.metadata.get("best_variant", "ensemble_blend")
+                score_arr = all_preds.get(best_variant, all_preds.get("ensemble_blend"))
+                tickers_today = X_sub["ticker"].to_list()
+                if ticker in tickers_today:
+                    idx = tickers_today.index(ticker)
+                    score = float(score_arr[idx])
+                    score_source = f"ensemble:{best_variant}"
+                    preds_today = X_sub.select(["date", "ticker"]).with_columns(
+                        score=pl.Series(score_arr)
+                    )
+                    try:
+                        lgbm_m = model._models.get("lgbm")
+                        if lgbm_m is not None:
+                            shap_summary = compute_shap_summary(lgbm_m, features.tail(20_000), feature_columns)
+                    except Exception:
+                        pass
+            else:
+                preds_today = predict_with_model(
+                    model, features.filter(pl.col("date") == last_date), feature_columns
+                )
+                srow = preds_today.filter(pl.col("ticker") == ticker)
+                if not srow.is_empty():
+                    score = float(srow["score"][0])
+                    score_source = "model"
+                    shap_summary = compute_shap_summary(model, features.tail(20_000), feature_columns)
         except Exception as e:
             logger.warning(f"Model inference failed, falling back to rules: {e}")
 
@@ -212,9 +243,14 @@ def analyze_symbol(
     forecast_5d = score
     forecast_20d = score * 4.0 * 0.65  # diminishing returns assumption
 
-    # Confidence: distribution-aware if model
+    # Confidence: distribution-aware if model or ensemble
     all_scores = None
-    if score_source == "model":
+    if score_source != "rules" and "preds_today" in dir():
+        try:
+            all_scores = preds_today["score"].to_numpy()
+        except Exception:
+            all_scores = None
+    elif score_source == "model":
         try:
             preds_today = predict_with_model(
                 model, features.filter(pl.col("date") == last_date), feature_columns
@@ -234,13 +270,13 @@ def analyze_symbol(
         "regime": regime_grounding(features, ticker),
         "cross_section": cross_section_grounding(features, ticker),
         "events": event_grounding(events, ticker),
-        "model": model_grounding(score if score_source == "model" else None, feature_columns, shap_summary),
+        "model": model_grounding(score if score_source != "rules" else None, feature_columns, shap_summary),
     }
 
     rationale = stance_reasons + (rule_reasons if score_source == "rules" else [])
-    if score_source == "model":
+    if score_source != "rules":
         rationale.append(
-            f"Model score {score:+.4f} (5d expected return); confidence {confidence:.2f}"
+            f"{score_source} score {score:+.4f} (5d expected return); confidence {confidence:.2f}"
         )
 
     result = DecisionResult(

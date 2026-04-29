@@ -109,7 +109,25 @@ def run_daily_pipeline(cfg: Config | None = None) -> Path:
     recent_px = ohlcv.filter(pl.col("date") >= recent_w["date"].min())
     pnl_attr = attribute_pnl(recent_w, recent_px)
 
-    # 9. Daily report
+    # 9. Paper portfolio decisions (ML/ensemble signal)
+    from datetime import date as _date
+    from ..execution.paper_portfolio import PaperPortfolio
+    from ..decision import analyze_all as _analyze_all
+
+    try:
+        ml_decisions = _analyze_all(cfg)
+        portfolio = PaperPortfolio(
+            journal_path=gold / "paper_portfolio_journal.json",
+            equity_log_path=gold / "paper_equity_log.parquet",
+            initial_cash=cfg["backtest"].get("initial_cash", 100_000.0),
+        )
+        portfolio.process_decisions(ml_decisions, prices)
+        portfolio.snapshot(_date.today(), prices)
+        logger.info("Paper portfolio updated with today's ML decisions")
+    except Exception as e:
+        logger.warning(f"Paper portfolio update failed (non-fatal): {e}")
+
+    # 10. Daily report
     report = {
         "run_at": datetime.utcnow().isoformat(),
         "as_of_date": str(today),

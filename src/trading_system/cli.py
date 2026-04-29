@@ -103,7 +103,14 @@ def backtest(
 
 @app.command()
 def train(config: str = "configs/default.yaml"):
-    """Walk-forward train an ML ranker over the feature matrix."""
+    """Walk-forward train 14-model ensemble over the feature matrix."""
+    from rich.table import Table
+    from rich.console import Console
+    import json as _json
+    import time as _time
+
+    from trading_system.models.model_registry import save_model as _save_model, save_ensemble_report
+
     cfg = get_config(config)
     feat = pl.read_parquet(cfg.path("data_gold") / "features.parquet")
     spec = FeatureSpec(
@@ -117,38 +124,107 @@ def train(config: str = "configs/default.yaml"):
     )
     spec.feature_columns = [c for c in spec.feature_columns if c in feat.columns]
     wf = cfg["model"]["walk_forward"]
-    models, oos = train_walk_forward(
+
+    fold_records, oos, metrics_df = train_walk_forward(
         feat, spec,
         train_years=wf["train_years"],
         test_years=wf["test_years"],
         step_years=wf["step_years"],
-        params=cfg["model"]["params"],
     )
+
+    # Save OOS predictions
     out = cfg.path("data_gold") / "predictions.parquet"
     oos.write_parquet(out, compression="zstd")
     rprint(f"[green]Wrote {len(oos)} OOS predictions to {out}[/green]")
 
-    if models:
-        from trading_system.models.model_registry import save_model as _save_model
-        last = models[-1]["model"]
-        stamp = wf.get("train_years", "wf")
-        model_name = f"ranker_{int(__import__('time').time())}"
-        reg_path = cfg.path("reports") / "models"
-        _save_model(
-            last,
-            name=model_name,
-            feature_columns=spec.feature_columns,
-            target=spec.target,
-            metadata={"walk_forward_folds": len(models), "oos_rows": len(oos)},
-            registry=reg_path,
-        )
-        rprint(f"[green]Model saved -> {reg_path / model_name}[/green]")
+    if not fold_records:
+        rprint("[yellow]No folds completed — check feature data range.[/yellow]")
+        return
 
-        sh = compute_shap_summary(last, feat, spec.feature_columns)
-        sh_out = cfg.path("reports") / "shap_summary.csv"
-        sh_out.parent.mkdir(parents=True, exist_ok=True)
-        sh.write_csv(sh_out)
-        rprint(f"SHAP summary -> {sh_out}")
+    # ── Aggregate metrics across folds ──────────────────────────────────
+    agg = (
+        metrics_df
+        .group_by("model")
+        .agg([
+            pl.col("ic").mean().alias("ic_mean"),
+            pl.col("ic").std().alias("ic_std"),
+            pl.col("mae").mean().alias("mae_mean"),
+            pl.col("r2").mean().alias("r2_mean"),
+            pl.col("weight").mean().alias("weight_mean"),
+        ])
+        .sort("ic_mean", descending=True)
+    )
+
+    # ── Rich comparative table ──────────────────────────────────────────
+    console = Console()
+    table = Table(title="Model Comparison (averaged across walk-forward folds)", show_lines=True)
+    table.add_column("Model", style="cyan", no_wrap=True)
+    table.add_column("IC (mean)", justify="right")
+    table.add_column("IC (std)", justify="right")
+    table.add_column("MAE", justify="right")
+    table.add_column("R²", justify="right")
+    table.add_column("Blend Weight", justify="right")
+
+    for row in agg.to_dicts():
+        ic = row["ic_mean"]
+        color = "green" if ic > 0.02 else ("yellow" if ic > 0 else "red")
+        is_ensemble = row["model"].startswith("ensemble_")
+        style = "bold" if is_ensemble else ""
+        table.add_row(
+            f"{'★ ' if is_ensemble else ''}{row['model']}",
+            f"[{color}]{ic:+.4f}[/{color}]",
+            f"{row['ic_std']:.4f}" if row["ic_std"] else "—",
+            f"{row['mae_mean']:.6f}",
+            f"{row['r2_mean']:+.4f}",
+            f"{row['weight_mean']:.4f}" if row["weight_mean"] else "—",
+            style=style,
+        )
+    console.print(table)
+
+    # ── Save ensemble + best individual to registry ──────────────────────
+    last_fold = fold_records[-1]
+    ensemble = last_fold["ensemble"]
+    reg_path = cfg.path("reports") / "models"
+    stamp = int(_time.time())
+
+    # Save full ensemble object
+    ensemble_name = f"ensemble_{stamp}"
+    _save_model(
+        ensemble,
+        name=ensemble_name,
+        feature_columns=spec.feature_columns,
+        target=spec.target,
+        metadata={
+            "model_type": "ensemble",
+            "n_folds": len(fold_records),
+            "best_variant": last_fold["best_variant"],
+            "oos_rows": len(oos),
+            "blend_weights": last_fold["blend_weights"],
+        },
+        registry=reg_path,
+    )
+    rprint(f"[green]Ensemble saved -> {reg_path / ensemble_name}[/green]")
+
+    # Save comparative report
+    metrics_rows = metrics_df.to_dicts()
+    agg_rows = agg.to_dicts()
+    report_path = save_ensemble_report(
+        {"per_fold": metrics_rows, "aggregated": agg_rows},
+        cfg.path("reports") / "model_comparison.json",
+    )
+    rprint(f"[green]Model comparison -> {report_path}[/green]")
+
+    # SHAP summary from best tree model (lgbm in ensemble)
+    lgbm_model = ensemble._models.get("lgbm")
+    if lgbm_model is not None:
+        try:
+            sh = compute_shap_summary(lgbm_model, feat, spec.feature_columns)
+            sh_out = cfg.path("reports") / "shap_summary.csv"
+            sh_out.parent.mkdir(parents=True, exist_ok=True)
+            sh.write_csv(sh_out)
+            rprint(f"SHAP summary -> {sh_out}")
+        except Exception as e:
+            rprint(f"[yellow]SHAP summary skipped: {e}[/yellow]")
 
 
 @app.command()
@@ -157,6 +233,145 @@ def daily(config: str = "configs/default.yaml"):
     cfg = get_config(config)
     path = run_daily_pipeline(cfg)
     rprint(f"[green]Daily report: {path}[/green]")
+
+
+@app.command("paper-trade")
+def paper_trade(
+    config: str = "configs/default.yaml",
+    backfill: bool = typer.Option(False, "--backfill", help="Replay all history from OOS predictions"),
+    start_date: str = typer.Option("2015-01-01", "--start-date", help="Backfill start date (YYYY-MM-DD)"),
+):
+    """Execute daily paper trades based on current model decisions.
+
+    Use --backfill to replay the full history from OOS predictions
+    (use after ts train to build a historical track record).
+    """
+    from datetime import date as _date
+    from .execution.paper_portfolio import PaperPortfolio
+
+    cfg = get_config(config)
+    gold = cfg.path("data_gold")
+    journal = gold / "paper_portfolio_journal.json"
+    equity_log = gold / "paper_equity_log.parquet"
+
+    portfolio = PaperPortfolio(
+        journal_path=journal,
+        equity_log_path=equity_log,
+        initial_cash=cfg["backtest"].get("initial_cash", 100_000.0),
+    )
+
+    if backfill:
+        preds_path = gold / "predictions.parquet"
+        features_path = gold / "features.parquet"
+        if not preds_path.exists():
+            rprint("[red]No predictions found — run `ts train` first.[/red]")
+            raise typer.Exit(1)
+        rprint(f"[bold]Backfilling paper portfolio from {start_date}…[/bold]")
+        days = portfolio.backfill_from_predictions(
+            features_path=features_path,
+            predictions_path=preds_path,
+            start_date=start_date,
+        )
+        rprint(f"[green]Backfill complete: {days} trading days replayed.[/green]")
+    else:
+        # Live: run analyze_all, then process decisions
+        rprint("[bold]Running analyze_all for today's decisions…[/bold]")
+        results = analyze_all(cfg)
+        # Build price map from latest features
+        feat_path = gold / "features.parquet"
+        if feat_path.exists():
+            feat = pl.read_parquet(feat_path)
+            last_date = feat["date"].max()
+            prices = {
+                r["ticker"]: float(r["adj_close"])
+                for r in feat.filter(pl.col("date") == last_date).to_dicts()
+                if r.get("adj_close")
+            }
+        else:
+            prices = {}
+        orders = portfolio.process_decisions(results, prices)
+        snap = portfolio.snapshot(_date.today(), prices)
+        rprint(f"[green]Paper trade complete: {len(orders)} orders, equity={snap['equity']:,.0f}[/green]")
+
+    # Always print status summary
+    _print_paper_status(portfolio)
+
+
+@app.command("paper-status")
+def paper_status(config: str = "configs/default.yaml"):
+    """Show paper portfolio status: equity, holdings, and horizon PnL."""
+    from .execution.paper_portfolio import PaperPortfolio
+
+    cfg = get_config(config)
+    gold = cfg.path("data_gold")
+    portfolio = PaperPortfolio(
+        journal_path=gold / "paper_portfolio_journal.json",
+        equity_log_path=gold / "paper_equity_log.parquet",
+    )
+    _print_paper_status(portfolio)
+
+
+def _print_paper_status(portfolio) -> None:
+    """Print a Rich table summary of the paper portfolio."""
+    from rich.table import Table
+    from rich.console import Console
+
+    # Load latest prices for MTM
+    feat_path = Path("data/gold/features.parquet")
+    prices: dict[str, float] = {}
+    if feat_path.exists():
+        feat = pl.read_parquet(feat_path)
+        last_date = feat["date"].max()
+        prices = {
+            r["ticker"]: float(r["adj_close"])
+            for r in feat.filter(pl.col("date") == last_date).to_dicts()
+            if r.get("adj_close")
+        }
+
+    summary = portfolio.summary(prices)
+    console = Console()
+
+    # Main stats
+    equity = summary["equity"]
+    pnl_total = summary.get("pnl_total", 0.0) or 0.0
+    color = "green" if pnl_total >= 0 else "red"
+    console.print(f"\n[bold]Paper Portfolio Status[/bold]")
+    console.print(f"  Equity:      [bold]{equity:>12,.2f}[/bold]")
+    console.print(f"  Total PnL:   [{color}]{pnl_total * 100:>+.2f}%[/{color}]")
+    console.print(f"  Cash:        {summary['cash']:>12,.2f}")
+    console.print(f"  Positions:   {summary['n_positions']}")
+    console.print(f"  Trades:      {summary['n_trades']}")
+    if summary.get("win_rate") is not None:
+        console.print(f"  Win Rate:    {summary['win_rate'] * 100:.1f}%")
+
+    # Horizon PnL
+    horizons = Table(title="Horizon PnL", show_lines=False)
+    horizons.add_column("Horizon")
+    horizons.add_column("Return", justify="right")
+    for label in ["pnl_1m", "pnl_3m", "pnl_6m", "pnl_1y"]:
+        v = summary.get(label)
+        h_label = label.replace("pnl_", "")
+        if v is None:
+            horizons.add_row(h_label, "—")
+        else:
+            c = "green" if v >= 0 else "red"
+            horizons.add_row(h_label, f"[{c}]{v * 100:+.2f}%[/{c}]")
+    console.print(horizons)
+
+    # Holdings table
+    holdings = summary.get("holdings", {})
+    active = {t: q for t, q in holdings.items() if q > 0.001}
+    if active:
+        htable = Table(title="Current Holdings", show_lines=False)
+        htable.add_column("Ticker")
+        htable.add_column("Qty", justify="right")
+        htable.add_column("Price", justify="right")
+        htable.add_column("Value", justify="right")
+        for ticker, qty in sorted(active.items()):
+            px = prices.get(ticker, 0.0)
+            value = qty * px
+            htable.add_row(ticker, f"{qty:.2f}", f"{px:.2f}", f"{value:,.0f}")
+        console.print(htable)
 
 
 @app.command()

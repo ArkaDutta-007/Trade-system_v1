@@ -13,7 +13,7 @@ paths:
 universe_file: configs/universe_100.yaml
 
 data:
-  start_date: "2015-01-01"
+  start_date: "2010-01-01"
   end_date: null   # null = today
   source: yfinance
 

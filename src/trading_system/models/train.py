@@ -1,23 +1,25 @@
-"""Walk-forward training of a tabular regression/ranking model.
+"""Walk-forward training using a comprehensive 14-model ensemble.
 
 For each test window:
   - train on years strictly before the window
-  - predict the test window
-  - emit OOS predictions
+  - validate on a held-out slice inside the training window
+  - fit 14 base learners + 3 ensemble variants (blend, stack-ridge, stack-lgbm)
+  - compute IC/MAE/R² comparative metrics per model
+  - predict the test window using the best ensemble
+  - emit OOS predictions + per-fold comparative metrics
 
-Returns a tuple of (model_per_fold, oos_predictions). OOS predictions can be fed
-to MLRankerStrategy or analyzed for SHAP and ablations.
+Returns (fold_records, oos_predictions, comparative_metrics_df)
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Iterable
 
 import numpy as np
 import polars as pl
 
 from ..utils import get_logger
+from .ensemble import EnsembleModel
 
 logger = get_logger(__name__)
 
@@ -61,49 +63,74 @@ def train_walk_forward(
     train_years: int = 4,
     test_years: int = 1,
     step_years: int = 1,
-    params: dict | None = None,
-) -> tuple[list, pl.DataFrame]:
-    """Run walk-forward LightGBM training. Returns (models, oos_predictions)."""
-    import lightgbm as lgb
+    params: dict | None = None,  # kept for back-compat, unused by ensemble
+    val_fraction: float = 0.2,   # fraction of train window used for validation
+) -> tuple[list, pl.DataFrame, pl.DataFrame]:
+    """Run walk-forward ensemble training.
 
-    params = {
-        "objective": "regression",
-        "num_leaves": 63,
-        "learning_rate": 0.05,
-        "n_estimators": 400,
-        "min_child_samples": 30,
-        "feature_fraction": 0.8,
-        "bagging_fraction": 0.8,
-        "bagging_freq": 5,
-        "verbose": -1,
-        **(params or {}),
-    }
-
+    Returns
+    -------
+    fold_records : list of dicts with keys: window, ensemble, blend_weights, val_metrics
+    oos          : Polars DataFrame with columns: date, ticker, score (best-ensemble score)
+    metrics_df   : Polars DataFrame with per-fold × per-model IC/MAE/R²
+    """
     dates = sorted(set(features["date"].to_list()))
-    models = []
+    fold_records: list[dict] = []
     preds_frames: list[pl.DataFrame] = []
+    all_metrics: list[dict] = []
 
-    for tr_start, tr_end, te_end in _windows(dates, train_years, test_years, step_years):
+    for fold_i, (tr_start, tr_end, te_end) in enumerate(
+        _windows(dates, train_years, test_years, step_years)
+    ):
         train_df = features.filter((pl.col("date") >= tr_start) & (pl.col("date") < tr_end))
         test_df = features.filter((pl.col("date") >= tr_end) & (pl.col("date") < te_end))
         if train_df.is_empty() or test_df.is_empty():
             continue
 
-        X_tr, y_tr, _ = _make_xy(train_df, spec)
+        X_all, y_all, _ = _make_xy(train_df, spec)
         X_te, y_te, test_meta = _make_xy(test_df, spec)
-        if len(X_tr) == 0 or len(X_te) == 0:
+        if len(X_all) < 20 or len(X_te) == 0:
             continue
 
-        model = lgb.LGBMRegressor(**params)
-        model.fit(X_tr, y_tr)
-        score = model.predict(X_te)
-        models.append({"window": (tr_start, tr_end, te_end), "model": model})
+        # Split train into train/val
+        split = max(10, int(len(X_all) * (1 - val_fraction)))
+        X_tr, y_tr = X_all[:split], y_all[:split]
+        X_val, y_val = X_all[split:], y_all[split:]
+
+        logger.info(
+            f"Fold {fold_i} {tr_start}->{tr_end}->{te_end}: "
+            f"train={len(X_tr)}, val={len(X_val)}, test={len(X_te)}"
+        )
+
+        ensemble = EnsembleModel()
+        ensemble.fit(X_tr, y_tr, X_val, y_val, feature_names=spec.feature_columns)
+
+        best = ensemble.best_ensemble_name()
+        all_preds = ensemble.predict(X_te)
+        score = all_preds.get(best, all_preds.get("ensemble_blend", np.zeros(len(X_te))))
+
+        fold_records.append({
+            "window": (tr_start, tr_end, te_end),
+            "ensemble": ensemble,
+            "blend_weights": ensemble.blend_weights,
+            "val_metrics": ensemble.val_metrics,
+            "best_variant": best,
+        })
         preds_frames.append(
             test_meta.select(["date", "ticker"]).with_columns(score=pl.Series(score))
         )
-        logger.info(f"Fold {tr_start}->{tr_end}->{te_end}: train={len(X_tr)}, test={len(X_te)}")
+
+        # Accumulate comparative metrics
+        for row in ensemble.comparative_table():
+            all_metrics.append({"fold": fold_i, **row})
 
     if not preds_frames:
-        return models, pl.DataFrame(schema={"date": pl.Date, "ticker": pl.Utf8, "score": pl.Float64})
+        empty_oos = pl.DataFrame(schema={"date": pl.Date, "ticker": pl.Utf8, "score": pl.Float64})
+        empty_metrics = pl.DataFrame(schema={"fold": pl.Int32, "model": pl.Utf8,
+                                             "ic": pl.Float64, "mae": pl.Float64,
+                                             "r2": pl.Float64, "weight": pl.Float64})
+        return fold_records, empty_oos, empty_metrics
+
     oos = pl.concat(preds_frames).sort(["date", "ticker"])
-    return models, oos
+    metrics_df = pl.DataFrame(all_metrics)
+    return fold_records, oos, metrics_df

@@ -60,3 +60,32 @@ def list_models(registry: Path | str | None = None) -> list[str]:
     if not reg.exists():
         return []
     return sorted([p.name for p in reg.iterdir() if (p / "artifact.json").exists()])
+
+
+def save_ensemble_report(
+    metrics_rows: list[dict],
+    out_path: Path | str,
+) -> Path:
+    """Persist per-fold × per-model comparative metrics to JSON."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(metrics_rows, indent=2))
+    return out_path
+
+
+def best_ensemble_artifact(registry: Path | str | None = None) -> str | None:
+    """Return name of the most recent ensemble artifact, else most recent any model."""
+    reg = Path(registry or DEFAULT_REGISTRY)
+    all_models = list_models(reg)
+    if not all_models:
+        return None
+    # Prefer ensemble type
+    for name in reversed(all_models):
+        art_path = reg / name / "artifact.json"
+        try:
+            meta = json.loads(art_path.read_text()).get("metadata", {})
+            if meta.get("model_type") == "ensemble":
+                return name
+        except Exception:
+            pass
+    return all_models[-1]  # fallback: latest

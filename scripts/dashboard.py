@@ -69,7 +69,8 @@ with st.sidebar:
     page = st.radio(
         "Navigation",
         ["📊 Strategy Backtest", "🔍 Stock Screener", "📋 Decision Reports",
-         "🌐 Universe Overview", "⚙️ Strategy Catalog"],
+         "🌐 Universe Overview", "💼 Paper Portfolio", "🧠 Model Comparison",
+         "⚙️ Strategy Catalog"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -389,6 +390,181 @@ elif page == "🌐 Universe Overview":
                 st.pyplot(fig, use_container_width=True)
         else:
             st.info("Run `ts features` to see regime stats.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Paper Portfolio
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "💼 Paper Portfolio":
+    st.header("💼 Paper Portfolio")
+    st.caption("Simulated portfolio driven by ensemble ML signals · $100k starting capital")
+
+    equity_log_path = cfg.path("data_gold") / "paper_equity_log.parquet"
+    journal_path = cfg.path("data_gold") / "paper_portfolio_journal.json"
+
+    if not equity_log_path.exists():
+        st.info(
+            "No paper portfolio history yet.\n\n"
+            "Run `ts paper-trade --backfill` to replay history from model predictions, "
+            "or `ts paper-trade` for today's live decisions."
+        )
+    else:
+        eq_log = pl.read_parquet(equity_log_path).sort("date")
+        eq_pd = eq_log.to_pandas().set_index("date")
+
+        # ── Summary KPIs ───────────────────────────────────────────────────
+        start_eq = float(eq_pd["equity"].iloc[0])
+        end_eq = float(eq_pd["equity"].iloc[-1])
+        total_return = (end_eq - start_eq) / start_eq
+        peak = float(eq_pd["equity"].max())
+        max_dd = float(((eq_pd["equity"] / eq_pd["equity"].cummax()) - 1).min())
+        n_days = len(eq_pd)
+        cagr = (end_eq / start_eq) ** (252 / max(n_days, 1)) - 1 if n_days > 1 else 0.0
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        color = "normal" if total_return >= 0 else "inverse"
+        c1.metric("Equity", f"${end_eq:,.0f}", delta=f"{total_return:.2%}")
+        c2.metric("CAGR", f"{cagr:.2%}")
+        c3.metric("Max Drawdown", f"{max_dd:.2%}")
+        c4.metric("Trading Days", str(n_days))
+        c5.metric("Peak Equity", f"${peak:,.0f}")
+
+        st.divider()
+
+        # ── Equity curve vs SPY ────────────────────────────────────────────
+        tab_eq, tab_dd, tab_horizons, tab_holdings = st.tabs(
+            ["Equity Curve", "Drawdown", "Horizon PnL", "Holdings"]
+        )
+
+        with tab_eq:
+            bench_col = {}
+            bm_ticker = cfg["universe"].get("benchmark", "SPY")
+            bm_ohlcv = ohlcv.filter(pl.col("ticker") == bm_ticker).sort("date")
+            if not bm_ohlcv.is_empty():
+                bm_pd = bm_ohlcv.select(["date", "adj_close"]).to_pandas().set_index("date")
+                bm_pd["adj_close"] = bm_pd["adj_close"].astype(float)
+                bm_start = bm_pd.loc[bm_pd.index >= eq_pd.index[0], "adj_close"]
+                if len(bm_start):
+                    bm_eq = (bm_start / bm_start.iloc[0]) * start_eq
+                    bench_col[bm_ticker] = bm_eq
+
+            plot_df = eq_pd[["equity"]].rename(columns={"equity": "Paper Portfolio"})
+            for bm_name, bm_series in bench_col.items():
+                plot_df = plot_df.join(bm_series.rename(bm_name), how="left")
+            st.line_chart(plot_df, use_container_width=True)
+
+        with tab_dd:
+            dd_series = (eq_pd["equity"] / eq_pd["equity"].cummax() - 1)
+            st.area_chart(pd.DataFrame({"Drawdown": dd_series}), color="#d62728", use_container_width=True)
+
+        with tab_horizons:
+            from trading_system.execution.paper_portfolio import PaperPortfolio
+            portfolio = PaperPortfolio(
+                journal_path=journal_path,
+                equity_log_path=equity_log_path,
+            )
+            horizons = portfolio.compute_pnl_horizons()
+            h_rows = []
+            for label, val in horizons.items():
+                h_rows.append({"Horizon": label, "Return": f"{val*100:.2f}%" if val is not None else "—"})
+            st.table(pd.DataFrame(h_rows).set_index("Horizon"))
+
+        with tab_holdings:
+            if journal_path.exists():
+                import json as _json
+                jdata = _json.loads(journal_path.read_text())
+                holdings = {t: q for t, q in jdata.get("holdings", {}).items() if q > 0.001}
+                latest_prices = {
+                    r["ticker"]: float(r["adj_close"])
+                    for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
+                    if r.get("adj_close")
+                }
+                if holdings:
+                    hold_rows = []
+                    for ticker, qty in sorted(holdings.items()):
+                        px = latest_prices.get(ticker, 0.0)
+                        hold_rows.append({
+                            "Ticker": ticker,
+                            "Qty": f"{qty:.2f}",
+                            "Price": f"${px:.2f}",
+                            "Value": f"${qty * px:,.0f}",
+                        })
+                    st.dataframe(pd.DataFrame(hold_rows), use_container_width=True)
+                else:
+                    st.info("No open positions.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Model Comparison
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🧠 Model Comparison":
+    st.header("🧠 Model Comparison")
+    st.caption("14 base models + 3 ensemble variants · IC / MAE / R² across walk-forward folds")
+
+    model_comp_path = cfg.path("reports") / "model_comparison.json"
+    if not model_comp_path.exists():
+        st.info("No model comparison data yet. Run `ts train` to generate it.")
+    else:
+        import json as _json
+        comp = _json.loads(model_comp_path.read_text())
+        agg_rows = comp.get("aggregated", [])
+        per_fold_rows = comp.get("per_fold", [])
+
+        if agg_rows:
+            agg_df = pd.DataFrame(agg_rows).sort_values("ic_mean", ascending=False)
+
+            # ── KPIs for best model ──────────────────────────────────────────
+            best_row = agg_df.iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Best Model", best_row["model"])
+            c2.metric("Best IC (mean)", f"{best_row['ic_mean']:.4f}")
+            c3.metric("Best R²", f"{best_row['r2_mean']:.4f}")
+
+            st.divider()
+
+            # ── Aggregated comparison table ──────────────────────────────────
+            st.subheader("Aggregated Metrics (all folds)")
+            disp = agg_df.copy()
+            for col in ["ic_mean", "ic_std", "mae_mean", "r2_mean", "weight_mean"]:
+                if col in disp.columns:
+                    disp[col] = disp[col].map(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
+            st.dataframe(disp.rename(columns={
+                "model": "Model", "ic_mean": "IC (mean)", "ic_std": "IC (std)",
+                "mae_mean": "MAE", "r2_mean": "R²", "weight_mean": "Blend Weight"
+            }).set_index("Model"), use_container_width=True)
+
+            # ── IC bar chart ─────────────────────────────────────────────────
+            st.subheader("IC by Model (mean across folds)")
+            ic_df = pd.DataFrame(agg_rows).sort_values("ic_mean", ascending=True)
+            ic_series = ic_df.set_index("model")["ic_mean"]
+            colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in ic_series]
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(10, max(4, len(ic_series) * 0.35)))
+            ax.barh(ic_series.index, ic_series.values, color=colors)
+            ax.axvline(0, color="white", lw=0.8, linestyle="--")
+            ax.set_xlabel("Spearman IC (mean)")
+            ax.set_facecolor("#0e1117")
+            fig.patch.set_facecolor("#0e1117")
+            ax.tick_params(colors="white")
+            ax.xaxis.label.set_color("white")
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#333")
+            st.pyplot(fig, use_container_width=True)
+
+        if per_fold_rows:
+            st.divider()
+            st.subheader("Per-Fold IC Evolution")
+            fold_df = pd.DataFrame(per_fold_rows)
+            if "fold" in fold_df.columns and "model" in fold_df.columns and "ic" in fold_df.columns:
+                pivot = fold_df.pivot_table(index="fold", columns="model", values="ic", aggfunc="mean")
+                # Only show ensemble and a few top models
+                ensemble_cols = [c for c in pivot.columns if "ensemble" in c]
+                top_base = (
+                    fold_df.groupby("model")["ic"].mean()
+                    .sort_values(ascending=False)
+                    .index[:5].tolist()
+                )
+                show_cols = list(dict.fromkeys(ensemble_cols + top_base))
+                show_cols = [c for c in show_cols if c in pivot.columns]
+                st.line_chart(pivot[show_cols], use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Strategy Catalog
