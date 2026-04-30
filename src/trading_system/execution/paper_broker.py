@@ -62,7 +62,8 @@ class PaperBroker:
             )
             self.trades.append(tr)
             executed.append(tr)
-        self._persist()
+        if not getattr(self, "_suppress_persist", False):
+            self._persist()
         return executed
 
     def _persist(self) -> None:

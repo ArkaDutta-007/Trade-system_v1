@@ -16,7 +16,7 @@ def test_e2e_smoke(synthetic_ohlcv):
         ],
         target="forward_return_5d",
     )
-    models, oos = train_walk_forward(feat, spec, train_years=1, test_years=1, step_years=1)
+    models, oos, metrics_df = train_walk_forward(feat, spec, train_years=1, test_years=1, step_years=1)
     if oos.is_empty():
         # Synthetic data may be too short; smoke pass without crash is the goal.
         return

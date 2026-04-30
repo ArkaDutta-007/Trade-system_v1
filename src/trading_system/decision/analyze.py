@@ -65,7 +65,14 @@ def _load_or_build_features(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame]:
     if feats.exists():
         features = pl.read_parquet(feats)
     else:
-        features = build_feature_matrix(ohlcv, benchmark=cfg["universe"]["benchmark"])
+        events = _load_events(cfg)
+        apprehension = _load_apprehension(cfg)
+        features = build_feature_matrix(
+            ohlcv,
+            events=events,
+            apprehension=apprehension,
+            benchmark=cfg["universe"]["benchmark"],
+        )
     return ohlcv, features
 
 
@@ -74,6 +81,30 @@ def _load_events(cfg: Config) -> pl.DataFrame | None:
     if p.exists():
         return pl.read_parquet(p)
     return None
+
+
+def _load_apprehension(cfg: Config) -> pl.DataFrame | None:
+    p = cfg.path("data_silver") / "apprehension_scores.parquet"
+    if p.exists():
+        return pl.read_parquet(p)
+    return None
+
+
+def _apprehension_grounding(df: pl.DataFrame | None, ticker: str) -> dict:
+    """Return the latest apprehension score + drivers for a ticker."""
+    if df is None or df.is_empty():
+        return {"available": False}
+    sub = df.filter(pl.col("ticker") == ticker.upper()).sort("date", descending=True).head(1)
+    if sub.is_empty():
+        return {"available": False}
+    row = sub.to_dicts()[0]
+    return {
+        "available": True,
+        "as_of": str(row["date"]),
+        "apprehension_score": row["apprehension_score"],
+        "outlook": row["outlook"],
+        "drivers": row.get("apprehension_drivers") or [],
+    }
 
 
 def _rule_based_score(row: dict) -> tuple[float, list[str]]:
@@ -265,11 +296,13 @@ def analyze_symbol(
 
     # ---- Groundings ----
     events = _load_events(cfg)
+    apprehension_df = _load_apprehension(cfg)
     groundings = {
         "technical": technical_grounding(features, ticker),
         "regime": regime_grounding(features, ticker),
         "cross_section": cross_section_grounding(features, ticker),
         "events": event_grounding(events, ticker),
+        "apprehension": _apprehension_grounding(apprehension_df, ticker),
         "model": model_grounding(score if score_source != "rules" else None, feature_columns, shap_summary),
     }
 

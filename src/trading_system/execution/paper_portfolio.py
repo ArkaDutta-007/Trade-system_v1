@@ -82,10 +82,14 @@ class PaperPortfolio:
                 # Skip if already fully sized
                 cur_qty = self.broker.holdings.get(ticker, 0.0)
                 cur_notional = cur_qty * px
-                target_notional = min(equity * self.max_position_pct, equity * self.max_position_pct)
+                target_notional = equity * self.max_position_pct
                 if cur_notional >= target_notional * 0.95:
                     continue  # already at/near target
                 delta_notional = target_notional - cur_notional
+                if delta_notional < 10.0:
+                    continue
+                # Guard: never spend more than available cash
+                delta_notional = min(delta_notional, max(self.broker.cash - 1.0, 0.0))
                 if delta_notional < 10.0:
                     continue
                 qty = delta_notional / px
@@ -107,9 +111,23 @@ class PaperPortfolio:
         equity = self.broker.equity(prices)
         n_pos = sum(1 for q in self.broker.holdings.values() if q > 0.001)
 
-        # Load existing log or create
         log_path = self.equity_log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # In batch mode skip disk reads; drawdown is recomputed at flush time
+        if getattr(self, "_batch_mode", False):
+            new_row = pl.DataFrame({
+                "date": [as_of_str],
+                "equity": [equity],
+                "cash": [self.broker.cash],
+                "n_positions": [n_pos],
+                "drawdown": [0.0],
+            }).with_columns(pl.col("n_positions").cast(pl.Int32))
+            self._batch_rows.append(new_row)  # type: ignore[attr-defined]
+            return {"date": as_of_str, "equity": equity, "cash": self.broker.cash,
+                    "n_positions": n_pos, "drawdown": 0.0}
+
+        # Normal (single-day) mode: read existing log
         if log_path.exists():
             existing = pl.read_parquet(log_path)
         else:
@@ -130,8 +148,10 @@ class PaperPortfolio:
             "cash": [self.broker.cash],
             "n_positions": [n_pos],
             "drawdown": [drawdown],
-        })
+        }).with_columns(pl.col("n_positions").cast(pl.Int32))
+
         pl.concat([existing, new_row]).write_parquet(log_path, compression="zstd")
+
         return {"date": as_of_str, "equity": equity, "cash": self.broker.cash,
                 "n_positions": n_pos, "drawdown": drawdown}
 
@@ -225,12 +245,24 @@ class PaperPortfolio:
             logger.warning("backfill_from_predictions: no data to replay")
             return 0
 
-        dates = sorted(data["date"].unique().to_list())
+        # Pre-group all rows by date into a dict for O(n) iteration instead of O(n²) filtering
+        from collections import defaultdict
+        date_groups: dict = defaultdict(list)
+        for row in data.to_dicts():
+            date_groups[row["date"]].append(row)
+
+        dates = sorted(date_groups.keys())
         logger.info(f"Backfill: replaying {len(dates)} trading days from {dates[0]} to {dates[-1]}")
+
+        # Enable batch mode: accumulate rows in memory, write parquet once at end
+        # Also suppress broker journal writes during replay for speed
+        self._batch_mode = True
+        self._batch_rows: list = []
+        self.broker._suppress_persist = True
 
         replayed = 0
         for d in dates:
-            day_data = data.filter(pl.col("date") == d).to_dicts()
+            day_data = date_groups[d]
             prices = {r["ticker"]: float(r["adj_close"]) for r in day_data if r["adj_close"]}
 
             # Build synthetic decision objects
@@ -248,6 +280,29 @@ class PaperPortfolio:
             self.process_decisions(decisions, prices)
             self.snapshot(d, prices)
             replayed += 1
+
+        # Flush batch rows to parquet in one shot
+        self._batch_mode = False
+        self.broker._suppress_persist = False
+        self.broker._persist()  # final journal write
+        if self._batch_rows:
+            log_path = self.equity_log_path
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            if log_path.exists():
+                prior = pl.read_parquet(log_path)
+                all_rows = pl.concat([prior] + self._batch_rows)
+            else:
+                all_rows = pl.concat(self._batch_rows)
+            # Recompute drawdown correctly across the full series
+            equities = all_rows["equity"].to_list()
+            peak_running = equities[0]
+            dds = []
+            for eq in equities:
+                peak_running = max(peak_running, eq)
+                dds.append((eq - peak_running) / peak_running if peak_running > 0 else 0.0)
+            all_rows = all_rows.with_columns(pl.Series("drawdown", dds))
+            all_rows.write_parquet(log_path, compression="zstd")
+        self._batch_rows.clear()
 
         logger.info(f"Backfill complete: {replayed} days replayed")
         return replayed

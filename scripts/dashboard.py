@@ -634,7 +634,6 @@ elif page == "⚙️ Strategy Catalog":
         "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
     }
     for k, v in keys.items():
-        status = "✅ Set" if v and v not in ("your_deepseek_api_key_here",) else "❌ Not set"
-        masked = f"{v[:6]}…{v[-4:]}" if len(v) > 12 else ("set" if v else "")
-        st.markdown(f"**{k}**: {status} {masked}")
+        status = "✅ Set" if v else "❌ Not set"
+        st.markdown(f"**{k}**: {status}")
 

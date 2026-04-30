@@ -1,0 +1,121 @@
+Trading System CLI — Command Reference
+=======================================
+
+Usage: ts [OPTIONS] COMMAND [ARGS]...
+
+COMMANDS
+--------
+
+ingest
+  Ingest the configured universe to bronze parquet.
+
+quality
+  Run data-quality checks on bronze OHLCV.
+
+features
+  Build the feature matrix and write to gold.
+
+backtest
+  Backtest a named strategy on the gold features.
+
+train
+  Walk-forward train 14-model ensemble over the feature matrix.
+
+daily
+  Run the full daily pipeline.
+
+paper-trade
+  Execute daily paper trades based on current model decisions.
+
+paper-status
+  Show paper portfolio status: equity, holdings, and horizon PnL.
+
+dashboard
+  Launch the Streamlit dashboard.
+
+universe
+  Print the configured universe.
+
+analyze
+  Run the full decision pipeline on a single symbol and write a report.
+
+analyze-all
+  Run the decision pipeline across the entire configured universe.
+
+explain
+  Explain a decision report in plain English using DeepSeek V4.
+
+future-predict
+  Create a new forward-looking forecast session with a $10k portfolio.
+
+future-status
+  Show status and prediction accuracy of a future forecast session.
+
+future-update
+  Update equity snapshots for all active future-predict sessions.
+
+---------------------------------------
+Run  ts COMMAND --help  for more details
+
+
+RECOMMENDED WORKFLOW (step by step)
+=====================================
+
+STEP 1 — ingest
+  Pull raw OHLCV data for all tickers in the universe into bronze parquet.
+  Run once to bootstrap, then daily via 'ts daily'.
+
+STEP 2 — quality
+  Validate the ingested data for gaps, outliers, and bad OHLCV values.
+  Fix any flagged issues before proceeding.
+
+STEP 3 — features
+  Compute technical, fundamental, sentiment, and regime features.
+  Writes the gold feature matrix used for training and prediction.
+
+STEP 4 — train
+  Walk-forward train the 14-model ensemble (LightGBM, XGBoost, Ridge, etc.)
+  plus 3 ensemble variants. Saves models to the registry and
+  reports/model_comparison.json. Best variant: ensemble_stack_lgbm.
+
+STEP 5 — backtest  (optional, for strategy validation)
+  Run a named strategy (momentum, mean-reversion, ml-signal, etc.)
+  against historical gold features to evaluate performance.
+
+STEP 6 — paper-trade
+  Start live paper trading with a $100k virtual portfolio.
+  Driven by the ensemble model's daily signals.
+
+STEP 7 — future-predict
+  Create a new $10k forward-looking forecast session.
+  Scores all tickers, allocates up to 60% across top signals,
+  keeps 40% liquid. Records target dates for 1m/2m/3m/6m/12m horizons.
+
+---- DAILY ROUTINE (run every market day) ----
+
+STEP 8 — daily
+  Runs the full pipeline in one shot:
+    ingest → quality → features → predict → paper-trade → future-update
+
+STEP 9 — paper-status  (optional, check anytime)
+  View current equity, open positions, and PnL for the $100k portfolio.
+
+STEP 10 — future-status  (optional, check anytime)
+  View live MTM P&L for the $10k forecast portfolio and accuracy
+  of predictions as each horizon (1m/2m/3m/6m/12m) elapses.
+
+---- ANALYSIS & REPORTING (on demand) ----
+
+analyze / analyze-all
+  Deep-dive decision analysis on one or all tickers.
+
+explain
+  Plain-English explanation of an analyze report via DeepSeek V4.
+
+dashboard
+  Launch the Streamlit dashboard for visual exploration of all the above.
+
+universe
+  Quickly list all tickers in the configured universe.
+
+---------------------------------------

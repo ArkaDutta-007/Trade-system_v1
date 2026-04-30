@@ -1,0 +1,666 @@
+{
+  "prediction_date": "2026-04-30",
+  "features_as_of": "2026-04-28",
+  "prices_as_of": "2026-04-28",
+  "model": "ensemble_1777495187",
+  "best_variant": "ensemble_stack_lgbm",
+  "budget": 10000.0,
+  "horizons": {
+    "1m": "2026-05-29",
+    "2m": "2026-06-29",
+    "3m": "2026-07-28",
+    "6m": "2026-10-23",
+    "12m": "2027-04-19"
+  },
+  "portfolio": {
+    "initial_cash": 10000.0,
+    "deployed": 6000.0,
+    "cash_reserved": 4000.0,
+    "positions": [
+      {
+        "ticker": "RDDT",
+        "score": 0.043765,
+        "entry_price": 147.93,
+        "allocated": 1000.0,
+        "shares": 6.759954
+      },
+      {
+        "ticker": "AMD",
+        "score": 0.037611,
+        "entry_price": 323.21,
+        "allocated": 1000.0,
+        "shares": 3.093964
+      },
+      {
+        "ticker": "PYPL",
+        "score": 0.029783,
+        "entry_price": 49.64,
+        "allocated": 1000.0,
+        "shares": 20.145045
+      },
+      {
+        "ticker": "CRWV",
+        "score": 0.02948,
+        "entry_price": 105.53,
+        "allocated": 1000.0,
+        "shares": 9.475979
+      },
+      {
+        "ticker": "MU",
+        "score": 0.024138,
+        "entry_price": 504.29,
+        "allocated": 1000.0,
+        "shares": 1.982986
+      },
+      {
+        "ticker": "INTU",
+        "score": 0.022098,
+        "entry_price": 400.38,
+        "allocated": 1000.0,
+        "shares": 2.497627
+      }
+    ]
+  },
+  "all_predictions": [
+    {
+      "ticker": "RDDT",
+      "score": 0.043765,
+      "stance": "BUY",
+      "entry_price": 147.93
+    },
+    {
+      "ticker": "AMD",
+      "score": 0.037611,
+      "stance": "BUY",
+      "entry_price": 323.21
+    },
+    {
+      "ticker": "PYPL",
+      "score": 0.029783,
+      "stance": "BUY",
+      "entry_price": 49.64
+    },
+    {
+      "ticker": "CRWV",
+      "score": 0.02948,
+      "stance": "BUY",
+      "entry_price": 105.53
+    },
+    {
+      "ticker": "MU",
+      "score": 0.024138,
+      "stance": "BUY",
+      "entry_price": 504.29
+    },
+    {
+      "ticker": "INTU",
+      "score": 0.022098,
+      "stance": "BUY",
+      "entry_price": 400.38
+    },
+    {
+      "ticker": "LRCX",
+      "score": 0.020873,
+      "stance": "BUY",
+      "entry_price": 251.23
+    },
+    {
+      "ticker": "DASH",
+      "score": 0.01782,
+      "stance": "BUY",
+      "entry_price": 171.97
+    },
+    {
+      "ticker": "NBIS",
+      "score": 0.017271,
+      "stance": "BUY",
+      "entry_price": 135.51
+    },
+    {
+      "ticker": "SNAP",
+      "score": 0.01726,
+      "stance": "BUY",
+      "entry_price": 5.95
+    },
+    {
+      "ticker": "ASML",
+      "score": 0.014723,
+      "stance": "BUY",
+      "entry_price": 1384.5601
+    },
+    {
+      "ticker": "HD",
+      "score": 0.014222,
+      "stance": "BUY",
+      "entry_price": 329.06
+    },
+    {
+      "ticker": "INTC",
+      "score": 0.014009,
+      "stance": "BUY",
+      "entry_price": 84.52
+    },
+    {
+      "ticker": "UNH",
+      "score": 0.013292,
+      "stance": "BUY",
+      "entry_price": 366.77
+    },
+    {
+      "ticker": "GOOGL",
+      "score": 0.011618,
+      "stance": "BUY",
+      "entry_price": 349.78
+    },
+    {
+      "ticker": "AVGO",
+      "score": 0.011363,
+      "stance": "BUY",
+      "entry_price": 399.83
+    },
+    {
+      "ticker": "GOOG",
+      "score": 0.010316,
+      "stance": "BUY",
+      "entry_price": 347.5
+    },
+    {
+      "ticker": "ALSN",
+      "score": 0.009996,
+      "stance": "BUY",
+      "entry_price": 130.02
+    },
+    {
+      "ticker": "NET",
+      "score": 0.00874,
+      "stance": "BUY",
+      "entry_price": 208.5
+    },
+    {
+      "ticker": "ADBE",
+      "score": 0.008325,
+      "stance": "BUY",
+      "entry_price": 243.2
+    },
+    {
+      "ticker": "LLY",
+      "score": 0.007137,
+      "stance": "BUY",
+      "entry_price": 874.0
+    },
+    {
+      "ticker": "MRK",
+      "score": 0.006739,
+      "stance": "BUY",
+      "entry_price": 110.03
+    },
+    {
+      "ticker": "ABBV",
+      "score": 0.00671,
+      "stance": "BUY",
+      "entry_price": 197.69
+    },
+    {
+      "ticker": "TMO",
+      "score": 0.006553,
+      "stance": "BUY",
+      "entry_price": 470.22
+    },
+    {
+      "ticker": "TSLA",
+      "score": 0.006537,
+      "stance": "BUY",
+      "entry_price": 376.02
+    },
+    {
+      "ticker": "ORCL",
+      "score": 0.006324,
+      "stance": "BUY",
+      "entry_price": 165.96
+    },
+    {
+      "ticker": "HON",
+      "score": 0.005299,
+      "stance": "BUY",
+      "entry_price": 212.93
+    },
+    {
+      "ticker": "CVX",
+      "score": 0.005251,
+      "stance": "BUY",
+      "entry_price": 188.36
+    },
+    {
+      "ticker": "QCOM",
+      "score": 0.005179,
+      "stance": "BUY",
+      "entry_price": 150.0
+    },
+    {
+      "ticker": "IBM",
+      "score": 0.005107,
+      "stance": "BUY",
+      "entry_price": 233.04
+    },
+    {
+      "ticker": "XYZ",
+      "score": 0.005017,
+      "stance": "BUY",
+      "entry_price": 69.54
+    },
+    {
+      "ticker": "XLK",
+      "score": 0.004981,
+      "stance": "BUY",
+      "entry_price": 157.85
+    },
+    {
+      "ticker": "TW",
+      "score": 0.004976,
+      "stance": "BUY",
+      "entry_price": 112.36
+    },
+    {
+      "ticker": "NVDA",
+      "score": 0.004879,
+      "stance": "BUY",
+      "entry_price": 213.17
+    },
+    {
+      "ticker": "JNJ",
+      "score": 0.004865,
+      "stance": "BUY",
+      "entry_price": 227.79
+    },
+    {
+      "ticker": "AMAT",
+      "score": 0.004781,
+      "stance": "BUY",
+      "entry_price": 381.11
+    },
+    {
+      "ticker": "XLE",
+      "score": 0.004536,
+      "stance": "BUY",
+      "entry_price": 57.71
+    },
+    {
+      "ticker": "CRM",
+      "score": 0.004438,
+      "stance": "BUY",
+      "entry_price": 181.32
+    },
+    {
+      "ticker": "ZM",
+      "score": 0.004369,
+      "stance": "BUY",
+      "entry_price": 91.14
+    },
+    {
+      "ticker": "AMZN",
+      "score": 0.004336,
+      "stance": "BUY",
+      "entry_price": 259.7
+    },
+    {
+      "ticker": "DE",
+      "score": 0.004024,
+      "stance": "BUY",
+      "entry_price": 563.86
+    },
+    {
+      "ticker": "GS",
+      "score": 0.00398,
+      "stance": "BUY",
+      "entry_price": 926.55
+    },
+    {
+      "ticker": "SPOT",
+      "score": 0.003936,
+      "stance": "BUY",
+      "entry_price": 434.2
+    },
+    {
+      "ticker": "META",
+      "score": 0.00371,
+      "stance": "BUY",
+      "entry_price": 671.34
+    },
+    {
+      "ticker": "XOM",
+      "score": 0.003608,
+      "stance": "BUY",
+      "entry_price": 150.56
+    },
+    {
+      "ticker": "QQQ",
+      "score": 0.003606,
+      "stance": "BUY",
+      "entry_price": 657.55
+    },
+    {
+      "ticker": "SQNS",
+      "score": 0.003582,
+      "stance": "BUY",
+      "entry_price": 3.56
+    },
+    {
+      "ticker": "PG",
+      "score": 0.003545,
+      "stance": "BUY",
+      "entry_price": 149.17
+    },
+    {
+      "ticker": "XLV",
+      "score": 0.003536,
+      "stance": "BUY",
+      "entry_price": 143.84
+    },
+    {
+      "ticker": "CAT",
+      "score": 0.003402,
+      "stance": "BUY",
+      "entry_price": 817.87
+    },
+    {
+      "ticker": "DIS",
+      "score": 0.003259,
+      "stance": "BUY",
+      "entry_price": 101.47
+    },
+    {
+      "ticker": "DUOL",
+      "score": 0.003209,
+      "stance": "BUY",
+      "entry_price": 106.24
+    },
+    {
+      "ticker": "BRK-B",
+      "score": 0.003088,
+      "stance": "BUY",
+      "entry_price": 478.16
+    },
+    {
+      "ticker": "RTX",
+      "score": 0.003057,
+      "stance": "BUY",
+      "entry_price": 175.68
+    },
+    {
+      "ticker": "BA",
+      "score": 0.002735,
+      "stance": "HOLD",
+      "entry_price": 230.72
+    },
+    {
+      "ticker": "GE",
+      "score": 0.002691,
+      "stance": "HOLD",
+      "entry_price": 289.2
+    },
+    {
+      "ticker": "TSM",
+      "score": 0.002657,
+      "stance": "HOLD",
+      "entry_price": 392.34
+    },
+    {
+      "ticker": "AXP",
+      "score": 0.002606,
+      "stance": "HOLD",
+      "entry_price": 315.9
+    },
+    {
+      "ticker": "WMT",
+      "score": 0.002555,
+      "stance": "HOLD",
+      "entry_price": 127.59
+    },
+    {
+      "ticker": "VZ",
+      "score": 0.002481,
+      "stance": "HOLD",
+      "entry_price": 47.24
+    },
+    {
+      "ticker": "ABNB",
+      "score": 0.002481,
+      "stance": "HOLD",
+      "entry_price": 139.04
+    },
+    {
+      "ticker": "JPM",
+      "score": 0.002481,
+      "stance": "HOLD",
+      "entry_price": 311.45
+    },
+    {
+      "ticker": "KO",
+      "score": 0.002481,
+      "stance": "HOLD",
+      "entry_price": 78.35
+    },
+    {
+      "ticker": "XLI",
+      "score": 0.002444,
+      "stance": "HOLD",
+      "entry_price": 170.98
+    },
+    {
+      "ticker": "PEP",
+      "score": 0.002284,
+      "stance": "HOLD",
+      "entry_price": 156.29
+    },
+    {
+      "ticker": "AAPL",
+      "score": 0.002284,
+      "stance": "HOLD",
+      "entry_price": 270.71
+    },
+    {
+      "ticker": "DKNG",
+      "score": 0.002145,
+      "stance": "HOLD",
+      "entry_price": 23.4
+    },
+    {
+      "ticker": "BAC",
+      "score": 0.00204,
+      "stance": "HOLD",
+      "entry_price": 52.66
+    },
+    {
+      "ticker": "SPY",
+      "score": 0.00204,
+      "stance": "HOLD",
+      "entry_price": 711.69
+    },
+    {
+      "ticker": "PFE",
+      "score": 0.00197,
+      "stance": "HOLD",
+      "entry_price": 26.48
+    },
+    {
+      "ticker": "UBER",
+      "score": 0.001807,
+      "stance": "HOLD",
+      "entry_price": 74.11
+    },
+    {
+      "ticker": "COST",
+      "score": 0.001513,
+      "stance": "HOLD",
+      "entry_price": 994.0
+    },
+    {
+      "ticker": "MCD",
+      "score": 0.001513,
+      "stance": "HOLD",
+      "entry_price": 292.39
+    },
+    {
+      "ticker": "PANW",
+      "score": 0.001427,
+      "stance": "HOLD",
+      "entry_price": 180.99
+    },
+    {
+      "ticker": "MA",
+      "score": 0.001147,
+      "stance": "HOLD",
+      "entry_price": 507.62
+    },
+    {
+      "ticker": "V",
+      "score": 0.00111,
+      "stance": "HOLD",
+      "entry_price": 309.3
+    },
+    {
+      "ticker": "DBX",
+      "score": 0.000323,
+      "stance": "HOLD",
+      "entry_price": 23.99
+    },
+    {
+      "ticker": "MRVL",
+      "score": 0.000182,
+      "stance": "HOLD",
+      "entry_price": 153.23
+    },
+    {
+      "ticker": "DDOG",
+      "score": 0.000102,
+      "stance": "HOLD",
+      "entry_price": 131.55
+    },
+    {
+      "ticker": "SNPS",
+      "score": -2.5e-05,
+      "stance": "HOLD",
+      "entry_price": 483.89
+    },
+    {
+      "ticker": "NOW",
+      "score": -6.4e-05,
+      "stance": "HOLD",
+      "entry_price": 90.49
+    },
+    {
+      "ticker": "ZS",
+      "score": -0.000257,
+      "stance": "HOLD",
+      "entry_price": 136.07
+    },
+    {
+      "ticker": "XLF",
+      "score": -0.000341,
+      "stance": "HOLD",
+      "entry_price": 51.85
+    },
+    {
+      "ticker": "MSFT",
+      "score": -0.00097,
+      "stance": "HOLD",
+      "entry_price": 429.25
+    },
+    {
+      "ticker": "NFLX",
+      "score": -0.000985,
+      "stance": "HOLD",
+      "entry_price": 92.27
+    },
+    {
+      "ticker": "CRWD",
+      "score": -0.001028,
+      "stance": "HOLD",
+      "entry_price": 454.99
+    },
+    {
+      "ticker": "DELL",
+      "score": -0.001258,
+      "stance": "HOLD",
+      "entry_price": 205.93
+    },
+    {
+      "ticker": "SFM",
+      "score": -0.001786,
+      "stance": "HOLD",
+      "entry_price": 70.74
+    },
+    {
+      "ticker": "PLTR",
+      "score": -0.002089,
+      "stance": "HOLD",
+      "entry_price": 141.18
+    },
+    {
+      "ticker": "OKTA",
+      "score": -0.002527,
+      "stance": "HOLD",
+      "entry_price": 76.2
+    },
+    {
+      "ticker": "MDB",
+      "score": -0.006518,
+      "stance": "SELL",
+      "entry_price": 258.2
+    },
+    {
+      "ticker": "SHOP",
+      "score": -0.006541,
+      "stance": "SELL",
+      "entry_price": 122.05
+    },
+    {
+      "ticker": "NKE",
+      "score": -0.008801,
+      "stance": "SELL",
+      "entry_price": 45.03
+    },
+    {
+      "ticker": "COIN",
+      "score": -0.012084,
+      "stance": "SELL",
+      "entry_price": 194.1
+    },
+    {
+      "ticker": "MNDY",
+      "score": -0.013669,
+      "stance": "SELL",
+      "entry_price": 67.25
+    },
+    {
+      "ticker": "ARM",
+      "score": -0.014319,
+      "stance": "SELL",
+      "entry_price": 198.65
+    },
+    {
+      "ticker": "SNOW",
+      "score": -0.020944,
+      "stance": "SELL",
+      "entry_price": 142.56
+    },
+    {
+      "ticker": "RBLX",
+      "score": -0.021476,
+      "stance": "SELL",
+      "entry_price": 56.11
+    },
+    {
+      "ticker": "SBET",
+      "score": -0.097059,
+      "stance": "SELL",
+      "entry_price": 7.31
+    },
+    {
+      "ticker": "SMCI",
+      "score": -0.111184,
+      "stance": "SELL",
+      "entry_price": 27.25
+    }
+  ]
+}

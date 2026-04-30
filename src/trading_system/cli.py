@@ -12,7 +12,7 @@ from .config import get_config
 from .decision import analyze_symbol, analyze_all
 from .decision.explain import explain_report, DEEPSEEK_DEFAULT_MODEL
 from .features import build_feature_matrix
-from .ingestion import ingest_universe
+from .ingestion import ingest_universe, fetch_news
 from .models.shap_analysis import compute_shap_summary
 from .models.train import FeatureSpec, train_walk_forward
 from .pipeline import run_daily_pipeline
@@ -42,6 +42,51 @@ def ingest(config: str = "configs/default.yaml"):
     cfg = get_config(config)
     out = ingest_universe(cfg)
     rprint(f"[green]Wrote {out}[/green]")
+
+    # Fetch news and append to silver/events.parquet
+    silver = cfg.path("data_silver")
+    silver.mkdir(parents=True, exist_ok=True)
+    events_path = silver / "events.parquet"
+    try:
+        tickers = cfg["universe"]["tickers"]
+        new_events = fetch_news(tickers)
+        if not new_events.is_empty():
+            if events_path.exists():
+                existing = pl.read_parquet(events_path)
+                combined = pl.concat([existing, new_events], how="diagonal")
+                cutoff = combined["known_at"].max() - pl.duration(days=90)
+                combined = (
+                    combined
+                    .unique(subset=["event_id"], keep="first")
+                    .filter(pl.col("known_at") >= cutoff)
+                )
+                combined.write_parquet(events_path, compression="zstd")
+            else:
+                new_events.write_parquet(events_path, compression="zstd")
+            rprint(f"[green]News events: {len(new_events)} new rows → {events_path}[/green]")
+        else:
+            rprint("[yellow]No news fetched (NEWSAPI_KEY not set or no results)[/yellow]")
+    except Exception as e:
+        rprint(f"[yellow]News fetch failed (non-fatal): {e}[/yellow]")
+
+    # Compute apprehension scores and save to silver/apprehension_scores.parquet
+    apprehension_path = silver / "apprehension_scores.parquet"
+    try:
+        if events_path.exists():
+            all_events = pl.read_parquet(events_path)
+            new_app = compute_apprehension_scores(all_events)
+            if not new_app.is_empty():
+                if apprehension_path.exists():
+                    existing_app = pl.read_parquet(apprehension_path)
+                    new_app = (
+                        pl.concat([existing_app, new_app], how="diagonal")
+                        .unique(subset=["date", "ticker"], keep="last")
+                        .sort(["ticker", "date"])
+                    )
+                new_app.write_parquet(apprehension_path, compression="zstd")
+                rprint(f"[green]Apprehension scores: {len(new_app)} tickers → {apprehension_path}[/green]")
+    except Exception as e:
+        rprint(f"[yellow]Apprehension scoring failed (non-fatal): {e}[/yellow]")
 
 
 @app.command()
@@ -465,6 +510,307 @@ def explain(
     rprint(f"[bold]Explaining:[/bold] {p.name}  [dim](model={model})[/dim]\n")
     text = explain_report(p, api_key=os.environ.get("DEEPSEEK_API_KEY"), model=model)
     rprint(text)
+
+
+# ── Future prediction commands ────────────────────────────────────────────────
+
+@app.command("future-predict")
+def future_predict(
+    config: str = "configs/default.yaml",
+    budget: float = typer.Option(10_000.0, "--budget", help="Starting budget in USD"),
+    date_override: str = typer.Option("", "--date", help="Override prediction date (YYYY-MM-DD)"),
+):
+    """Create a new forward-looking forecast session with a $10k portfolio.
+
+    Scores all universe tickers, allocates up to 60% of budget into top BUY
+    signals (≤10% each), and saves the session to future_predict/YYYY-MM-DD/.
+    Run `ts future-status` any time to see how the predictions are tracking.
+    """
+    from datetime import date as _dt
+    from rich.table import Table
+    from rich.console import Console
+    from .future_predict.forecast import run_forecast, list_sessions
+    from .models.model_registry import load_model, best_ensemble_artifact, list_models
+
+    cfg = get_config(config)
+    console = Console()
+
+    pred_date = _dt.fromisoformat(date_override) if date_override else _dt.today()
+
+    base_dir = cfg.project_root / "future_predict"
+    session_dir = base_dir / pred_date.isoformat()
+
+    if session_dir.exists() and (session_dir / "forecast.json").exists():
+        rprint(f"[yellow]Session for {pred_date} already exists at {session_dir}.[/yellow]")
+        rprint("[dim]Use `ts future-status` to view it, or pick a different --date.[/dim]")
+        raise typer.Exit(0)
+
+    # Load ensemble model
+    reg_path = cfg.path("reports") / "models"
+    models = list_models(reg_path)
+    if not models:
+        rprint("[red]No trained model found — run `ts train` first.[/red]")
+        raise typer.Exit(1)
+
+    art_name = best_ensemble_artifact(reg_path)
+    model, art = load_model(art_name, registry=reg_path)
+    feature_columns = art.feature_columns
+    best_variant = art.metadata.get("best_variant", "ensemble_blend")
+
+    rprint(f"[bold]Running future forecast[/bold] for [cyan]{pred_date}[/cyan] "
+           f"using [cyan]{art_name}[/cyan] (variant={best_variant})")
+    rprint(f"Budget: [green]${budget:,.0f}[/green] — max deploy 60%, max 10% per position")
+
+    features_path = cfg.path("data_gold") / "features.parquet"
+    ohlcv_path    = cfg.path("data_bronze") / "ohlcv_daily.parquet"
+
+    forecast = run_forecast(
+        session_dir=session_dir,
+        features_path=features_path,
+        ohlcv_path=ohlcv_path,
+        model=model,
+        feature_columns=feature_columns,
+        best_variant=best_variant,
+        model_name=art_name,
+        budget=budget,
+        prediction_date=pred_date,
+    )
+
+    # Print summary
+    port = forecast["portfolio"]
+    positions = port["positions"]
+    n_pos = len(positions)
+
+    console.print(f"\n[bold green]Forecast session created:[/bold green] {session_dir}")
+    console.print(f"  Tickers scored:  {len(forecast['all_predictions'])}")
+    console.print(f"  Positions taken: {n_pos}")
+    console.print(f"  Deployed:        ${port['deployed']:,.2f}  "
+                  f"({port['deployed'] / budget * 100:.0f}% of budget)")
+    console.print(f"  Cash reserved:   ${port['cash_reserved']:,.2f}  "
+                  f"({port['cash_reserved'] / budget * 100:.0f}% liquid)")
+
+    # Horizon target dates
+    htable = Table(title="Horizon Target Dates", show_lines=False)
+    htable.add_column("Horizon")
+    htable.add_column("Target Date")
+    for label, tdate in forecast["horizons"].items():
+        htable.add_row(label, tdate)
+    console.print(htable)
+
+    # Positions table
+    if positions:
+        ptable = Table(title="Allocated Positions", show_lines=False)
+        ptable.add_column("Ticker")
+        ptable.add_column("Score", justify="right")
+        ptable.add_column("Entry $", justify="right")
+        ptable.add_column("Shares", justify="right")
+        ptable.add_column("Allocated $", justify="right")
+        for p in positions:
+            ptable.add_row(
+                p["ticker"],
+                f"{p['score']:+.4f}",
+                f"{p['entry_price']:.2f}",
+                f"{p['shares']:.3f}",
+                f"${p['allocated']:,.0f}",
+            )
+        console.print(ptable)
+
+    rprint(f"\n[dim]Run [bold]ts future-update[/bold] daily (or via ts daily) to track MTM equity.[/dim]")
+    rprint(f"[dim]Run [bold]ts future-status[/bold] any time to see P&L and prediction accuracy.[/dim]")
+
+
+@app.command("future-status")
+def future_status(
+    config: str = "configs/default.yaml",
+    session_date: str = typer.Option("", "--date", help="Session date YYYY-MM-DD (default: latest)"),
+    all_sessions: bool = typer.Option(False, "--all", help="Show all sessions"),
+):
+    """Show status and prediction accuracy of a future forecast session."""
+    from rich.table import Table
+    from rich.console import Console
+    from .future_predict.forecast import (
+        list_sessions, update_session_equity, evaluate_predictions,
+    )
+    import json as _json
+
+    cfg = get_config(config)
+    console = Console()
+    base_dir = cfg.project_root / "future_predict"
+    ohlcv_path = cfg.path("data_bronze") / "ohlcv_daily.parquet"
+
+    sessions = list_sessions(base_dir)
+    if not sessions:
+        rprint("[yellow]No future-predict sessions found. Run `ts future-predict` first.[/yellow]")
+        raise typer.Exit(0)
+
+    if all_sessions:
+        # Summary table of all sessions
+        stable = Table(title="All Future-Predict Sessions", show_lines=True)
+        stable.add_column("Date")
+        stable.add_column("Model")
+        stable.add_column("Positions", justify="right")
+        stable.add_column("Deployed $", justify="right")
+        stable.add_column("Current Equity", justify="right")
+        stable.add_column("Return", justify="right")
+        for s in sessions:
+            fc = _json.loads((s / "forecast.json").read_text())
+            try:
+                snap = update_session_equity(s, ohlcv_path)
+                eq = snap["equity"]
+                ret = snap["return_pct"]
+                color = "green" if ret >= 0 else "red"
+                eq_str  = f"${eq:,.0f}"
+                ret_str = f"[{color}]{ret * 100:+.2f}%[/{color}]"
+            except Exception:
+                eq_str = ret_str = "—"
+            stable.add_row(
+                s.name,
+                fc.get("model", "?")[:30],
+                str(len(fc["portfolio"]["positions"])),
+                f"${fc['portfolio']['deployed']:,.0f}",
+                eq_str, ret_str,
+            )
+        console.print(stable)
+        return
+
+    # Single session
+    if session_date:
+        session_dir = base_dir / session_date
+        if not session_dir.exists():
+            rprint(f"[red]Session {session_date} not found.[/red]")
+            raise typer.Exit(1)
+    else:
+        session_dir = sessions[0]
+
+    fc = _json.loads((session_dir / "forecast.json").read_text())
+    rprint(f"\n[bold]Future-Predict Session:[/bold] [cyan]{session_dir.name}[/cyan]")
+    rprint(f"  Model: {fc['model']} | Variant: {fc['best_variant']}")
+    rprint(f"  Prices as-of: {fc['prices_as_of']}")
+
+    # Current equity MTM
+    try:
+        snap = update_session_equity(session_dir, ohlcv_path)
+        initial = fc["budget"]
+        eq  = snap["equity"]
+        ret = snap["return_pct"]
+        color = "green" if ret >= 0 else "red"
+        console.print(f"\n[bold]Portfolio (${initial:,.0f} budget)[/bold]")
+        console.print(f"  Current Equity:  [bold]${eq:,.2f}[/bold]  "
+                      f"([{color}]{ret * 100:+.2f}%[/{color}])")
+        console.print(f"  Deployed MTM:    ${snap['deployed_mtm']:,.2f}")
+        console.print(f"  Cash Reserved:   ${snap['cash']:,.2f}")
+        console.print(f"  Prices as-of:    {snap['prices_as_of']}")
+    except Exception as exc:
+        rprint(f"[yellow]Could not refresh equity: {exc}[/yellow]")
+
+    # Horizon target dates
+    htable = Table(title="Forecast Horizons", show_lines=False)
+    htable.add_column("Horizon")
+    htable.add_column("Target Date")
+    htable.add_column("Days to Go", justify="right")
+    from datetime import date as _dt
+    today = _dt.today()
+    for label, tdate in fc["horizons"].items():
+        td = _dt.fromisoformat(tdate)
+        days_left = (td - today).days
+        status = f"{days_left}d" if days_left > 0 else f"[green]{abs(days_left)}d ago[/green]"
+        htable.add_row(label, tdate, status)
+    console.print(htable)
+
+    # Positions table with live P&L
+    positions = fc["portfolio"]["positions"]
+    if positions:
+        try:
+            ohlcv = pl.read_parquet(ohlcv_path)
+            latest_px = ohlcv["date"].max()
+            live_prices = {
+                r["ticker"]: float(r["adj_close"])
+                for r in ohlcv.filter(pl.col("date") == latest_px)
+                               .select(["ticker", "adj_close"]).to_dicts()
+            }
+        except Exception:
+            live_prices = {}
+
+        pos_table = Table(title="Positions (live MTM)", show_lines=False)
+        pos_table.add_column("Ticker")
+        pos_table.add_column("Score", justify="right")
+        pos_table.add_column("Entry $", justify="right")
+        pos_table.add_column("Now $", justify="right")
+        pos_table.add_column("Return", justify="right")
+        pos_table.add_column("Value $", justify="right")
+        for p in positions:
+            entry = p["entry_price"]
+            now   = live_prices.get(p["ticker"], entry)
+            ret   = (now - entry) / entry if entry else 0.0
+            val   = p["shares"] * now
+            c     = "green" if ret >= 0 else "red"
+            pos_table.add_row(
+                p["ticker"],
+                f"{p['score']:+.4f}",
+                f"{entry:.2f}",
+                f"{now:.2f}",
+                f"[{c}]{ret * 100:+.2f}%[/{c}]",
+                f"${val:,.0f}",
+            )
+        console.print(pos_table)
+
+    # Prediction accuracy for elapsed horizons
+    eval_results = evaluate_predictions(session_dir, ohlcv_path)
+    elapsed = {k: v for k, v in eval_results.items() if v.get("status") == "available"}
+    if elapsed:
+        etable = Table(title="Prediction Accuracy (elapsed horizons)", show_lines=True)
+        etable.add_column("Horizon")
+        etable.add_column("Actual Date")
+        etable.add_column("Hit Rate", justify="right")
+        etable.add_column("Mean Return", justify="right")
+        etable.add_column("Tickers", justify="right")
+        for label, res in elapsed.items():
+            hr  = res["hit_rate"]
+            mr  = res["mean_return"]
+            hrc = "green" if (hr or 0) >= 0.5 else "red"
+            mrc = "green" if (mr or 0) >= 0 else "red"
+            etable.add_row(
+                label,
+                res["actual_date"],
+                f"[{hrc}]{hr * 100:.1f}%[/{hrc}]" if hr is not None else "—",
+                f"[{mrc}]{mr * 100:+.2f}%[/{mrc}]" if mr is not None else "—",
+                str(res["total_tickers"]),
+            )
+        console.print(etable)
+    else:
+        rprint("[dim]No horizons have elapsed yet — check back later.[/dim]")
+
+
+@app.command("future-update")
+def future_update(config: str = "configs/default.yaml"):
+    """Update equity snapshots for all active future-predict sessions.
+
+    Automatically called by `ts daily`. Safe to run at any time.
+    """
+    from .future_predict.forecast import list_sessions, update_session_equity
+
+    cfg = get_config(config)
+    base_dir = cfg.project_root / "future_predict"
+    ohlcv_path = cfg.path("data_bronze") / "ohlcv_daily.parquet"
+    sessions = list_sessions(base_dir)
+
+    if not sessions:
+        rprint("[dim]No future-predict sessions to update.[/dim]")
+        return
+
+    updated = 0
+    for s in sessions:
+        try:
+            snap = update_session_equity(s, ohlcv_path)
+            ret = snap["return_pct"]
+            color = "green" if ret >= 0 else "red"
+            rprint(f"  [{color}]{s.name}[/{color}]  equity=${snap['equity']:,.0f}  "
+                   f"return=[{color}]{ret * 100:+.2f}%[/{color}]")
+            updated += 1
+        except Exception as exc:
+            rprint(f"  [yellow]{s.name}: skipped ({exc})[/yellow]")
+
+    rprint(f"[green]Updated {updated} future-predict session(s).[/green]")
 
 
 if __name__ == "__main__":

@@ -1,21 +1,24 @@
 """News and event ingestion. Returns rows in the structured event schema.
 
-Raw headlines are fetched from NewsAPI, then optionally enriched by the
-DeepSeek LLM extractor (llm_extractor.py) if DEEPSEEK_API_KEY is set.
-Without the key the system falls back to naive rule-based sentiment.
+Primary backend: Google News RSS + full article-body fetcher.
+Fallback backend: NewsAPI headlines when Google RSS yields nothing.
+
+The structured rows are then fed into downstream event features and the
+DeepSeek apprehension scorer.
 """
 from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 import polars as pl
 import requests
 
 from ..utils import get_logger
-from .llm_extractor import batch_enrich_events
+from ..features.sentiment import naive_sentiment
+from .google_news_fetcher import collect_google_news_articles
 
 logger = get_logger(__name__)
 
@@ -35,6 +38,7 @@ EVENT_SCHEMA = {
     "magnitude": pl.Float64,
     "time_horizon": pl.Utf8,
     "summary": pl.Utf8,
+    "content": pl.Utf8,
     "risk_flags": pl.List(pl.Utf8),
 }
 
@@ -43,29 +47,29 @@ def _empty_events() -> pl.DataFrame:
     return pl.DataFrame(schema=EVENT_SCHEMA)
 
 
-def fetch_news(
+def _fetch_newsapi_headlines(
     tickers: Iterable[str],
     api_key: str | None = None,
     days: int = 7,
 ) -> pl.DataFrame:
-    """Pull news from NewsAPI if key is available; otherwise return empty event frame.
-
-    The output adheres to EVENT_SCHEMA. Sentiment/confidence/etc. are 0.0 placeholders;
-    use features.sentiment or an LLM extractor to populate them downstream.
-    """
     api_key = api_key or os.environ.get("NEWSAPI_KEY")
     if not api_key:
-        logger.info("NEWSAPI_KEY not set. Returning empty event frame.")
         return _empty_events()
 
     rows = []
     now = datetime.now(timezone.utc)
+    from_date = (now - timedelta(days=days)).date().isoformat()
     for t in tickers:
         try:
             r = requests.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": t, "from": (now.replace(hour=0)).date().isoformat(),
-                        "language": "en", "pageSize": 25, "apiKey": api_key},
+                params={
+                    "q": t,
+                    "from": from_date,
+                    "language": "en",
+                    "pageSize": 25,
+                    "apiKey": api_key,
+                },
                 timeout=20,
             )
             r.raise_for_status()
@@ -75,30 +79,80 @@ def fetch_news(
                     pdt = datetime.fromisoformat(published.replace("Z", "+00:00"))
                 except Exception:
                     pdt = now
+                title = (art.get("title") or "")[:500]
                 rows.append(
                     {
                         "event_id": str(uuid.uuid4()),
-                        "source": "news",
+                        "source": "newsapi",
                         "source_url": art.get("url", ""),
                         "published_at": pdt,
                         "known_at": now,
                         "tickers": [t.upper()],
                         "sectors": [],
                         "event_type": "news",
-                        "sentiment": 0.0,
-                        "confidence": 0.5,
+                        "sentiment": naive_sentiment(title),
+                        "confidence": 0.4,
                         "novelty": 0.5,
                         "magnitude": 0.0,
                         "time_horizon": "1d",
-                        "summary": (art.get("title") or "")[:500],
+                        "summary": title,
+                        "content": (art.get("description") or "")[:8000],
                         "risk_flags": ["unverified"],
                     }
                 )
         except Exception as e:
-            logger.warning(f"News fetch failed for {t}: {e}")
+            logger.warning(f"NewsAPI fetch failed for {t}: {e}")
+
+    return pl.DataFrame(rows, schema=EVENT_SCHEMA) if rows else _empty_events()
+
+
+def fetch_news(
+    tickers: Iterable[str],
+    api_key: str | None = None,
+    days: int = 7,
+) -> pl.DataFrame:
+    """Fetch recent news as structured events.
+
+    Backend order:
+      1. Google News RSS + full article-body extraction (primary)
+      2. NewsAPI headline fetch (fallback)
+    """
+    now = datetime.now(timezone.utc)
+    rows = []
+
+    try:
+        articles = collect_google_news_articles(tickers, days=days, max_urls_per_ticker=10)
+        for art in articles:
+            published_at = art.get("published_at") or now
+            title = (art.get("title") or "")[:500]
+            content = (art.get("content") or "")[:8000]
+            rows.append(
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "source": "google_news",
+                    "source_url": art.get("source_url", ""),
+                    "published_at": published_at,
+                    "known_at": now,
+                    "tickers": [art.get("ticker", "UNKNOWN").upper()],
+                    "sectors": [],
+                    "event_type": "news",
+                    "sentiment": naive_sentiment(f"{title} {content[:500]}"),
+                    "confidence": 0.45,
+                    "novelty": 0.5,
+                    "magnitude": 0.0,
+                    "time_horizon": "1d",
+                    "summary": title,
+                    "content": content,
+                    "risk_flags": ["unverified"],
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Google News fetch failed, falling back to NewsAPI: {e}")
 
     if not rows:
+        fallback = _fetch_newsapi_headlines(tickers, api_key=api_key, days=days)
+        if not fallback.is_empty():
+            return fallback
         return _empty_events()
-    # Enrich with DeepSeek LLM (or fall back to naive_sentiment) ─────────────
-    rows = batch_enrich_events(rows, api_key=os.environ.get("DEEPSEEK_API_KEY"))
+
     return pl.DataFrame(rows, schema=EVENT_SCHEMA)

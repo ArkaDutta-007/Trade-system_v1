@@ -36,6 +36,8 @@ dependencies = [
     "evidently>=0.4.30",
     "prefect>=2.19",
     "fredapi>=0.5",
+    "aiohttp>=3.9",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]

@@ -11,12 +11,24 @@ import yaml
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
+_PLACEHOLDERS = frozenset({
+    "",
+    "your_deepseek_api_key_here",
+    "your_fred_key",
+    "your_newsapi_key",
+    "your_newsapi_key_here",
+    "your_fred_api_key_here",
+})
+
 
 def _load_dotenv(root: Path) -> None:
-    """Load key=value pairs from <root>/.env into os.environ (no-op if absent).
+    """Load key=value pairs from <root>/.env into os.environ.
 
-    Only sets variables that are NOT already in the environment, so shell
-    exports always take precedence over .env values.
+    .env is the canonical source of truth for project API keys.
+    Its values always override the shell environment so that updating
+    .env is sufficient — no need to re-export in every terminal.
+    Placeholder / empty values are skipped so a misconfigured .env
+    cannot clobber a correctly-set shell variable.
     """
     env_file = root / ".env"
     if not env_file.exists():
@@ -31,10 +43,10 @@ def _load_dotenv(root: Path) -> None:
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
-            # Skip placeholder values only
-            if val in ("", "your_deepseek_api_key_here", "your_fred_key", "your_newsapi_key"):
+            # Never write a placeholder — that would clobber a real key
+            if val in _PLACEHOLDERS:
                 continue
-            if key and key not in os.environ:
+            if key:
                 os.environ[key] = val
 
 

@@ -1,0 +1,15 @@
+{
+    "keywords": [
+        "Apple"
+    ],
+    "start_date": "2024-03-01",
+    "end_date": "2024-03-01",
+    "timedelta": 3,
+    "langauges": [
+        "en"
+    ],
+    "countries": [
+        "US"
+    ],
+    "save_path": "./data/run_2024-04-01 01:07"
+}
