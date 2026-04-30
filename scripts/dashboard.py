@@ -1,7 +1,13 @@
-"""Streamlit dashboard. Run via `ts dashboard` or `streamlit run scripts/dashboard.py`."""
+"""Streamlit dashboard. Run via `ts dashboard` or `streamlit run scripts/dashboard.py`.
+
+V2 additions:
+  ⚡ Live Trading   — quasi-realtime prices, live P&L, kill switch
+  🤖 Agent Analysis — ReAct thought chain + SHAP waterfall per ticker
+"""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import polars as pl
@@ -70,7 +76,7 @@ with st.sidebar:
         "Navigation",
         ["📊 Strategy Backtest", "🔍 Stock Screener", "📋 Decision Reports",
          "🌐 Universe Overview", "💼 Paper Portfolio", "🧠 Model Comparison",
-         "⚙️ Strategy Catalog"],
+         "⚙️ Strategy Catalog", "⚡ Live Trading", "🤖 Agent Analysis"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -307,6 +313,32 @@ elif page == "📋 Decision Reports":
                 with st.expander("Raw JSON"):
                     st.json(data)
 
+            # V2: Show agent reasoning chain if available
+            agent_reports_dir = cfg.path("reports") / "agent"
+            if agent_reports_dir.exists():
+                ticker_name = selected.split("_")[0]
+                agent_files = sorted(agent_reports_dir.glob(f"{ticker_name}_*.json"), reverse=True)
+                if agent_files:
+                    st.divider()
+                    st.subheader("🤖 Agent Reasoning Chain")
+                    agent_data = json.loads(agent_files[0].read_text())
+                    st.caption(f"Task: {agent_data.get('task', '')}")
+                    steps = agent_data.get("steps", [])
+                    for i, step in enumerate(steps, 1):
+                        thought = step.get("thought", "")
+                        action = step.get("action", "")
+                        obs = step.get("observation", "")
+                        with st.expander(f"Step {i}: {action or 'Thought'}", expanded=(i == 1)):
+                            if thought:
+                                st.markdown(f"**Thought:** {thought}")
+                            if action:
+                                st.markdown(f"**Action:** `{action}`  →  `{step.get('action_input', '')}`")
+                            if obs:
+                                st.markdown(f"**Observation:** {obs}")
+                    final = agent_data.get("final_answer", "")
+                    if final:
+                        st.success(f"**Final Answer:** {final}")
+
         # Summary table of all reports
         st.divider()
         st.subheader("All Reports Summary")
@@ -473,22 +505,49 @@ elif page == "💼 Paper Portfolio":
                 import json as _json
                 jdata = _json.loads(journal_path.read_text())
                 holdings = {t: q for t, q in jdata.get("holdings", {}).items() if q > 0.001}
-                latest_prices = {
+
+                # V2: Live prices via yfinance fast_info
+                col_hdr, col_btn = st.columns([3, 1])
+                col_hdr.caption("Holdings as of last portfolio run")
+                refresh_live = col_btn.button("🔄 Refresh Live Prices", key="holdings_refresh")
+
+                price_key = "live_holding_prices"
+                if refresh_live or price_key not in st.session_state:
+                    if holdings:
+                        try:
+                            from trading_system.ingestion.realtime import live_price_snapshot
+                            live_px = live_price_snapshot(list(holdings.keys()))
+                            st.session_state[price_key] = live_px
+                        except Exception:
+                            st.session_state[price_key] = {}
+                    else:
+                        st.session_state[price_key] = {}
+
+                live_prices = st.session_state.get(price_key, {})
+                # Fall back to last feature date prices when live unavailable
+                latest_prices_fb = {
                     r["ticker"]: float(r["adj_close"])
                     for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
                     if r.get("adj_close")
                 }
+
                 if holdings:
                     hold_rows = []
+                    total_live_value = 0.0
                     for ticker, qty in sorted(holdings.items()):
-                        px = latest_prices.get(ticker, 0.0)
+                        px = live_prices.get(ticker) or latest_prices_fb.get(ticker, 0.0)
+                        is_live = ticker in live_prices
+                        val = qty * px
+                        total_live_value += val
                         hold_rows.append({
                             "Ticker": ticker,
                             "Qty": f"{qty:.2f}",
-                            "Price": f"${px:.2f}",
-                            "Value": f"${qty * px:,.0f}",
+                            "Price": f"${px:.2f}" + (" 🔴" if not is_live else " 🟢"),
+                            "Value": f"${val:,.0f}",
                         })
                     st.dataframe(pd.DataFrame(hold_rows), use_container_width=True)
+                    if live_prices:
+                        st.caption(f"Total live value: **${total_live_value:,.0f}**  (🟢 = live price  🔴 = last close)")
                 else:
                     st.info("No open positions.")
 
@@ -566,6 +625,33 @@ elif page == "🧠 Model Comparison":
                 show_cols = [c for c in show_cols if c in pivot.columns]
                 st.line_chart(pivot[show_cols], use_container_width=True)
 
+    # ── V2: SHAP Deep Dive tab ───────────────────────────────────────────────
+    st.divider()
+    st.subheader("🔍 SHAP Deep Dive")
+    model_dir = cfg.path("reports") / "models"
+    if not model_dir.exists():
+        st.info("No trained models found. Run `ts train` first.")
+    else:
+        tickers_available = sorted(cfg["universe"]["tickers"])
+        shap_ticker = st.selectbox("Ticker for SHAP analysis", tickers_available, key="shap_ticker_mc")
+        shap_top_n = st.slider("Top N features", 5, 20, 12, key="shap_top_n_mc")
+        if st.button("Compute SHAP", key="run_shap_mc"):
+            with st.spinner("Computing SHAP values…"):
+                try:
+                    from trading_system.monitoring.shap_viz import compute_shap_waterfall, render_shap_waterfall_fig
+                    shap_data = compute_shap_waterfall(model_dir, features, shap_ticker, top_n=shap_top_n)
+                    if shap_data:
+                        st.session_state["shap_data_mc"] = shap_data
+                    else:
+                        st.warning("SHAP computation returned no data (model may not be a tree model or ticker missing).")
+                except Exception as e:
+                    st.error(f"SHAP error: {e}")
+
+        if "shap_data_mc" in st.session_state:
+            from trading_system.monitoring.shap_viz import render_shap_waterfall_fig
+            fig = render_shap_waterfall_fig(st.session_state["shap_data_mc"])
+            st.pyplot(fig, use_container_width=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Strategy Catalog
 # ─────────────────────────────────────────────────────────────────────────────
@@ -627,13 +713,273 @@ elif page == "⚙️ Strategy Catalog":
 
     st.divider()
     st.subheader("API Keys Status")
-    import os
     keys = {
         "FRED_API_KEY": os.environ.get("FRED_API_KEY", ""),
         "NEWSAPI_KEY": os.environ.get("NEWSAPI_KEY", ""),
         "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
+        "OLLAMA_HOST": os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
     }
     for k, v in keys.items():
         status = "✅ Set" if v else "❌ Not set"
         st.markdown(f"**{k}**: {status}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Live Trading (V2)
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "⚡ Live Trading":
+    st.header("⚡ Live Trading")
+    st.caption("Quasi-realtime price overlay (5-min refresh via yfinance) · Paper trading mode")
+
+    tickers = cfg["universe"]["tickers"]
+
+    # ── Auto-refresh toggle ──────────────────────────────────────────────────
+    col_ctrl, col_status = st.columns([2, 2])
+    with col_ctrl:
+        auto_refresh = st.checkbox("Auto-refresh every 5 min", value=False, key="lt_autorefresh")
+        if st.button("🔄 Fetch Live Prices Now", key="lt_fetch"):
+            st.session_state["lt_force_refresh"] = True
+
+    # Fetch prices
+    if st.session_state.get("lt_force_refresh") or "lt_prices" not in st.session_state:
+        with st.spinner("Fetching live prices…"):
+            try:
+                from trading_system.ingestion.realtime import live_price_snapshot
+                prices = live_price_snapshot(tickers)
+                st.session_state["lt_prices"] = prices
+                st.session_state["lt_ts"] = pd.Timestamp.now().strftime("%H:%M:%S")
+            except Exception as e:
+                st.error(f"Price fetch failed: {e}")
+                prices = {}
+        st.session_state.pop("lt_force_refresh", None)
+    else:
+        prices = st.session_state.get("lt_prices", {})
+
+    with col_status:
+        ts = st.session_state.get("lt_ts", "—")
+        st.metric("Last Update", ts)
+        st.metric("Tickers Fetched", f"{len(prices)}/{len(tickers)}")
+
+    # ── Kill Switch ──────────────────────────────────────────────────────────
+    st.divider()
+    col_ks, col_mode = st.columns([1, 3])
+    with col_ks:
+        kill = st.toggle("🛑 KILL SWITCH (halt paper trades)", value=False, key="kill_switch")
+    with col_mode:
+        if kill:
+            st.error("⚠️ Kill switch ACTIVE — all paper trade execution halted.")
+        else:
+            st.success("✅ Paper trading enabled.")
+
+    # ── Live P&L ─────────────────────────────────────────────────────────────
+    journal_path = cfg.path("data_gold") / "paper_portfolio_journal.json"
+    if journal_path.exists() and prices:
+        import json as _json
+        jdata = _json.loads(journal_path.read_text())
+        holdings = {t: q for t, q in jdata.get("holdings", {}).items() if q > 0.001}
+        avg_costs = jdata.get("avg_cost", {})
+        cash = float(jdata.get("cash", 0))
+
+        if holdings:
+            st.subheader("Live P&L — Open Positions")
+            rows = []
+            total_mkt = 0.0
+            total_cost = 0.0
+            for t, qty in sorted(holdings.items()):
+                px = prices.get(t, 0.0)
+                cost = avg_costs.get(t, px)
+                mkt_val = qty * px
+                cost_val = qty * cost
+                unrealized = mkt_val - cost_val
+                pct = (unrealized / cost_val) if cost_val else 0.0
+                total_mkt += mkt_val
+                total_cost += cost_val
+                rows.append({
+                    "Ticker": t, "Qty": f"{qty:.2f}",
+                    "Avg Cost": f"${cost:.2f}", "Live Price": f"${px:.2f}",
+                    "Mkt Value": f"${mkt_val:,.0f}",
+                    "Unrealized PnL": f"${unrealized:+,.0f}",
+                    "Return %": f"{pct:.2%}",
+                })
+
+            df_pnl = pd.DataFrame(rows)
+            st.dataframe(df_pnl, use_container_width=True)
+
+            total_unrealized = total_mkt - total_cost
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Market Value", f"${total_mkt:,.0f}")
+            col2.metric("Total Cost Basis", f"${total_cost:,.0f}")
+            col3.metric("Unrealized P&L", f"${total_unrealized:+,.0f}",
+                        delta=f"{total_unrealized/total_cost:.2%}" if total_cost else None)
+            col4.metric("Cash", f"${cash:,.0f}")
+
+            # Donut chart of position weights
+            try:
+                import plotly.graph_objects as go
+                weights = {t: qty * prices.get(t, 0.0) for t, qty in holdings.items() if prices.get(t)}
+                if weights:
+                    fig = go.Figure(data=[go.Pie(
+                        labels=list(weights.keys()),
+                        values=list(weights.values()),
+                        hole=0.55,
+                        textinfo="label+percent",
+                    )])
+                    fig.update_layout(
+                        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                        font=dict(color="white"),
+                        margin=dict(l=20, r=20, t=40, b=20),
+                        title="Portfolio Weights (live)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            except ImportError:
+                st.caption("Install plotly>=5.20 for the portfolio donut chart.")
+        else:
+            st.info("No open positions in paper portfolio.")
+    else:
+        st.info("Run `ts paper-trade` to start a paper portfolio, then refresh live prices.")
+
+    # ── Live price table ──────────────────────────────────────────────────────
+    if prices:
+        st.divider()
+        st.subheader("Universe Live Prices")
+        # Compute change vs last close from features
+        last_close = {
+            r["ticker"]: float(r["adj_close"])
+            for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
+            if r.get("adj_close")
+        }
+        price_rows = []
+        for t, px in sorted(prices.items()):
+            lc = last_close.get(t)
+            chg = (px / lc - 1) if lc else None
+            price_rows.append({
+                "Ticker": t,
+                "Live Price": f"${px:.2f}",
+                "Last Close": f"${lc:.2f}" if lc else "—",
+                "Chg %": f"{chg:.2%}" if chg is not None else "—",
+            })
+        st.dataframe(pd.DataFrame(price_rows), use_container_width=True, height=400)
+
+    # Auto-refresh logic — rerun every 5 min
+    if auto_refresh:
+        import time as _time
+        _time.sleep(300)
+        st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Agent Analysis (V2)
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🤖 Agent Analysis":
+    st.header("🤖 Agent Analysis")
+    st.caption("ReAct multi-step reasoning chain · DeepSeek cloud → Ollama fallback")
+
+    tickers_available = sorted(cfg["universe"]["tickers"])
+    col_sel, col_cfg = st.columns([2, 2])
+    with col_sel:
+        agent_ticker = st.selectbox("Ticker", tickers_available, key="agent_ticker")
+        run_btn = st.button("▶ Run Agent Analysis", key="run_agent")
+    with col_cfg:
+        verbose = st.checkbox("Show full thought chain", value=True)
+        save_result = st.checkbox("Save result to reports/agent/", value=True)
+
+    if run_btn:
+        with st.spinner(f"Running ReAct agent for {agent_ticker}…"):
+            try:
+                from trading_system.ingestion.llm_extractor import LLMRouter, _default_router
+                from trading_system.agent import TradingAgentOrchestrator
+
+                router = _default_router()
+                orch = TradingAgentOrchestrator(cfg=cfg, llm_router=router)
+                result = orch.run_ticker_analysis(agent_ticker)
+
+                if save_result:
+                    out_dir = cfg.path("reports") / "agent"
+                    orch.save_result(result, output_dir=out_dir)
+
+                st.session_state["agent_result"] = result
+                st.session_state["agent_ticker_done"] = agent_ticker
+            except Exception as e:
+                st.error(f"Agent failed: {e}")
+
+    if "agent_result" in st.session_state:
+        result = st.session_state["agent_result"]
+        done_ticker = st.session_state.get("agent_ticker_done", "")
+
+        st.subheader(f"Results for {done_ticker}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Success", "✅" if result.success else "❌")
+        c2.metric("Steps", len(result.steps))
+        c3.metric("Backend", result.backend_used or "n/a")
+
+        if result.final_answer:
+            st.success(f"**Final Answer:** {result.final_answer}")
+
+        if verbose and result.steps:
+            st.divider()
+            st.subheader("Reasoning Chain")
+            for i, step in enumerate(result.steps, 1):
+                icon = "💭" if not step.action else "⚙️"
+                label = f"Step {i}: {icon} {step.action or 'Thought'}"
+                with st.expander(label, expanded=(i <= 2)):
+                    if step.thought:
+                        st.markdown(f"**Thought:** {step.thought}")
+                    if step.action:
+                        st.markdown(f"**Action:** `{step.action}`")
+                        st.code(str(step.action_input), language="json")
+                    if step.observation:
+                        obs = step.observation
+                        if len(obs) > 600:
+                            obs = obs[:600] + "…"
+                        st.markdown(f"**Observation:** {obs}")
+
+        # SHAP waterfall for the analyzed ticker
+        st.divider()
+        st.subheader("🔍 SHAP Explanation")
+        model_dir = cfg.path("reports") / "models"
+        if model_dir.exists():
+            shap_top = st.slider("Top N features", 5, 20, 12, key="shap_top_agent")
+            if st.button("Compute SHAP Waterfall", key="shap_agent_btn"):
+                with st.spinner("Computing SHAP…"):
+                    try:
+                        from trading_system.monitoring.shap_viz import compute_shap_waterfall, render_shap_waterfall_fig
+                        sd = compute_shap_waterfall(model_dir, features, done_ticker, top_n=shap_top)
+                        if sd:
+                            st.session_state["agent_shap"] = sd
+                        else:
+                            st.warning("SHAP returned no data.")
+                    except Exception as e:
+                        st.error(f"SHAP error: {e}")
+
+            if "agent_shap" in st.session_state:
+                from trading_system.monitoring.shap_viz import render_shap_waterfall_fig
+                sfig = render_shap_waterfall_fig(st.session_state["agent_shap"])
+                st.pyplot(sfig, use_container_width=True)
+        else:
+            st.info("No trained models found. Run `ts train` first.")
+
+    # Saved agent reports browser
+    st.divider()
+    st.subheader("Saved Agent Reports")
+    agent_dir = cfg.path("reports") / "agent"
+    if agent_dir.exists():
+        saved = sorted(agent_dir.glob("*.json"), reverse=True)
+        if saved:
+            names = [f.name for f in saved]
+            selected_ar = st.selectbox("Select saved report", names, key="agent_report_sel")
+            if selected_ar:
+                ar_data = json.loads((agent_dir / selected_ar).read_text())
+                with st.expander("Raw report JSON"):
+                    st.json(ar_data)
+                steps = ar_data.get("steps", [])
+                for i, step in enumerate(steps, 1):
+                    with st.expander(f"Step {i}: {step.get('action', 'Thought')}"):
+                        if step.get("thought"):
+                            st.markdown(f"**Thought:** {step['thought']}")
+                        if step.get("action"):
+                            st.markdown(f"**Action:** `{step['action']}` → `{step.get('action_input', '')}`")
+                        if step.get("observation"):
+                            st.markdown(f"**Observation:** {step['observation'][:400]}…")
+        else:
+            st.info("No saved agent reports yet. Run an analysis above.")
+    else:
+        st.info("No agent reports directory yet.")
 

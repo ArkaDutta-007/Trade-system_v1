@@ -813,5 +813,131 @@ def future_update(config: str = "configs/default.yaml"):
     rprint(f"[green]Updated {updated} future-predict session(s).[/green]")
 
 
+# ── V2: Agent commands ────────────────────────────────────────────────────────
+
+@app.command("agent-analyze")
+def agent_analyze(
+    ticker: str = typer.Argument(..., help="Symbol to analyze (e.g. AAPL)"),
+    config: str = "configs/default.yaml",
+    save: bool = typer.Option(True, "--save/--no-save", help="Save result JSON to reports/agent/"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full thought/action chain"),
+):
+    """Run the ReAct LLM agent for deep analysis of a single ticker.
+
+    The agent autonomously fetches news, gets the ML model score, computes
+    SHAP attribution, checks apprehension, live price, and economic calendar
+    before synthesizing a BUY/HOLD/SELL recommendation.
+
+    Uses DeepSeek cloud API with Ollama local fallback.
+    """
+    from rich.panel import Panel
+    from rich.console import Console
+    from .agent import TradingAgentOrchestrator
+
+    cfg = get_config(config)
+    console = Console()
+
+    rprint(f"[bold]Running agent analysis for [cyan]{ticker.upper()}[/cyan]…[/bold]")
+    orchestrator = TradingAgentOrchestrator(cfg)
+    result = orchestrator.run_ticker_analysis(ticker)
+
+    if verbose and result.steps:
+        for i, step in enumerate(result.steps, 1):
+            console.print(Panel(
+                f"[dim]{step.thought}[/dim]",
+                title=f"Step {i} — Thought",
+                border_style="dim",
+            ))
+            if step.action and step.action != "FINISH":
+                console.print(f"  [cyan]Action:[/cyan] {step.action}({step.action_input[:80]})")
+                console.print(f"  [yellow]Observation:[/yellow] {step.observation[:300]}")
+        rprint()
+
+    color = "green" if result.success else "yellow"
+    rprint(Panel(
+        result.final_answer or "No answer generated.",
+        title=f"[{color}]Agent Analysis: {ticker.upper()} (backend={result.backend_used})[/{color}]",
+        border_style=color,
+    ))
+
+    if save and result.success:
+        path = orchestrator.save_result(result)
+        rprint(f"[dim]Saved → {path}[/dim]")
+
+
+@app.command("agent-portfolio")
+def agent_portfolio(
+    config: str = "configs/default.yaml",
+    save: bool = typer.Option(True, "--save/--no-save", help="Save result JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run the ReAct agent to review the current paper portfolio.
+
+    The agent evaluates each held position using model scores, news sentiment,
+    and apprehension to recommend HOLD / ADD / EXIT actions.
+    """
+    from rich.panel import Panel
+    from rich.console import Console
+    from .agent import TradingAgentOrchestrator
+
+    cfg = get_config(config)
+    console = Console()
+
+    rprint("[bold]Running agent portfolio review…[/bold]")
+    orchestrator = TradingAgentOrchestrator(cfg)
+    results = orchestrator.run_portfolio_review()
+
+    if not results:
+        rprint("[yellow]Portfolio is empty or no broker state found.[/yellow]")
+        return
+
+    for result in results:
+        color = "green" if result.success else "yellow"
+        if verbose and result.steps:
+            for i, step in enumerate(result.steps, 1):
+                console.print(f"[dim]Step {i}[/dim] {step.action}: {step.observation[:200]}")
+
+        rprint(Panel(
+            result.final_answer or "No answer generated.",
+            title=f"[{color}]Portfolio Review (backend={result.backend_used})[/{color}]",
+            border_style=color,
+        ))
+
+        if save and result.success:
+            path = orchestrator.save_result(result)
+            rprint(f"[dim]Saved → {path}[/dim]")
+
+
+@app.command("agent-briefing")
+def agent_briefing(
+    config: str = "configs/default.yaml",
+    save: bool = typer.Option(True, "--save/--no-save", help="Save result JSON"),
+):
+    """Generate a daily market briefing via the ReAct agent.
+
+    The agent checks the economic calendar, reviews top model scores,
+    and synthesizes a morning market narrative with top picks and risks.
+    """
+    from rich.panel import Panel
+    from .agent import TradingAgentOrchestrator
+
+    cfg = get_config(config)
+    rprint("[bold]Generating daily market briefing…[/bold]")
+
+    orchestrator = TradingAgentOrchestrator(cfg)
+    result = orchestrator.run_daily_briefing()
+
+    color = "green" if result.success else "yellow"
+    rprint(Panel(
+        result.final_answer or "No briefing generated.",
+        title=f"[{color}]Daily Briefing (backend={result.backend_used})[/{color}]",
+        border_style=color,
+    ))
+
+    if save and result.success:
+        path = orchestrator.save_result(result)
+        rprint(f"[dim]Saved → {path}[/dim]")
+
+
 if __name__ == "__main__":
     app()

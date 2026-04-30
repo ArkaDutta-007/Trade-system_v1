@@ -38,6 +38,7 @@ dependencies = [
     "fredapi>=0.5",
     "aiohttp>=3.9",
     "beautifulsoup4>=4.12",
+    "plotly>=5.20",
 ]
 
 [project.optional-dependencies]

@@ -1,11 +1,15 @@
-"""Assemble the full feature matrix from OHLCV + optional event/macro inputs."""
+"""Assemble the full feature matrix from OHLCV + optional event/macro inputs.
+
+V2: Integrates economic calendar (FOMC, CPI, NFP) and earnings calendar
+as additional features: days_to_fomc, days_to_earnings, macro_event_imminent.
+"""
 from __future__ import annotations
 
 import polars as pl
 
 from .technical import compute_technical_features
 from .regimes import compute_regime_features
-from .event_features import aggregate_events_to_daily
+from .event_features import aggregate_events_to_daily, add_macro_calendar_features
 
 
 def add_targets(df: pl.DataFrame, horizons: tuple[int, ...] = (5, 20)) -> pl.DataFrame:
@@ -23,8 +27,11 @@ def build_feature_matrix(
     ohlcv: pl.DataFrame,
     events: pl.DataFrame | None = None,
     apprehension: pl.DataFrame | None = None,
+    economic_calendar: pl.DataFrame | None = None,
+    earnings_calendar: pl.DataFrame | None = None,
     benchmark: str = "SPY",
     horizons: tuple[int, ...] = (5, 20),
+    add_macro_features: bool = True,
 ) -> pl.DataFrame:
     """End-to-end feature build. Output is one row per (ticker, date).
 
@@ -40,10 +47,18 @@ def build_feature_matrix(
     apprehension:
         Optional DataFrame from compute_apprehension_scores().
         Produces: apprehension_score, outlook, apprehension_drivers.
+    economic_calendar:
+        V2: Optional DataFrame from fetch_economic_calendar().
+        Produces: days_to_fomc, macro_event_imminent.
+    earnings_calendar:
+        V2: Optional DataFrame from build_earnings_calendar().
+        Produces: days_to_earnings.
     benchmark:
         Benchmark ticker for regime features.
     horizons:
         Forward-return horizons to attach as targets.
+    add_macro_features:
+        V2: If True and calendars are provided, adds macro proximity features.
     """
     feat = compute_technical_features(ohlcv)
     feat = compute_regime_features(feat, benchmark=benchmark)
@@ -68,6 +83,20 @@ def build_feature_matrix(
         feat = feat.join(app, on=["date", "ticker"], how="left").with_columns(
             pl.col("apprehension_score").fill_null(0.0),
             pl.col("outlook").fill_null("stable"),
+        )
+
+    # V2: Macro + earnings calendar features
+    if add_macro_features and (economic_calendar is not None or earnings_calendar is not None):
+        feat = add_macro_calendar_features(
+            feat,
+            economic_calendar=economic_calendar,
+            earnings_calendar=earnings_calendar,
+        )
+        feat = feat.with_columns(
+            pl.col("days_to_fomc").fill_nan(999.0),
+            pl.col("days_to_earnings").fill_nan(999.0),
+            pl.col("macro_event_imminent").fill_null(False),
+            pl.col("hist_earnings_sentiment_mean").fill_nan(0.0),
         )
 
     return feat

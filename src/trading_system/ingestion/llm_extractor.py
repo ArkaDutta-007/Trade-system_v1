@@ -1,17 +1,17 @@
 """DeepSeek-powered structured extraction from news/SEC headlines.
 
-Replaces the OpenAI placeholder that was referenced in configs/default.yaml.
-Uses the DeepSeek V4 API (OpenAI-compatible endpoint) to turn raw headline text
-into structured event fields: event_type, sentiment, confidence, magnitude,
-time_horizon, risk_flags, and a clean one-line summary.
+V2: Adds OllamaClient and LLMRouter for local-fallback support.
+Primary: DeepSeek V4 cloud API.
+Fallback: Ollama local server (deepseek-r1, llama3, etc.).
 
-Set DEEPSEEK_API_KEY in ~/.zshrc or .env. Without a key the function returns
-None and the caller falls back to rule-based naive_sentiment().
+Set DEEPSEEK_API_KEY and optionally OLLAMA_HOST / OLLAMA_MODEL in env.
+Without any LLM key, functions fall back to rule-based naive_sentiment().
 """
 from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -21,12 +21,165 @@ from ..utils import get_logger
 logger = get_logger(__name__)
 
 # DeepSeek public API — OpenAI-compatible format.
-# "deepseek-chat" always resolves to their latest released chat model (V3/V4).
-# Swap to "deepseek-reasoner" for their highest-reasoning R1-class model
-# (slower, ~4× more expensive, but better for nuanced filings analysis).
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"   # latest V4 chat (fastest / cheapest)
 DEEPSEEK_REASONING_MODEL = "deepseek-reasoner"  # R1-class — highest capability
+
+# ---------------------------------------------------------------------------
+# V2: OllamaClient — calls a local Ollama server
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OllamaClient:
+    """Thin wrapper around the Ollama REST API for local inference.
+
+    Compatible with any model served by `ollama serve`:
+      deepseek-r1:7b, deepseek-r1:14b, llama3.3, mistral, etc.
+
+    The /api/chat endpoint accepts OpenAI-style messages and returns
+    a completion.  No streaming — uses stream=false for simplicity.
+    """
+
+    host: str = field(default_factory=lambda: os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
+    model: str = field(default_factory=lambda: os.environ.get("OLLAMA_MODEL", "deepseek-r1:7b"))
+    timeout: int = 60
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.1,
+        max_tokens: int = 512,
+    ) -> str:
+        """Send a chat completion request and return the assistant's text."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }
+        resp = requests.post(
+            f"{self.host.rstrip('/')}/api/chat",
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["message"]["content"]
+
+    def is_available(self) -> bool:
+        """Quick health check — returns True if Ollama is reachable."""
+        try:
+            resp = requests.get(f"{self.host.rstrip('/')}/api/tags", timeout=3)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# V2: LLMRouter — DeepSeek cloud primary, Ollama local fallback
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LLMRouter:
+    """Routes LLM calls: tries DeepSeek cloud first, falls back to Ollama.
+
+    Usage::
+
+        router = LLMRouter()  # picks up env vars automatically
+        text = router.complete(messages=[...])
+
+    The router automatically falls back to Ollama if:
+      - DEEPSEEK_API_KEY is not set
+      - DeepSeek API returns an HTTP error or times out
+    """
+
+    deepseek_api_key: str | None = field(
+        default_factory=lambda: os.environ.get("DEEPSEEK_API_KEY")
+    )
+    deepseek_model: str = DEEPSEEK_DEFAULT_MODEL
+    ollama: OllamaClient = field(default_factory=OllamaClient)
+    _active_backend: str = field(default="unknown", init=False, repr=False)
+
+    @property
+    def backend(self) -> str:
+        """Returns 'deepseek', 'ollama', or 'none' depending on what's available."""
+        if self.deepseek_api_key:
+            return "deepseek"
+        if self.ollama.is_available():
+            return "ollama"
+        return "none"
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.1,
+        max_tokens: int = 512,
+        require_json: bool = False,
+    ) -> str | None:
+        """Try DeepSeek first, fall back to Ollama, return None if both fail.
+
+        Parameters
+        ----------
+        messages:
+            OpenAI-style chat messages list.
+        temperature:
+            Sampling temperature.
+        max_tokens:
+            Maximum tokens to generate.
+        require_json:
+            If True, appends a JSON instruction for Ollama (DeepSeek handles
+            this via response_format natively).
+        """
+        # --- DeepSeek cloud path ---
+        if self.deepseek_api_key:
+            payload: dict[str, Any] = {
+                "model": self.deepseek_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if require_json:
+                payload["response_format"] = {"type": "json_object"}
+            try:
+                resp = requests.post(
+                    DEEPSEEK_BASE_URL,
+                    headers={
+                        "Authorization": f"Bearer {self.deepseek_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                self._active_backend = "deepseek"
+                return resp.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                logger.warning(f"DeepSeek API failed ({e}), falling back to Ollama…")
+
+        # --- Ollama local fallback ---
+        if self.ollama.is_available():
+            try:
+                msgs = list(messages)
+                if require_json and not any("JSON" in str(m.get("content", "")) for m in msgs):
+                    msgs[-1] = {
+                        **msgs[-1],
+                        "content": msgs[-1]["content"] + "\nRespond with ONLY valid JSON, no other text.",
+                    }
+                self._active_backend = "ollama"
+                return self.ollama.complete(msgs, temperature=temperature, max_tokens=max_tokens)
+            except Exception as e:
+                logger.warning(f"Ollama fallback failed: {e}")
+
+        self._active_backend = "none"
+        return None
+
+
+def _default_router() -> LLMRouter:
+    """Create an LLMRouter using environment variable configuration."""
+    return LLMRouter()
 
 _SYSTEM_PROMPT = """\
 You are a financial event classifier. Given a news headline (and optional snippet) \
@@ -54,24 +207,40 @@ def enrich_event(
     headline: str,
     api_key: str | None = None,
     model: str = DEEPSEEK_DEFAULT_MODEL,
+    router: LLMRouter | None = None,
 ) -> dict[str, Any] | None:
-    """Call DeepSeek to extract structured event fields from a single headline.
+    """Extract structured event fields from a single headline.
 
-    Returns a dict with the enriched fields, or None if the API key is absent
-    or the call fails (caller should apply naive_sentiment() fallback).
+    V2: accepts an optional LLMRouter for DeepSeek-with-Ollama-fallback.
+    Falls back to rule-based naive_sentiment() if all LLM calls fail.
+
+    Returns a dict with the enriched fields, or None if LLM unavailable.
     """
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": _USER_TMPL.format(
+            ticker=ticker, headline=headline[:500]
+        )},
+    ]
+
+    # V2: use LLMRouter if provided
+    if router is not None:
+        content = router.complete(messages, temperature=0.1, max_tokens=256, require_json=True)
+        if content:
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                logger.debug(f"LLMRouter JSON parse failed for '{headline[:60]}'")
+        return None
+
+    # Legacy direct DeepSeek path (backward compat)
     api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         return None
 
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": _USER_TMPL.format(
-                ticker=ticker, headline=headline[:500]
-            )},
-        ],
+        "messages": messages,
         "temperature": 0.1,
         "max_tokens": 256,
         "response_format": {"type": "json_object"},
@@ -99,29 +268,41 @@ def batch_enrich_events(
     rows: list[dict[str, Any]],
     api_key: str | None = None,
     model: str = DEEPSEEK_DEFAULT_MODEL,
+    router: LLMRouter | None = None,
 ) -> list[dict[str, Any]]:
     """Enrich a list of raw event rows in-place.
 
     Each row must have "tickers" (list) and "summary" (raw headline string).
     Returns the same list with sentiment/confidence/magnitude/etc. populated.
-    Falls back to naive_sentiment() when DeepSeek is unavailable.
+    Falls back to naive_sentiment() when all LLM calls fail.
+
+    V2: accepts an optional LLMRouter for DeepSeek-with-Ollama-fallback.
     """
     from ..features.sentiment import naive_sentiment
 
-    api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
-    use_llm = bool(api_key)
-    if not use_llm:
-        logger.info("DEEPSEEK_API_KEY not set — using rule-based sentiment fallback.")
+    # Determine if LLM is available
+    _router = router
+    if _router is None:
+        api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+        use_llm = bool(api_key)
+        if not use_llm:
+            logger.info("No LLM available — using rule-based sentiment fallback.")
+    else:
+        use_llm = _router.backend != "none"
+        if not use_llm:
+            logger.info("LLMRouter has no available backend — using rule-based fallback.")
 
     enriched = []
     for row in rows:
         ticker = (row.get("tickers") or ["UNKNOWN"])[0]
         headline = row.get("summary") or ""
 
+        result = None
         if use_llm:
-            result = enrich_event(ticker, headline, api_key=api_key, model=model)
-        else:
-            result = None
+            if _router is not None:
+                result = enrich_event(ticker, headline, router=_router)
+            else:
+                result = enrich_event(ticker, headline, api_key=api_key, model=model)
 
         if result:
             row = {**row, **{
@@ -134,7 +315,6 @@ def batch_enrich_events(
                 "summary":    result.get("summary", headline)[:500],
             }}
         else:
-            # Rule-based fallback
             row = {**row, "sentiment": naive_sentiment(headline)}
 
         enriched.append(row)
@@ -176,8 +356,11 @@ def compute_apprehension_scores(
     days: int = 7,
     api_key: str | None = None,
     model: str = DEEPSEEK_DEFAULT_MODEL,
+    router: LLMRouter | None = None,
 ) -> "pl.DataFrame":
-    """Compute one apprehension score per ticker using a batched DeepSeek call.
+    """Compute one apprehension score per ticker using LLM or rule-based fallback.
+
+    V2: accepts an optional LLMRouter for DeepSeek-with-Ollama-fallback.
 
     Parameters
     ----------
@@ -252,7 +435,7 @@ def compute_apprehension_scores(
         headlines_str = "\n".join(parts)
 
         # Rule-based fallback (no LLM key)
-        if not api_key:
+        if not api_key and router is None:
             mean_sent = float(sub["sentiment"].mean() or 0.0)
             mean_mag = float(sub["magnitude"].mean() or 0.0)
             total_flags = sum(len(flags or []) for flags in sub["risk_flags"].to_list())
@@ -267,31 +450,37 @@ def compute_apprehension_scores(
             })
             continue
 
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": _APPREHENSION_SYSTEM},
-                {"role": "user", "content": _APPREHENSION_USER_TMPL.format(
-                    ticker=ticker, days=days, n=n, headlines=headlines_str
-                )},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 200,
-            "response_format": {"type": "json_object"},
-        }
+        messages = [
+            {"role": "system", "content": _APPREHENSION_SYSTEM},
+            {"role": "user", "content": _APPREHENSION_USER_TMPL.format(
+                ticker=ticker, days=days, n=n, headlines=headlines_str
+            )},
+        ]
 
         try:
-            resp = requests.post(
-                DEEPSEEK_BASE_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=20,
-            )
-            resp.raise_for_status()
-            result = json.loads(resp.json()["choices"][0]["message"]["content"])
+            if router is not None:
+                content = router.complete(messages, temperature=0.1, max_tokens=200, require_json=True)
+            else:
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "max_tokens": 200,
+                    "response_format": {"type": "json_object"},
+                }
+                resp = requests.post(
+                    DEEPSEEK_BASE_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+
+            result = json.loads(content) if content else {}
             rows.append({
                 "date": today,
                 "ticker": ticker,
