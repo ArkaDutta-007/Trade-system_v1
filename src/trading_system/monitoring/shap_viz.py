@@ -138,7 +138,7 @@ def compute_shap_waterfall(
 
 def render_shap_waterfall_fig(
     shap_data: dict[str, Any],
-    figsize: tuple[float, float] = (10, 6),
+    figsize: tuple[float, float] | None = None,
     dark_theme: bool = True,
 ) -> "matplotlib.figure.Figure":  # type: ignore[name-defined]
     """Render a waterfall chart from shap_data as a matplotlib Figure.
@@ -151,6 +151,7 @@ def render_shap_waterfall_fig(
         Output dict from compute_shap_waterfall().
     figsize:
         Matplotlib figure size (width, height) in inches.
+        Defaults to auto-sized based on number of features.
     dark_theme:
         Use dark background (matches Streamlit dark theme).
 
@@ -158,8 +159,6 @@ def render_shap_waterfall_fig(
     -------
     matplotlib.figure.Figure
     """
-    import matplotlib
-    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     import numpy as np
@@ -179,35 +178,32 @@ def render_shap_waterfall_fig(
     neg_color = "#e63946"  # red
     base_color = "#aaaaaa"
 
+    # Auto-size height based on number of features so labels never overlap
+    if figsize is None:
+        figsize = (10, max(6, n * 0.55 + 2))
+
     fig, ax = plt.subplots(figsize=figsize)
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
 
     # Build waterfall: start at base_value, accumulate SHAP contributions
-    # Bars are drawn bottom-to-top (reversed index for horizontal waterfall)
-    running = base
-    bar_lefts = []
-    bar_widths = []
-    bar_colors = []
-    bar_labels = []
-
     # Reverse order: top feature at top of chart
     rev_names = list(reversed(names))
     rev_values = list(reversed(values))
     rev_feat_vals = list(reversed(feat_vals))
 
-    running_fwd = base
-    positions = []
+    bar_colors = []
+    bar_labels = []
     lefts = []
-    for i, (v, fn, fv) in enumerate(zip(rev_values, rev_names, rev_feat_vals)):
+    running_fwd = base
+    for v, fn, fv in zip(rev_values, rev_names, rev_feat_vals):
         lefts.append(running_fwd)
-        positions.append(i)
         bar_colors.append(pos_color if v >= 0 else neg_color)
         bar_labels.append(f"{fn}={fv:.3f}  ({'+' if v >= 0 else ''}{v:.4f})")
         running_fwd += v
 
     y_pos = list(range(n))
-    bars = ax.barh(
+    ax.barh(
         y_pos,
         rev_values,
         left=lefts,
@@ -251,6 +247,8 @@ def render_shap_waterfall_fig(
     )
     legend.get_frame().set_facecolor(bg_color)
 
+    # Reserve left margin so feature labels aren't clipped
+    fig.subplots_adjust(left=0.45)
     fig.tight_layout()
     return fig
 

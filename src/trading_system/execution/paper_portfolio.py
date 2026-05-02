@@ -307,6 +307,36 @@ class PaperPortfolio:
         logger.info(f"Backfill complete: {replayed} days replayed")
         return replayed
 
+    # ── Reset ─────────────────────────────────────────────────────────────
+
+    def reset(self, initial_cash: float) -> None:
+        """Wipe the portfolio and start fresh with a new starting capital.
+
+        **Irreversible** — deletes the equity log parquet and broker journal,
+        clears all holdings and trade history, then writes an empty journal.
+
+        Parameters
+        ----------
+        initial_cash:
+            New starting cash balance (e.g. 1000.0 for $1,000).
+        """
+        # Remove persisted files
+        if self.equity_log_path.exists():
+            self.equity_log_path.unlink()
+        if self.journal_path.exists():
+            self.journal_path.unlink()
+
+        # Reset in-memory broker state
+        self.broker.holdings.clear()
+        self.broker.trades.clear()
+        self.broker.cash = initial_cash
+        self.broker._killed = False
+        self._initial_cash = initial_cash
+
+        # Write a fresh empty journal
+        self.broker._persist()
+        logger.info(f"PaperPortfolio reset with ${initial_cash:,.2f} starting capital.")
+
 
 class _SyntheticDecision:
     """Minimal stand-in for DecisionResult used during backfill replay."""

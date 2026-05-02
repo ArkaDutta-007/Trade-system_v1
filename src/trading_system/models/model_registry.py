@@ -89,3 +89,33 @@ def best_ensemble_artifact(registry: Path | str | None = None) -> str | None:
         except Exception:
             pass
     return all_models[-1]  # fallback: latest
+
+
+def load_latest_model(
+    registry: Path | str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Load the most recent ensemble (or latest) model from the registry.
+
+    Returns
+    -------
+    (model, meta) where meta is a plain dict with at least:
+        name, feature_columns, target, created_at, model_type
+    plus any extra keys stored in ModelArtifact.metadata.
+
+    Raises
+    ------
+    FileNotFoundError if the registry is empty or doesn't exist.
+    """
+    reg = Path(registry or DEFAULT_REGISTRY)
+    name = best_ensemble_artifact(reg)
+    if name is None:
+        raise FileNotFoundError(f"No trained models found in {reg}")
+    model, artifact = load_model(name, reg)
+    meta: dict[str, Any] = {
+        "name": artifact.name,
+        "feature_columns": artifact.feature_columns,
+        "target": artifact.target,
+        "created_at": artifact.created_at,
+        **artifact.metadata,
+    }
+    return model, meta

@@ -293,12 +293,14 @@ elif page == "📋 Decision Reports":
         selected = st.selectbox("Select report", report_names)
         sel_path = reports_dir / selected
 
-        col_report, col_json = st.columns([2, 1])
+        tab_report, tab_signals, tab_agent = st.tabs(
+            ["📄 Full Report", "📊 Signals", "🤖 Agent Chain"]
+        )
 
-        with col_report:
+        with tab_report:
             st.markdown(sel_path.read_text())
 
-        with col_json:
+        with tab_signals:
             json_name = selected.replace(".md", ".json")
             json_path = reports_dir / json_name
             if json_path.exists():
@@ -306,38 +308,47 @@ elif page == "📋 Decision Reports":
                 stance = data.get("stance", "HOLD")
                 color = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(stance, "⚪")
                 st.subheader(f"{color} {data.get('ticker')} — {stance}")
-                st.metric("Confidence", f"{data.get('confidence', 0):.0%}")
-                st.metric("5d Forecast", f"{(data.get('forecast_5d') or 0)*100:.2f}%")
-                st.metric("20d Forecast", f"{(data.get('forecast_20d') or 0)*100:.2f}%")
-                st.metric("Score Source", data.get("score_source", "n/a"))
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Confidence", f"{data.get('confidence', 0):.0%}")
+                c2.metric("5d Forecast", f"{(data.get('forecast_5d') or 0)*100:.2f}%")
+                c3.metric("20d Forecast", f"{(data.get('forecast_20d') or 0)*100:.2f}%")
+                c4.metric("Score Source", data.get("score_source", "n/a"))
                 with st.expander("Raw JSON"):
                     st.json(data)
+            else:
+                st.info("No JSON file for this report.")
 
-            # V2: Show agent reasoning chain if available
+        with tab_agent:
             agent_reports_dir = cfg.path("reports") / "agent"
-            if agent_reports_dir.exists():
-                ticker_name = selected.split("_")[0]
-                agent_files = sorted(agent_reports_dir.glob(f"{ticker_name}_*.json"), reverse=True)
-                if agent_files:
-                    st.divider()
-                    st.subheader("🤖 Agent Reasoning Chain")
-                    agent_data = json.loads(agent_files[0].read_text())
-                    st.caption(f"Task: {agent_data.get('task', '')}")
-                    steps = agent_data.get("steps", [])
-                    for i, step in enumerate(steps, 1):
-                        thought = step.get("thought", "")
-                        action = step.get("action", "")
-                        obs = step.get("observation", "")
-                        with st.expander(f"Step {i}: {action or 'Thought'}", expanded=(i == 1)):
-                            if thought:
-                                st.markdown(f"**Thought:** {thought}")
-                            if action:
-                                st.markdown(f"**Action:** `{action}`  →  `{step.get('action_input', '')}`")
-                            if obs:
-                                st.markdown(f"**Observation:** {obs}")
-                    final = agent_data.get("final_answer", "")
-                    if final:
-                        st.success(f"**Final Answer:** {final}")
+            ticker_name = selected.split("_")[0]
+            agent_files = (
+                sorted(agent_reports_dir.glob(f"{ticker_name}_*.json"), reverse=True)
+                if agent_reports_dir.exists() else []
+            )
+            if agent_files:
+                agent_data = json.loads(agent_files[0].read_text())
+                st.caption(f"Task: {agent_data.get('task', '')}  ·  {agent_files[0].name}")
+                steps = agent_data.get("steps", [])
+                for i, step in enumerate(steps, 1):
+                    thought = step.get("thought", "")
+                    action = step.get("action", "")
+                    obs = step.get("observation", "")
+                    with st.expander(f"Step {i}: {action or 'Thought'}", expanded=(i == 1)):
+                        if thought:
+                            st.markdown(f"**Thought:** {thought}")
+                        if action:
+                            st.markdown(f"**Action:** `{action}`  →  `{step.get('action_input', '')}`")
+                        if obs:
+                            st.text_area("Observation", obs, disabled=True, height=120,
+                                         key=f"dr_obs_{i}")
+                final = agent_data.get("final_answer", "")
+                if final:
+                    st.success(f"**Final Answer:** {final}")
+            else:
+                st.info(
+                    f"No agent reports for **{ticker_name}** yet.  "
+                    f"Run `ts agent-analyze {ticker_name}` or use the 🤖 Agent Analysis page."
+                )
 
         # Summary table of all reports
         st.divider()
@@ -428,7 +439,7 @@ elif page == "🌐 Universe Overview":
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "💼 Paper Portfolio":
     st.header("💼 Paper Portfolio")
-    st.caption("Simulated portfolio driven by ensemble ML signals · $100k starting capital")
+    st.caption("Simulated portfolio driven by ensemble ML signals · configurable starting capital")
 
     equity_log_path = cfg.path("data_gold") / "paper_equity_log.parquet"
     journal_path = cfg.path("data_gold") / "paper_portfolio_journal.json"
@@ -452,6 +463,20 @@ elif page == "💼 Paper Portfolio":
         n_days = len(eq_pd)
         cagr = (end_eq / start_eq) ** (252 / max(n_days, 1)) - 1 if n_days > 1 else 0.0
 
+        # ── Metric Glossary ────────────────────────────────────────────────
+        with st.expander("📖 What do these metrics mean?", expanded=False):
+            st.markdown("""
+| Metric | What it means |
+|--------|---------------|
+| **Equity** | Total portfolio value = cash + all open positions at current prices |
+| **CAGR** | *Compound Annual Growth Rate* — your annualised % return assuming reinvestment |
+| **Max Drawdown** | Worst peak-to-trough loss ever reached, e.g. −25 % means the portfolio once fell 25 % from its highest point |
+| **Trading Days** | Number of market days the simulation covers |
+| **Peak Equity** | Highest total value ever recorded |
+| **1 m / 3 m / 6 m / 1 y** | Rolling return over that look-back period ending today |
+| **Unrealized P&L** | Market value of open positions minus what you paid for them |
+""")
+
         c1, c2, c3, c4, c5 = st.columns(5)
         color = "normal" if total_return >= 0 else "inverse"
         c1.metric("Equity", f"${end_eq:,.0f}", delta=f"{total_return:.2%}")
@@ -459,6 +484,36 @@ elif page == "💼 Paper Portfolio":
         c3.metric("Max Drawdown", f"{max_dd:.2%}")
         c4.metric("Trading Days", str(n_days))
         c5.metric("Peak Equity", f"${peak:,.0f}")
+
+        st.divider()
+
+        # ── Investment Simulator ──────────────────────────────────────────────
+        st.subheader("💰 Investment Simulator")
+        st.caption(
+            "Scales the portfolio's actual % return to any starting capital. "
+            "This is a view-only estimate — to re-simulate from scratch use `ts paper-trade --backfill`."
+        )
+        sim_capital = st.slider(
+            "Starting capital",
+            min_value=100, max_value=50_000, value=1_000, step=100,
+            format="$%d",
+            key="sim_capital",
+        )
+        if start_eq and start_eq > 0:
+            sim_end = sim_capital * (end_eq / start_eq)
+            sim_gain = sim_end - sim_capital
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Starting Capital", f"${sim_capital:,.0f}")
+            sc2.metric("Would Be Worth Today", f"${sim_end:,.2f}",
+                       delta=f"${sim_gain:+,.2f}")
+            sc3.metric("Total Return", f"{total_return:.2%}")
+            scaled_eq = eq_pd["equity"] / start_eq * sim_capital
+            st.line_chart(
+                pd.DataFrame({"Scaled Portfolio ($)": scaled_eq}),
+                use_container_width=True,
+            )
+        else:
+            st.info("No equity history to scale.")
 
         st.divider()
 
@@ -550,6 +605,30 @@ elif page == "💼 Paper Portfolio":
                         st.caption(f"Total live value: **${total_live_value:,.0f}**  (🟢 = live price  🔴 = last close)")
                 else:
                     st.info("No open positions.")
+
+        # ── Portfolio Management ──────────────────────────────────────────────
+        st.divider()
+        with st.expander("⚙️ Portfolio Management (Reset)", expanded=False):
+            st.warning(
+                "**Resetting is irreversible.** The equity log and all trade history will be deleted. "
+                "Use this to start a fresh paper portfolio with a new starting capital."
+            )
+            reset_capital = st.number_input(
+                "New starting capital ($)",
+                min_value=100, max_value=50_000,
+                value=1_000, step=100,
+                key="reset_capital_input",
+            )
+            if st.button("🔄 Reset Paper Portfolio", type="secondary", key="reset_pp_btn"):
+                from trading_system.execution.paper_portfolio import PaperPortfolio
+                pp = PaperPortfolio(
+                    journal_path=journal_path,
+                    equity_log_path=equity_log_path,
+                    initial_cash=float(reset_capital),
+                )
+                pp.reset(float(reset_capital))
+                st.success(f"Portfolio reset with **${reset_capital:,.0f}** starting capital. Reload the page to see the empty log.")
+                st.cache_data.clear()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Model Comparison
@@ -926,10 +1005,8 @@ elif page == "🤖 Agent Analysis":
                         st.markdown(f"**Action:** `{step.action}`")
                         st.code(str(step.action_input), language="json")
                     if step.observation:
-                        obs = step.observation
-                        if len(obs) > 600:
-                            obs = obs[:600] + "…"
-                        st.markdown(f"**Observation:** {obs}")
+                        st.text_area("Observation", step.observation, disabled=True,
+                                     height=120, key=f"aa_obs_{i}")
 
         # SHAP waterfall for the analyzed ticker
         st.divider()
@@ -977,7 +1054,8 @@ elif page == "🤖 Agent Analysis":
                         if step.get("action"):
                             st.markdown(f"**Action:** `{step['action']}` → `{step.get('action_input', '')}`")
                         if step.get("observation"):
-                            st.markdown(f"**Observation:** {step['observation'][:400]}…")
+                            st.text_area("Observation", step["observation"], disabled=True,
+                                         height=120, key=f"ar_obs_{i}")
         else:
             st.info("No saved agent reports yet. Run an analysis above.")
     else:
