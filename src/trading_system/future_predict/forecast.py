@@ -1,20 +1,28 @@
 """Future prediction sessions.
 
 Each session lives in future_predict/YYYY-MM-DD/ and contains:
-  forecast.json       — all ticker scores, horizon target dates, $10k portfolio allocation
+  forecast.json       — all ticker scores, horizon target dates, portfolio allocation
   equity_log.parquet  — daily MTM equity snapshots
 
-Design rules for the $10k portfolio
-  - Never deploy more than 60% of budget at once (keep 40% liquid)
-  - Max 10% of budget per single position
-  - Take the top-ranked BUY signals up to TOP_N positions
-  - Cash never goes negative
+Dynamic allocation rules
+  - Keep at least MIN_CASH_RESERVE_PCT (25%) as liquid "dry powder" at all times.
+  - Three conviction tiers based on rank:
+      Tier 1 (top 5)   → up to 15% of budget each
+      Tier 2 (next 10) → up to 9%  of budget each
+      Tier 3 (rest)    → up to 5%  of budget each
+  - Within each tier, size is proportional to model score AND inversely proportional
+    to realised volatility (lower-vol names get a bigger slice).
+  - If fewer than MIN_POSITIONS quality signals exist, intentionally under-deploy
+    and keep the excess as dry powder — it can be redeployed next daily run.
+  - `redeploy_cash()` scans the reserve each day and adds/tops-up positions when
+    strong signals emerge that weren't in the original forecast.
 """
 from __future__ import annotations
 
 import json
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -28,10 +36,18 @@ HORIZONS: dict[str, int] = {
     "12m": 252,
 }
 
-MAX_DEPLOY_PCT   = 0.60   # deploy at most 60% initially; keep 40% liquid
-MAX_POSITION_PCT = 0.10   # max 10% of budget per position
-TOP_N            = 15     # max number of long positions
-MIN_SCORE        = 0.003  # minimum ensemble score to open a BUY
+MIN_CASH_RESERVE_PCT = 0.25   # always keep at least 25% as dry powder
+TOP_N                = 20     # consider up to 20 long candidates
+MIN_SCORE            = 0.003  # minimum ensemble score to open a BUY
+REDEPLOY_MIN_SCORE   = 0.005  # higher bar for redeployment signals
+MAX_SCORE_CAP        = 0.05   # cap score when computing weight (prevents 1 pos dominating)
+
+# Tier definitions: (max_positions_in_tier, max_pct_of_budget_per_pos)
+TIERS = [
+    (5,  0.15),   # Tier 1: top 5 → up to 15% each
+    (10, 0.09),   # Tier 2: next 10 → up to 9% each
+    (5,  0.05),   # Tier 3: remaining 5 → up to 5% each
+]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,6 +75,84 @@ def _scores_from_model(model, X: np.ndarray, best_variant: str) -> np.ndarray:
     else:
         arr = raw
     return np.asarray(arr).flatten()
+
+
+def _dynamic_allocate(
+    buy_candidates: list[tuple[str, float]],
+    prices: dict[str, float],
+    volatilities: dict[str, float],
+    budget: float,
+) -> tuple[list[dict], float]:
+    """Dynamic, volatility-adjusted, score-proportional allocation.
+
+    Strategy
+    --------
+    * Keep MIN_CASH_RESERVE_PCT (25%) as permanent dry powder.
+    * Remaining 75% is "deployable cap".
+    * Candidates are processed tier by tier (best scores first).
+    * Within each tier, allocation = budget × tier_max_pct × score_weight × vol_adj
+      where score_weight = clipped_score / MAX_SCORE_CAP (0→1 scaling)
+            vol_adj      = 0.20 / realised_vol  (low-vol → larger alloc)
+    * Allocation is further clipped so total deployed never exceeds deployable cap.
+    * If a candidate slot is too small (<$50) or budget is exhausted we stop.
+
+    Returns (positions_list, cash_reserved).
+    """
+    max_deploy   = budget * (1.0 - MIN_CASH_RESERVE_PCT)
+    min_position = max(50.0, budget * 0.005)  # don't open positions < 0.5% of budget
+    deployed     = 0.0
+    positions: list[dict] = []
+
+    # Assign tier to each candidate (0-indexed rank)
+    tier_boundaries = []
+    cumulative = 0
+    for tier_size, _ in TIERS:
+        tier_boundaries.append(cumulative)
+        cumulative += tier_size
+    tier_boundaries.append(cumulative)
+
+    def _get_tier(rank: int) -> tuple[int, float]:
+        for i, (_, max_pct) in enumerate(TIERS):
+            lo = tier_boundaries[i]
+            hi = tier_boundaries[i + 1]
+            if lo <= rank < hi:
+                return i, max_pct
+        return len(TIERS) - 1, TIERS[-1][1]
+
+    for rank, (ticker, score) in enumerate(buy_candidates[:TOP_N]):
+        px = prices.get(ticker, 0.0)
+        if px <= 0:
+            continue
+        remaining = max_deploy - deployed
+        if remaining < min_position:
+            break
+
+        _, tier_max_pct = _get_tier(rank)
+
+        # Score weight: map score into [0, 1] using cap
+        score_weight = min(float(score) / MAX_SCORE_CAP, 1.0)
+
+        # Volatility adjustment: prefer lower-vol tickers
+        vol = volatilities.get(ticker, 0.20)
+        vol_adj = min(0.20 / max(vol, 0.04), 2.5)  # 1.0 at 20% vol, ≤2.5x
+
+        raw_alloc = budget * tier_max_pct * score_weight * vol_adj
+        alloc     = max(min_position, min(raw_alloc, budget * tier_max_pct, remaining))
+
+        shares = alloc / px
+        deployed += alloc
+        positions.append({
+            "ticker":      ticker,
+            "score":       round(float(score), 6),
+            "tier":        _get_tier(rank)[0] + 1,
+            "entry_price": round(px, 4),
+            "allocated":   round(alloc, 2),
+            "shares":      round(shares, 6),
+            "vol_20d":     round(vol, 4),
+        })
+
+    cash_reserved = budget - deployed
+    return positions, cash_reserved
 
 
 def _append_equity_row(
@@ -140,39 +234,27 @@ def run_forecast(
 
     scored = sorted(zip(tickers, scores_arr.tolist()), key=lambda x: x[1], reverse=True)
 
+    # ── Extract realised volatilities for sizing ───────────────────────────
+    vol_col = "vol_20d" if "vol_20d" in today_feat.columns else None
+    volatilities: dict[str, float] = {}
+    if vol_col:
+        for row in today_feat.select(["ticker", vol_col]).to_dicts():
+            v = row.get(vol_col)
+            if v and float(v) > 0:
+                volatilities[row["ticker"]] = float(v)
+
     # ── Horizon target dates ───────────────────────────────────────────────
     horizon_dates = {
         label: _add_trading_days(prediction_date, td).isoformat()
         for label, td in HORIZONS.items()
     }
 
-    # ── Allocate budget (greedy, rank-ordered) ─────────────────────────────
-    max_deploy  = budget * MAX_DEPLOY_PCT
-    max_per_pos = budget * MAX_POSITION_PCT
-    positions: list[dict] = []
-    deployed = 0.0
-
-    buy_candidates = [(t, s) for t, s in scored if s >= MIN_SCORE][:TOP_N]
-    for ticker, score in buy_candidates:
-        px = prices.get(ticker)
-        if not px or px <= 0:
-            continue
-        alloc = min(max_per_pos, max_deploy - deployed)
-        if alloc < 50.0:
-            break
-        shares = alloc / px
-        deployed += alloc
-        positions.append({
-            "ticker":      ticker,
-            "score":       round(float(score), 6),
-            "entry_price": round(px, 4),
-            "allocated":   round(alloc, 2),
-            "shares":      round(shares, 6),
-        })
-        if deployed >= max_deploy:
-            break
-
-    cash_reserved = budget - deployed
+    # ── Dynamic allocation ─────────────────────────────────────────────────
+    buy_candidates = [(t, s) for t, s in scored if s >= MIN_SCORE]
+    positions, cash_reserved = _dynamic_allocate(
+        buy_candidates, prices, volatilities, budget
+    )
+    deployed = budget - cash_reserved
 
     # ── Full predictions list (all tickers, for hit-rate analysis) ─────────
     all_predictions = [
@@ -194,10 +276,12 @@ def run_forecast(
         "best_variant":    best_variant,
         "budget":          budget,
         "horizons":        horizon_dates,
+        "allocation_strategy": "dynamic_vol_adjusted",
         "portfolio": {
             "initial_cash":  budget,
             "deployed":      round(deployed, 2),
             "cash_reserved": round(cash_reserved, 2),
+            "deploy_pct":    round(deployed / budget * 100, 1),
             "positions":     positions,
         },
         "all_predictions": all_predictions,
@@ -211,6 +295,135 @@ def run_forecast(
     )
 
     return forecast
+
+
+def redeploy_cash(
+    session_dir: Path,
+    features_path: Path,
+    ohlcv_path: Path,
+    model,
+    feature_columns: list[str],
+    best_variant: str,
+    as_of: Optional[date] = None,
+) -> dict:
+    """Deploy dry-powder cash into new high-signal opportunities.
+
+    Called daily by `ts future-update`.  Scans the reserve cash and adds new
+    positions (or tops up existing under-allocated ones) when signals improve.
+
+    Rules
+    -----
+    - Only open new positions if score >= REDEPLOY_MIN_SCORE (higher bar than initial).
+    - Don't open a position that already exists in the portfolio.
+    - Keep at least MIN_CASH_RESERVE_PCT of the *original budget* as reserve.
+    - Returns a summary dict of what was redeployed.
+    """
+    if as_of is None:
+        as_of = date.today()
+
+    forecast_path = session_dir / "forecast.json"
+    if not forecast_path.exists():
+        return {"redeployed": 0, "new_positions": []}
+
+    forecast = json.loads(forecast_path.read_text())
+    budget         = forecast["budget"]
+    cash_reserved  = forecast["portfolio"]["cash_reserved"]
+    positions      = forecast["portfolio"]["positions"]
+    min_cash_floor = budget * MIN_CASH_RESERVE_PCT
+
+    # Nothing meaningful to deploy
+    if cash_reserved <= min_cash_floor + 50:
+        return {"redeployed": 0, "new_positions": [], "cash_remaining": cash_reserved}
+
+    available_for_deploy = cash_reserved - min_cash_floor
+
+    # ── Latest features + scores ──────────────────────────────────────────
+    features = pl.read_parquet(features_path)
+    latest_feat_date = features["date"].max()
+    today_feat = features.filter(pl.col("date") == latest_feat_date)
+
+    avail_cols = [c for c in feature_columns if c in today_feat.columns]
+    X = today_feat.select(avail_cols).fill_nan(0.0).fill_null(0.0).to_numpy()
+    tickers = today_feat["ticker"].to_list()
+    scores_arr = _scores_from_model(model, X, best_variant)
+    scored = sorted(zip(tickers, scores_arr.tolist()), key=lambda x: x[1], reverse=True)
+
+    # ── Latest prices ─────────────────────────────────────────────────────
+    ohlcv = pl.read_parquet(ohlcv_path)
+    latest_px_date = ohlcv["date"].max()
+    prices = {
+        r["ticker"]: float(r["adj_close"])
+        for r in ohlcv.filter(pl.col("date") == latest_px_date)
+                       .select(["ticker", "adj_close"]).to_dicts()
+        if r.get("adj_close")
+    }
+
+    # ── Volatilities ──────────────────────────────────────────────────────
+    vol_col = "vol_20d" if "vol_20d" in today_feat.columns else None
+    volatilities: dict[str, float] = {}
+    if vol_col:
+        for row in today_feat.select(["ticker", vol_col]).to_dicts():
+            v = row.get(vol_col)
+            if v and float(v) > 0:
+                volatilities[row["ticker"]] = float(v)
+
+    existing_tickers = {p["ticker"] for p in positions}
+    new_positions: list[dict] = []
+    deployed_this_run = 0.0
+
+    for ticker, score in scored:
+        if score < REDEPLOY_MIN_SCORE:
+            break
+        if ticker in existing_tickers:
+            continue
+        px = prices.get(ticker, 0.0)
+        if px <= 0:
+            continue
+
+        remaining = available_for_deploy - deployed_this_run
+        if remaining < 50:
+            break
+
+        vol = volatilities.get(ticker, 0.20)
+        vol_adj = min(0.20 / max(vol, 0.04), 2.5)
+        score_weight = min(float(score) / MAX_SCORE_CAP, 1.0)
+
+        alloc = min(budget * 0.09 * score_weight * vol_adj, remaining)
+        alloc = max(50.0, alloc)
+        if alloc > remaining:
+            alloc = remaining
+
+        shares = alloc / px
+        deployed_this_run += alloc
+        new_pos = {
+            "ticker":        ticker,
+            "score":         round(float(score), 6),
+            "tier":          3,
+            "entry_price":   round(px, 4),
+            "allocated":     round(alloc, 2),
+            "shares":        round(shares, 6),
+            "vol_20d":       round(vol, 4),
+            "redeployed_on": as_of.isoformat(),
+        }
+        new_positions.append(new_pos)
+        existing_tickers.add(ticker)
+
+        if deployed_this_run >= available_for_deploy:
+            break
+
+    if new_positions:
+        forecast["portfolio"]["positions"].extend(new_positions)
+        forecast["portfolio"]["cash_reserved"] = round(cash_reserved - deployed_this_run, 2)
+        forecast["portfolio"]["deployed"]      = round(
+            forecast["portfolio"]["deployed"] + deployed_this_run, 2
+        )
+        (session_dir / "forecast.json").write_text(json.dumps(forecast, indent=2))
+
+    return {
+        "redeployed":     round(deployed_this_run, 2),
+        "new_positions":  new_positions,
+        "cash_remaining": forecast["portfolio"]["cash_reserved"],
+    }
 
 
 def update_session_equity(

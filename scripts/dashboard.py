@@ -1,8 +1,18 @@
 """Streamlit dashboard. Run via `ts dashboard` or `streamlit run scripts/dashboard.py`.
 
-V2 additions:
-  ⚡ Live Trading   — quasi-realtime prices, live P&L, kill switch
-  🤖 Agent Analysis — ReAct thought chain + SHAP waterfall per ticker
+Primary pages:
+  🎯 Trade Signals     — latest BUY/SELL/HOLD predictions for every ticker
+  📈 Future Predictions — forward model forecasts (verifiable via future backtest)
+  🔍 Stock Screener    — filter by momentum, vol, RSI
+  📋 Decision Reports  — full per-ticker analysis reports
+
+Simulation:
+  💼 Paper Simulation  — clean forward paper trading (reset, fresh $10k)
+  ⚡ Live Prices       — quasi-realtime price overlay
+  🤖 Agent Analysis    — ReAct thought chain + SHAP waterfall per ticker
+
+Research (internal):
+  🌐 Universe Overview · 📊 Strategy Backtest · 🧠 Model Comparison · ⚙️ Strategy Catalog
 """
 from __future__ import annotations
 
@@ -28,7 +38,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for cleaner look
+# Custom CSS for cleaner look + signal badges
 st.markdown("""
 <style>
     .metric-card {
@@ -39,6 +49,11 @@ st.markdown("""
     }
     .stMetric > div { font-size: 0.95rem; }
     [data-testid="stSidebarNav"] { font-size: 0.9rem; }
+    .signal-table td, .signal-table th {
+        padding: 6px 12px;
+        font-size: 0.9rem;
+    }
+    .signal-table tr:nth-child(even) { background: #1a1a2e; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,17 +66,57 @@ if not bronze.exists():
     st.error("No OHLCV data found. Run `ts ingest` first.")
     st.stop()
 
-@st.cache_data(show_spinner="Loading features…", ttl=3600)
+# ── Lazy-load helpers (only called for pages that need them) ──────────────────
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_ohlcv():
+    """Load raw OHLCV — needed by most pages."""
+    return pl.read_parquet(bronze)
+
+@st.cache_data(show_spinner=False, ttl=3600)
 def _load_features():
-    ohlcv = pl.read_parquet(bronze)
+    """Build or load feature matrix — only called by pages that need signals."""
+    ohlcv = _load_ohlcv()
     gold = cfg.path("data_gold") / "features.parquet"
     if gold.exists():
-        features = pl.read_parquet(gold)
-    else:
-        features = build_feature_matrix(ohlcv, benchmark=cfg["universe"]["benchmark"])
-    return ohlcv, features
+        return pl.read_parquet(gold)
+    return build_feature_matrix(ohlcv, benchmark=cfg["universe"]["benchmark"])
 
-ohlcv, features = _load_features()
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_decisions():
+    """Return dict[ticker → latest decision JSON] from reports/decisions/."""
+    decisions_dir = cfg.path("reports") / "decisions"
+    if not decisions_dir.exists():
+        return {}
+    latest: dict[str, dict] = {}
+    for jf in sorted(decisions_dir.glob("*.json"), reverse=True):
+        t = jf.name.split("_")[0]
+        if t not in latest:
+            try:
+                latest[t] = json.loads(jf.read_text())
+            except Exception:
+                pass
+    return latest
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _last_close_prices():
+    """Return dict[ticker → last adj_close] from feature matrix."""
+    feats = _load_features()
+    return {
+        r["ticker"]: float(r["adj_close"])
+        for r in feats.filter(pl.col("date") == feats["date"].max()).to_dicts()
+        if r.get("adj_close")
+    }
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _fetch_yf_news(ticker: str) -> list[dict]:
+    """Fetch latest news for a ticker via yfinance."""
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).news
+        return info[:10] if info else []
+    except Exception:
+        return []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
@@ -74,27 +129,329 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["📊 Strategy Backtest", "🔍 Stock Screener", "📋 Decision Reports",
-         "🌐 Universe Overview", "💼 Paper Portfolio", "🧠 Model Comparison",
-         "⚙️ Strategy Catalog", "⚡ Live Trading", "🤖 Agent Analysis"],
+        [
+            "🎯 Trade Signals",
+            "📈 Future Predictions",
+            "🔍 Stock Screener",
+            "📋 Decision Reports",
+            "� Stock Analysis",
+            "�💼 Paper Simulation",
+            "⚡ Live Prices",
+            "🤖 Agent Analysis",
+            "🌐 Universe Overview",
+            "📊 Strategy Backtest",
+            "🧠 Model Comparison",
+            "⚙️ Strategy Catalog",
+        ],
         label_visibility="collapsed",
     )
     st.divider()
 
-    # Strategy selector (used by backtest page)
+    # Backtest params — only shown when on the backtest page
     strategy_names = sorted(STRATEGY_REGISTRY.keys())
-    chosen_strategy = st.selectbox("Strategy", strategy_names, index=strategy_names.index("momentum_rotation"))
+    if page == "📊 Strategy Backtest":
+        chosen_strategy = st.selectbox("Strategy", strategy_names,
+                                       index=strategy_names.index("momentum_rotation"))
+        st.subheader("Backtest params")
+        top_k = st.slider("Top K positions", 1, 20, 6)
+        rebal = st.slider("Rebalance (days)", 1, 63, 10)
+        commission = st.slider("Commission (bps)", 0.0, 10.0, float(cfg["backtest"]["commission_bps"]))
+        slippage = st.slider("Slippage (bps)", 0.0, 10.0, float(cfg["backtest"]["slippage_bps"]))
+    else:
+        # Provide defaults so other pages don't error if they reference these
+        chosen_strategy = "momentum_rotation"
+        top_k = 6
+        rebal = 10
+        commission = float(cfg["backtest"]["commission_bps"])
+        slippage = float(cfg["backtest"]["slippage_bps"])
 
-    st.subheader("Backtest params")
-    top_k = st.slider("Top K positions", 1, 20, 6)
-    rebal = st.slider("Rebalance (days)", 1, 63, 10)
-    commission = st.slider("Commission (bps)", 0.0, 10.0, float(cfg["backtest"]["commission_bps"]))
-    slippage = st.slider("Slippage (bps)", 0.0, 10.0, float(cfg["backtest"]["slippage_bps"]))
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Trade Signals  (PRIMARY PAGE)
+# ─────────────────────────────────────────────────────────────────────────────
+if page == "🎯 Trade Signals":
+    features = _load_features()
+    st.header("🎯 Trade Signals")
+    st.caption(
+        "Latest BUY / SELL / HOLD for every ticker in the universe · "
+        "powered by ensemble ML model · run `ts analyze TICKER` or `ts run` to refresh"
+    )
+
+    reports_dir = cfg.path("reports") / "decisions"
+    json_files = sorted(reports_dir.glob("*.json"), reverse=True) if reports_dir.exists() else []
+
+    if not json_files:
+        st.info(
+            "No decision reports found.  \n"
+            "Run `ts analyze AAPL` for one stock, or `ts run` for the full universe."
+        )
+    else:
+        # ── Load latest signal per ticker ────────────────────────────────────
+        latest_signals: dict[str, dict] = {}
+        for jf in json_files:
+            ticker = jf.name.split("_")[0]
+            if ticker not in latest_signals:
+                try:
+                    latest_signals[ticker] = json.loads(jf.read_text())
+                except Exception:
+                    pass
+
+        # Last-close prices from feature matrix as fallback
+        last_close = {
+            r["ticker"]: float(r["adj_close"])
+            for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
+            if r.get("adj_close")
+        }
+
+        # ── Build summary DataFrame ──────────────────────────────────────────
+        rows = []
+        for ticker, d in sorted(latest_signals.items()):
+            rows.append({
+                "Ticker": ticker,
+                "Signal": d.get("stance", "HOLD"),
+                "Confidence": d.get("confidence", 0),
+                "5d Forecast": d.get("forecast_5d", 0) or 0,
+                "20d Forecast": d.get("forecast_20d", 0) or 0,
+                "Last Close": last_close.get(ticker),
+                "Model": (d.get("score_source") or "").replace("ensemble:", ""),
+                "As Of": d.get("as_of", ""),
+            })
+
+        sig_df = pd.DataFrame(rows)
+
+        # ── KPI banner ───────────────────────────────────────────────────────
+        buy_n = int((sig_df["Signal"] == "BUY").sum())
+        hold_n = int((sig_df["Signal"] == "HOLD").sum())
+        sell_n = int((sig_df["Signal"] == "SELL").sum())
+        as_of_latest = sig_df["As Of"].max() if not sig_df.empty else "—"
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("🟢 BUY", buy_n)
+        col2.metric("🟡 HOLD", hold_n)
+        col3.metric("🔴 SELL", sell_n)
+        col4.metric("Total Tickers", len(sig_df))
+        col5.metric("Signals As Of", as_of_latest)
+
+        st.divider()
+
+        # ── Filter + sort controls ───────────────────────────────────────────
+        cf1, cf2, cf3 = st.columns([1, 1, 2])
+        with cf1:
+            stance_filter = st.multiselect(
+                "Filter by Signal", ["BUY", "HOLD", "SELL"],
+                default=["BUY", "HOLD", "SELL"], key="ts_stance"
+            )
+        with cf2:
+            min_conf = st.slider(
+                "Min Confidence", 0.0, 1.0, 0.0, 0.05, format="%.0f%%", key="ts_conf"
+            )
+        with cf3:
+            sort_col = st.selectbox(
+                "Sort by",
+                ["Confidence ↓", "5d Forecast ↓", "20d Forecast ↓", "Ticker ↑"],
+                key="ts_sort",
+            )
+
+        # Apply filters
+        filtered = sig_df[sig_df["Signal"].isin(stance_filter)].copy()
+        filtered = filtered[filtered["Confidence"] >= min_conf]
+        sort_map = {
+            "Confidence ↓": ("Confidence", False),
+            "5d Forecast ↓": ("5d Forecast", False),
+            "20d Forecast ↓": ("20d Forecast", False),
+            "Ticker ↑": ("Ticker", True),
+        }
+        sk, sa = sort_map.get(sort_col, ("Confidence", False))
+        filtered = filtered.sort_values(sk, ascending=sa)
+
+        # ── Styled HTML signal table ─────────────────────────────────────────
+        def _badge(s: str) -> str:
+            bg = {"BUY": "#1a4731", "SELL": "#4a1010", "HOLD": "#3d3b00"}.get(s, "#333")
+            fg = {"BUY": "#4ade80", "SELL": "#f87171", "HOLD": "#facc15"}.get(s, "#ccc")
+            return (
+                f'<span style="background:{bg};color:{fg};padding:2px 10px;'
+                f'border-radius:4px;font-weight:700;font-size:0.85rem">{s}</span>'
+            )
+
+        disp = filtered.copy()
+        disp["Signal"] = disp["Signal"].apply(_badge)
+        disp["Confidence"] = disp["Confidence"].map(lambda x: f"{x:.0%}")
+        disp["5d Forecast"] = disp["5d Forecast"].map(lambda x: f"{x*100:+.2f}%")
+        disp["20d Forecast"] = disp["20d Forecast"].map(lambda x: f"{x*100:+.2f}%")
+        disp["Last Close"] = disp["Last Close"].map(
+            lambda x: f"${x:.2f}" if pd.notna(x) else "—"
+        )
+
+        html_table = disp[
+            ["Ticker", "Signal", "Confidence", "5d Forecast", "20d Forecast",
+             "Last Close", "As Of"]
+        ].to_html(escape=False, index=False, classes="signal-table")
+        st.write(html_table, unsafe_allow_html=True)
+
+        st.caption(f"{len(filtered)} tickers shown · {len(sig_df)} total in universe")
+
+        # ── Drill-down for a single ticker ───────────────────────────────────
+        st.divider()
+        st.subheader("📋 Single Stock Detail")
+        st.caption("For full candlestick charts, forecasts, news & SHAP → go to **🔭 Stock Analysis**")
+        sel_ticker = st.selectbox(
+            "Select ticker", sorted(latest_signals.keys()), key="ts_drill_ticker"
+        )
+        if sel_ticker and sel_ticker in latest_signals:
+            d = latest_signals[sel_ticker]
+            stance = d.get("stance", "HOLD")
+            color_icon = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(stance, "⚪")
+            st.subheader(f"{color_icon} {sel_ticker} — {stance}")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Confidence", f"{d.get('confidence', 0):.0%}")
+            c2.metric("5d Forecast", f"{(d.get('forecast_5d') or 0)*100:+.2f}%")
+            c3.metric("20d Forecast", f"{(d.get('forecast_20d') or 0)*100:+.2f}%")
+            c4.metric("As Of", d.get("as_of", ""))
+
+            if d.get("rationale"):
+                with st.expander("Model Rationale", expanded=True):
+                    st.markdown(d["rationale"])
+
+            rpt_path = d.get("report_path")
+            if rpt_path and Path(rpt_path).exists():
+                with st.expander("Full Decision Report (Markdown)", expanded=False):
+                    st.markdown(Path(rpt_path).read_text())
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Future Predictions  (NEW PAGE)
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📈 Future Predictions":
+    features = _load_features()
+    st.header("📈 Future Predictions")
+    st.caption(
+        "Forward model forecasts · verify against live prices at each horizon date · "
+        "run `ts future-predict` to generate"
+    )
+
+    fp_dir = cfg.project_root / "future_predict"
+    fp_files = sorted(fp_dir.glob("*/forecast.json"), reverse=True) if fp_dir.exists() else []
+
+    if not fp_files:
+        st.info(
+            "No future predictions found.  \n"
+            "Run `ts future-predict` to generate the next forward forecast."
+        )
+    else:
+        dates_available = [fp.parent.name for fp in fp_files]
+        sel_date = st.selectbox("Prediction batch", dates_available)
+        fp_data = json.loads((fp_dir / sel_date / "forecast.json").read_text())
+
+        # ── Metadata row ────────────────────────────────────────────────────
+        model_name = fp_data.get("model", "unknown")
+        prices_date = fp_data.get("prices_as_of", "")
+        budget = fp_data.get("budget", 0)
+        all_preds = fp_data.get("all_predictions", [])
+        positions = fp_data.get("portfolio", {}).get("positions", [])
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Prediction Date", fp_data.get("prediction_date", sel_date))
+        col2.metric("Model", fp_data.get("best_variant", model_name))
+        col3.metric("Simulation Budget", f"${budget:,.0f}")
+        col4.metric("Tickers Ranked", len(all_preds))
+
+        # ── Horizon verification dates ───────────────────────────────────────
+        horizons = fp_data.get("horizons", {})
+        if horizons:
+            horizon_txt = "  ·  ".join(f"**{k}** → {v}" for k, v in horizons.items())
+            st.info(
+                f"📅 **Verification dates:** {horizon_txt}\n\n"
+                "Run `ts backtest` after each date to verify prediction accuracy."
+            )
+
+        st.divider()
+
+        # ── Simulated portfolio positions ────────────────────────────────────
+        if positions:
+            st.subheader("📌 Model-Selected Positions")
+            st.caption(
+                f"Top-scored tickers with entry prices as of **{prices_date}**.  "
+                "This is a **forward simulation** — no real trades were executed."
+            )
+
+            # Compare entry vs last-close
+            last_close = {
+                r["ticker"]: float(r["adj_close"])
+                for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
+                if r.get("adj_close")
+            }
+
+            pos_rows = []
+            for pos in positions:
+                t = pos["ticker"]
+                entry = pos["entry_price"]
+                current = last_close.get(t)
+                chg = (current / entry - 1) if current and entry else None
+                pos_rows.append({
+                    "Ticker": t,
+                    "Score": f"{pos['score']:.5f}",
+                    "Entry Price": f"${entry:.2f}",
+                    "Allocated": f"${pos['allocated']:,.0f}",
+                    "Shares": f"{pos['shares']:.4f}",
+                    "Last Close": f"${current:.2f}" if current else "—",
+                    "Move Since Entry": (
+                        f"{chg*100:+.2f}%" if chg is not None else "—"
+                    ),
+                })
+
+            st.dataframe(pd.DataFrame(pos_rows), use_container_width=True)
+
+            total_alloc = sum(p["allocated"] for p in positions)
+            cash_res = fp_data.get("portfolio", {}).get("cash_reserved", 0)
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Deployed Capital", f"${total_alloc:,.0f}")
+            sc2.metric("Cash Reserved", f"${cash_res:,.0f}")
+            sc3.metric("Positions", len(positions))
+
+        st.divider()
+
+        # ── Full ranked signal table ─────────────────────────────────────────
+        if all_preds:
+            st.subheader("🏆 Full Ranked Signal Table")
+            st.caption(f"{len(all_preds)} tickers ranked by model score · features as of {fp_data.get('features_as_of', '')}")
+
+            pred_rows = []
+            for rank, p in enumerate(all_preds, 1):
+                pred_rows.append({
+                    "Rank": rank,
+                    "Ticker": p["ticker"],
+                    "Signal": p["stance"],
+                    "Score": f"{p['score']:.5f}",
+                    "Entry Price": f"${p['entry_price']:.2f}",
+                })
+            pred_df = pd.DataFrame(pred_rows)
+
+            pf1, pf2 = st.columns([1, 3])
+            with pf1:
+                stance_opts = sorted(pred_df["Signal"].unique().tolist())
+                sel_stances = st.multiselect(
+                    "Filter", stance_opts, default=stance_opts, key="fp_stance"
+                )
+            pred_df_show = pred_df[pred_df["Signal"].isin(sel_stances)]
+
+            def _signal_color(val: str) -> str:
+                return {
+                    "BUY": "color: #4ade80",
+                    "SELL": "color: #f87171",
+                    "HOLD": "color: #facc15",
+                }.get(val, "")
+
+            st.dataframe(
+                pred_df_show.style.applymap(_signal_color, subset=["Signal"]),
+                use_container_width=True,
+                height=450,
+            )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Strategy Backtest
 # ─────────────────────────────────────────────────────────────────────────────
-if page == "📊 Strategy Backtest":
+elif page == "📊 Strategy Backtest":
+    ohlcv = _load_ohlcv()
+    features = _load_features()
     st.header("📊 Strategy Backtest")
 
     @st.cache_data(show_spinner="Running backtest…", ttl=300)
@@ -205,6 +562,8 @@ if page == "📊 Strategy Backtest":
 # Page: Stock Screener
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🔍 Stock Screener":
+    ohlcv = _load_ohlcv()
+    features = _load_features()
     st.header("🔍 Stock Screener")
 
     latest = features.filter(pl.col("date") == features["date"].max())
@@ -281,7 +640,6 @@ elif page == "🔍 Stock Screener":
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📋 Decision Reports":
     st.header("📋 Decision Reports")
-
     reports_dir = cfg.path("reports") / "decisions"
     md_files = sorted(reports_dir.glob("*.md"), reverse=True) if reports_dir.exists() else []
     json_files = sorted(reports_dir.glob("*.json"), reverse=True) if reports_dir.exists() else []
@@ -370,9 +728,11 @@ elif page == "📋 Decision Reports":
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page: Universe Overview
+# Page: Universe Overview  (Research)
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🌐 Universe Overview":
+    ohlcv = _load_ohlcv()
+    features = _load_features()
     st.header("🌐 Universe Overview")
 
     u = cfg["universe"]
@@ -435,20 +795,339 @@ elif page == "🌐 Universe Overview":
             st.info("Run `ts features` to see regime stats.")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page: Paper Portfolio
+# Page: Stock Analysis  (comprehensive per-ticker deep-dive)
 # ─────────────────────────────────────────────────────────────────────────────
-elif page == "💼 Paper Portfolio":
-    st.header("💼 Paper Portfolio")
-    st.caption("Simulated portfolio driven by ensemble ML signals · configurable starting capital")
+elif page == "🔭 Stock Analysis":
+    import math
+    ohlcv    = _load_ohlcv()
+    features = _load_features()
+    decisions = _load_decisions()
+
+    st.header("🔭 Stock Analysis")
+
+    tickers_all = sorted(cfg["universe"]["tickers"])
+    col_sel, col_period = st.columns([2, 2])
+    with col_sel:
+        sel = st.selectbox("Select ticker", tickers_all, key="sa_ticker")
+    with col_period:
+        period_days = st.select_slider(
+            "Chart period",
+            options=[30, 60, 90, 180, 365],
+            value=90,
+            format_func=lambda x: f"{x}d",
+            key="sa_period",
+        )
+
+    # ── OHLCV slice ─────────────────────────────────────────────────────────
+    tk_ohlcv = ohlcv.filter(pl.col("ticker") == sel).sort("date")
+    if tk_ohlcv.is_empty():
+        st.warning(f"No price data for {sel}. Run `ts ingest`.")
+    else:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        tk_pd = tk_ohlcv.to_pandas()
+        tk_pd["date"] = pd.to_datetime(tk_pd["date"])
+        cutoff = tk_pd["date"].max() - pd.Timedelta(days=period_days)
+        chart_df = tk_pd[tk_pd["date"] >= cutoff].copy()
+
+        # ── Candlestick + Volume ────────────────────────────────────────────
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            row_heights=[0.72, 0.28],
+            vertical_spacing=0.04,
+        )
+
+        fig.add_trace(go.Candlestick(
+            x=chart_df["date"],
+            open=chart_df["open"] if "open" in chart_df else chart_df["adj_close"],
+            high=chart_df["high"] if "high" in chart_df else chart_df["adj_close"],
+            low=chart_df["low"]   if "low"  in chart_df else chart_df["adj_close"],
+            close=chart_df["adj_close"],
+            name=sel,
+            increasing_line_color="#4ade80",
+            decreasing_line_color="#f87171",
+        ), row=1, col=1)
+
+        # MA overlays
+        for ma_days, color in [(20, "#facc15"), (50, "#60a5fa"), (200, "#c084fc")]:
+            if len(chart_df) >= ma_days:
+                ma = chart_df["adj_close"].rolling(ma_days).mean()
+                fig.add_trace(go.Scatter(
+                    x=chart_df["date"], y=ma,
+                    mode="lines", line=dict(color=color, width=1.2),
+                    name=f"MA{ma_days}", opacity=0.8,
+                ), row=1, col=1)
+
+        # Volume bars
+        if "volume" in chart_df.columns:
+            vol_colors = [
+                "#4ade80" if r["adj_close"] >= (chart_df["adj_close"].iloc[i - 1] if i > 0 else r["adj_close"])
+                else "#f87171"
+                for i, r in chart_df.reset_index(drop=True).iterrows()
+            ]
+            fig.add_trace(go.Bar(
+                x=chart_df["date"], y=chart_df["volume"],
+                marker_color=vol_colors, name="Volume", opacity=0.6,
+            ), row=2, col=1)
+
+        last_price = float(chart_df["adj_close"].iloc[-1])
+        fig.update_layout(
+            title=f"{sel} — {period_days}d Price",
+            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            font=dict(color="white"),
+            xaxis_rangeslider_visible=False,
+            legend=dict(orientation="h", y=1.02, x=0),
+            margin=dict(l=10, r=10, t=50, b=10),
+            height=500,
+        )
+        fig.update_xaxes(showgrid=False)
+        fig.update_yaxes(showgrid=True, gridcolor="#1f2937")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Current Signal ───────────────────────────────────────────────────
+        st.divider()
+        decision = decisions.get(sel)
+        if decision:
+            stance = decision.get("stance", "HOLD")
+            conf   = decision.get("confidence", 0)
+            f5     = (decision.get("forecast_5d") or 0) * 100
+            f20    = (decision.get("forecast_20d") or 0) * 100
+            col_stance_color = {"BUY": "#4ade80", "SELL": "#f87171", "HOLD": "#facc15"}.get(stance, "#9ca3af")
+            col_stance_bg    = {"BUY": "#14532d", "SELL": "#450a0a", "HOLD": "#422006"}.get(stance, "#111827")
+
+            st.markdown(
+                f'<div style="background:{col_stance_bg};border-left:4px solid {col_stance_color};'
+                f'padding:14px 20px;border-radius:6px;margin-bottom:8px">'
+                f'<span style="font-size:1.4rem;font-weight:800;color:{col_stance_color}">{stance}</span>'
+                f'&nbsp;&nbsp;<span style="color:#d1d5db;font-size:0.9rem">Confidence: {conf:.0%}'
+                f' · As of {decision.get("as_of", "")} · Model: '
+                f'{(decision.get("score_source") or "").replace("ensemble:", "")}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Current Price",  f"${last_price:.2f}")
+            mc2.metric("5d Forecast",    f"{f5:+.2f}%",  delta=f"${last_price*(1+f5/100):.2f} target")
+            mc3.metric("20d Forecast",   f"{f20:+.2f}%", delta=f"${last_price*(1+f20/100):.2f} target")
+            mc4.metric("Score Source",   (decision.get("score_source") or "n/a").split(":")[-1])
+        else:
+            st.info(f"No ML decision yet for **{sel}**. Run `ts analyze {sel}` to generate one.")
+            mc1, _, _, _ = st.columns(4)
+            mc1.metric("Current Price", f"${last_price:.2f}")
+
+        # ── Price Forecast Fan ───────────────────────────────────────────────
+        st.divider()
+        st.subheader("📅 Price Forecast — All Horizons (min / avg / max)")
+        st.caption(
+            "Avg = model point forecast.  "
+            "Min/Max = ±2 σ band derived from realised volatility at each horizon."
+        )
+
+        # Get ticker vol from features
+        feat_row = features.filter(
+            (pl.col("ticker") == sel) & (pl.col("date") == features["date"].max())
+        )
+        vol_daily = None
+        if not feat_row.is_empty() and "vol_20d" in feat_row.columns:
+            v = feat_row["vol_20d"][0]
+            if v and float(v) > 0:
+                vol_daily = float(v) / math.sqrt(252)  # daily vol
+
+        # Horizon → trading days
+        horizons_td = {"5d": 5, "20d": 20, "1m": 21, "3m": 63, "6m": 126, "12m": 252}
+        f5_raw  = (decision.get("forecast_5d")  or 0) if decision else 0
+        f20_raw = (decision.get("forecast_20d") or 0) if decision else 0
+
+        # Simple linear interpolation for intermediate horizons from f5 / f20
+        def _horizon_forecast(td: int) -> float:
+            if td <= 5:
+                return f5_raw * (td / 5)
+            if td <= 20:
+                return f5_raw + (f20_raw - f5_raw) * ((td - 5) / 15)
+            # Extrapolate: annualise f20 and scale
+            annual_rate = f20_raw * (252 / 20)
+            return annual_rate * (td / 252)
+
+        forecast_rows = []
+        for label, td in horizons_td.items():
+            fc = _horizon_forecast(td)
+            price_avg = last_price * (1 + fc)
+            if vol_daily:
+                sigma = vol_daily * math.sqrt(td)
+                price_min = last_price * (1 + fc - 2 * sigma)
+                price_max = last_price * (1 + fc + 2 * sigma)
+            else:
+                price_min = price_max = price_avg
+            forecast_rows.append({
+                "Horizon": label,
+                "Trading Days": td,
+                "Min Price": f"${price_min:.2f}",
+                "Avg Price": f"${price_avg:.2f}",
+                "Max Price": f"${price_max:.2f}",
+                "Forecast Return": f"{fc*100:+.2f}%",
+            })
+
+        fc_df = pd.DataFrame(forecast_rows)
+        st.dataframe(
+            fc_df[["Horizon", "Min Price", "Avg Price", "Max Price", "Forecast Return"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Plotly fan chart
+        if vol_daily and last_price:
+            fan_labels = list(horizons_td.keys())
+            fan_tds    = list(horizons_td.values())
+            avgs  = [last_price * (1 + _horizon_forecast(t)) for t in fan_tds]
+            mins_ = [last_price * (1 + _horizon_forecast(t) - 2 * vol_daily * math.sqrt(t)) for t in fan_tds]
+            maxs_ = [last_price * (1 + _horizon_forecast(t) + 2 * vol_daily * math.sqrt(t)) for t in fan_tds]
+
+            fan_fig = go.Figure()
+            fan_fig.add_trace(go.Scatter(
+                x=fan_labels + fan_labels[::-1],
+                y=maxs_ + mins_[::-1],
+                fill="toself", fillcolor="rgba(96,165,250,0.15)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="±2σ band",
+            ))
+            fan_fig.add_trace(go.Scatter(
+                x=fan_labels, y=avgs,
+                mode="lines+markers",
+                line=dict(color="#60a5fa", width=2),
+                marker=dict(size=7),
+                name="Avg forecast",
+            ))
+            fan_fig.add_hline(y=last_price, line_dash="dash", line_color="#9ca3af",
+                              annotation_text="Current price")
+            fan_fig.update_layout(
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                font=dict(color="white"),
+                margin=dict(l=10, r=10, t=30, b=10),
+                height=300,
+                legend=dict(orientation="h"),
+            )
+            fan_fig.update_yaxes(showgrid=True, gridcolor="#1f2937")
+            st.plotly_chart(fan_fig, use_container_width=True)
+
+        # ── Technical Indicators ─────────────────────────────────────────────
+        st.divider()
+        st.subheader("📊 Technical Indicators")
+        if not feat_row.is_empty():
+            sig_cols = [
+                "mom_5d", "mom_20d", "mom_60d", "rsi_14", "vol_20d",
+                "sma_gap_50", "sma_gap_200", "breakout_20",
+                "dd_from_high_60", "rel_vol_20", "atr_14",
+            ]
+            available_sigs = {c: feat_row[c][0] for c in sig_cols if c in feat_row.columns}
+            ic1, ic2, ic3 = st.columns(3)
+            for i, (k, v) in enumerate(available_sigs.items()):
+                col = [ic1, ic2, ic3][i % 3]
+                if isinstance(v, float):
+                    col.metric(k, f"{v:.2%}" if abs(v) < 5 else f"{v:.4f}")
+                else:
+                    col.metric(k, str(v))
+        else:
+            st.caption("No feature data. Run `ts features` first.")
+
+        # ── News & Sentiment ─────────────────────────────────────────────────
+        st.divider()
+        st.subheader("📰 Latest News & Sentiment")
+        with st.spinner(f"Fetching news for {sel}…"):
+            news_items = _fetch_yf_news(sel)
+
+        if news_items:
+            for item in news_items[:8]:
+                title   = item.get("title", "")
+                pub_ts  = item.get("providerPublishTime", 0)
+                pub_str = pd.Timestamp(pub_ts, unit="s").strftime("%b %d, %Y") if pub_ts else ""
+                source  = item.get("publisher", "")
+                link    = item.get("link", "#")
+                # Crude sentiment
+                text_lower = title.lower()
+                pos_words = ["surge", "beat", "gain", "rise", "growth", "profit", "record", "strong", "up"]
+                neg_words = ["fall", "drop", "miss", "cut", "loss", "risk", "down", "concern", "weak"]
+                pos_score = sum(1 for w in pos_words if w in text_lower)
+                neg_score = sum(1 for w in neg_words if w in text_lower)
+                sentiment = "🟢 Positive" if pos_score > neg_score else ("🔴 Negative" if neg_score > pos_score else "⚪ Neutral")
+                st.markdown(
+                    f"**[{title}]({link})**  \n"
+                    f"{sentiment} · {source} · {pub_str}"
+                )
+        else:
+            st.caption("No recent news available via yfinance.")
+
+        # ── Verdict Panel ────────────────────────────────────────────────────
+        st.divider()
+        st.subheader("⚖️ Verdict")
+        if decision:
+            rationale = decision.get("rationale", "")
+            if rationale:
+                stance = decision.get("stance", "HOLD")
+                color_map = {"BUY": "#4ade80", "SELL": "#f87171", "HOLD": "#facc15"}
+                verdict_color = color_map.get(stance, "#9ca3af")
+                st.markdown(
+                    f'<div style="border-left:4px solid {verdict_color};padding:12px 16px;'
+                    f'background:#111827;border-radius:4px">{rationale}</div>',
+                    unsafe_allow_html=True,
+                )
+            rpt_path = decision.get("report_path")
+            if rpt_path and Path(rpt_path).exists():
+                with st.expander("Full Model Report", expanded=False):
+                    st.markdown(Path(rpt_path).read_text())
+        else:
+            st.info(f"Run `ts analyze {sel}` to get a full ML verdict.")
+
+        # ── On-demand SHAP ───────────────────────────────────────────────────
+        st.divider()
+        st.subheader("🔬 SHAP Feature Explanation")
+        model_dir = cfg.path("reports") / "models"
+        if model_dir.exists():
+            shap_top = st.slider("Top N features", 5, 20, 12, key="sa_shap_n")
+            if st.button("Compute SHAP Waterfall", key="sa_shap_btn"):
+                with st.spinner("Computing SHAP…"):
+                    try:
+                        from trading_system.monitoring.shap_viz import (
+                            compute_shap_waterfall, render_shap_waterfall_fig,
+                        )
+                        sd = compute_shap_waterfall(model_dir, features, sel, top_n=shap_top)
+                        if sd:
+                            st.session_state["sa_shap_data"] = sd
+                        else:
+                            st.warning("SHAP returned no data (model may not be tree-based or ticker missing).")
+                    except Exception as e:
+                        st.error(f"SHAP error: {e}")
+            if "sa_shap_data" in st.session_state:
+                from trading_system.monitoring.shap_viz import render_shap_waterfall_fig
+                st.pyplot(
+                    render_shap_waterfall_fig(st.session_state["sa_shap_data"]),
+                    use_container_width=True,
+                )
+        else:
+            st.info("Train a model first (`ts train`) to enable SHAP explanations.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Paper Simulation
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "💼 Paper Simulation":
+    ohlcv = _load_ohlcv()
+    features = _load_features()
+    st.header("💼 Paper Simulation")
+    st.caption(
+        "Forward paper trading simulation · started fresh with $10,000 · "
+        "all trades logged from today for future backtest verification"
+    )
 
     equity_log_path = cfg.path("data_gold") / "paper_equity_log.parquet"
     journal_path = cfg.path("data_gold") / "paper_portfolio_journal.json"
 
     if not equity_log_path.exists():
         st.info(
-            "No paper portfolio history yet.\n\n"
-            "Run `ts paper-trade --backfill` to replay history from model predictions, "
-            "or `ts paper-trade` for today's live decisions."
+            "🚀 **Forward simulation started fresh.**  \n"
+            "Run `ts paper-trade` daily to log today's ML signals as virtual trades.  \n"
+            "Equity history will appear here after the first daily run.",
+            icon="📈",
         )
     else:
         eq_log = pl.read_parquet(equity_log_path).sort("date")
@@ -534,7 +1213,7 @@ elif page == "💼 Paper Portfolio":
                     bm_eq = (bm_start / bm_start.iloc[0]) * start_eq
                     bench_col[bm_ticker] = bm_eq
 
-            plot_df = eq_pd[["equity"]].rename(columns={"equity": "Paper Portfolio"})
+            plot_df = eq_pd[["equity"]].rename(columns={"equity": "Paper Simulation"})
             for bm_name, bm_series in bench_col.items():
                 plot_df = plot_df.join(bm_series.rename(bm_name), how="left")
             st.line_chart(plot_df, use_container_width=True)
@@ -608,18 +1287,18 @@ elif page == "💼 Paper Portfolio":
 
         # ── Portfolio Management ──────────────────────────────────────────────
         st.divider()
-        with st.expander("⚙️ Portfolio Management (Reset)", expanded=False):
+        with st.expander("⚙️ Simulation Management (Reset)", expanded=False):
             st.warning(
                 "**Resetting is irreversible.** The equity log and all trade history will be deleted. "
-                "Use this to start a fresh paper portfolio with a new starting capital."
+                "The simulation restarts from today with a clean slate."
             )
             reset_capital = st.number_input(
                 "New starting capital ($)",
                 min_value=100, max_value=50_000,
-                value=1_000, step=100,
+                value=10_000, step=500,
                 key="reset_capital_input",
             )
-            if st.button("🔄 Reset Paper Portfolio", type="secondary", key="reset_pp_btn"):
+            if st.button("🔄 Reset Simulation", type="secondary", key="reset_pp_btn"):
                 from trading_system.execution.paper_portfolio import PaperPortfolio
                 pp = PaperPortfolio(
                     journal_path=journal_path,
@@ -627,13 +1306,14 @@ elif page == "💼 Paper Portfolio":
                     initial_cash=float(reset_capital),
                 )
                 pp.reset(float(reset_capital))
-                st.success(f"Portfolio reset with **${reset_capital:,.0f}** starting capital. Reload the page to see the empty log.")
+                st.success(f"Simulation reset with **${reset_capital:,.0f}** starting capital. Reload the page to see the empty log.")
                 st.cache_data.clear()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Model Comparison
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🧠 Model Comparison":
+    features = _load_features()
     st.header("🧠 Model Comparison")
     st.caption("14 base models + 3 ensemble variants · IC / MAE / R² across walk-forward folds")
 
@@ -803,11 +1483,12 @@ elif page == "⚙️ Strategy Catalog":
         st.markdown(f"**{k}**: {status}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page: Live Trading (V2)
+# Page: Live Prices (V2)
 # ─────────────────────────────────────────────────────────────────────────────
-elif page == "⚡ Live Trading":
-    st.header("⚡ Live Trading")
-    st.caption("Quasi-realtime price overlay (5-min refresh via yfinance) · Paper trading mode")
+elif page == "⚡ Live Prices":
+    features = _load_features()
+    st.header("⚡ Live Prices")
+    st.caption("Quasi-realtime price overlay · 5-min refresh via yfinance · paper simulation P&L")
 
     tickers = cfg["universe"]["tickers"]
 
@@ -948,6 +1629,7 @@ elif page == "⚡ Live Trading":
 # Page: Agent Analysis (V2)
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🤖 Agent Analysis":
+    features = _load_features()
     st.header("🤖 Agent Analysis")
     st.caption("ReAct multi-step reasoning chain · DeepSeek cloud → Ollama fallback")
 

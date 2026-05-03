@@ -22,37 +22,104 @@ train
   Walk-forward train 14-model ensemble over the feature matrix.
 
 daily
-  Run the full daily pipeline.
+  Run the full daily pipeline:
+    ingest → quality → features → predict → paper-trade → future-update + cash redeploy
 
-paper-trade
-  Execute daily paper trades based on current model decisions.
-
-paper-status
-  Show paper portfolio status: equity, holdings, and horizon PnL.
-
-dashboard
-  Launch the Streamlit dashboard.
-
-universe
-  Print the configured universe.
+signals
+  Print a colour-coded BUY/SELL/HOLD signal table for the whole universe.
+  Options:
+    --stance  -s   Filter by stance: ALL | BUY | SELL | HOLD  (default: ALL)
+    --min-conf     Minimum confidence threshold 0–1            (default: 0.0)
+    --top     -n   Show only top N rows; 0 = all              (default: 0)
+  Example:
+    ts signals --stance BUY --min-conf 0.5 --top 10
 
 analyze
-  Run the full decision pipeline on a single symbol and write a report.
+  Run the full decision pipeline on a single symbol and write a JSON+MD report.
+  Example:
+    ts analyze AAPL
 
 analyze-all
   Run the decision pipeline across the entire configured universe.
+  Reports written to reports/decisions/.
 
 explain
   Explain a decision report in plain English using DeepSeek V4.
 
+paper-trade
+  Execute daily paper trades based on current model decisions ($100k virtual portfolio).
+
+paper-status
+  Show paper portfolio status: equity, holdings, and horizon PnL.
+
 future-predict
   Create a new forward-looking forecast session with a $10k portfolio.
+  Uses dynamic volatility-adjusted, tiered position sizing:
+    - Tier 1 (top 5):   up to 15% of budget each  (scaled by score × vol)
+    - Tier 2 (next 10): up to  9% of budget each
+    - Tier 3 (next 5):  up to  5% of budget each
+    - Always reserves ≥ 25% as dry-powder cash for redeployment
+  Session saved to future_predict/YYYY-MM-DD/forecast.json.
+  Options:
+    --budget   Starting budget in USD  (default: 10000)
+    --date     Override session date (YYYY-MM-DD)
+  Example:
+    ts future-predict --budget 25000
 
 future-status
   Show status and prediction accuracy of a future forecast session.
+  Displays live MTM P&L, open positions, and accuracy for each elapsed horizon.
 
 future-update
   Update equity snapshots for all active future-predict sessions.
+  Also scans dry-powder cash and redeploys into new high-quality signals
+  (score ≥ 0.005) discovered since the session was opened.
+  Called automatically by `ts daily`. Safe to run at any time.
+
+agent-analyze
+  Run the ReAct LLM agent for deep analysis of a single ticker.
+  The agent autonomously fetches news, ML model score, SHAP attribution,
+  live price, and economic calendar before issuing a BUY/HOLD/SELL verdict.
+  Uses DeepSeek cloud API with local Ollama fallback.
+  Options:
+    --save / --no-save   Persist result JSON to reports/agent/  (default: save)
+    --verbose  -v        Show full thought/action chain
+  Example:
+    ts agent-analyze NVDA --verbose
+
+agent-portfolio
+  Run the ReAct agent to review the current paper portfolio.
+  Evaluates each held position via model scores, news sentiment, and momentum
+  and recommends HOLD / ADD / EXIT actions.
+  Options:
+    --save / --no-save
+    --verbose  -v
+
+agent-briefing
+  Generate a daily market briefing via the ReAct agent.
+  The agent checks the economic calendar, reviews top model scores, and
+  synthesises a morning market narrative with top picks and risk flags.
+  Options:
+    --save / --no-save
+
+dashboard
+  Launch the Streamlit dashboard (12 pages, signal-first layout).
+    1. 🎯 Trade Signals        — colour-coded BUY/SELL/HOLD table, filter & drill-down
+    2. 📈 Future Predictions   — active forecast sessions, positions, MTM P&L
+    3. 🔍 Stock Screener       — factor-based universe filter
+    4. 📋 Decision Reports     — full ML decision reports per ticker
+    5. 🔭 Stock Analysis       — candlestick + MA overlays, forecast fan charts,
+                                  technical indicators, live news & sentiment, SHAP
+    6. 💼 Paper Simulation     — forward-looking $10k paper simulation
+    7. ⚡ Live Prices           — real-time price feed
+    8. 🤖 Agent Analysis       — ReAct LLM agent output
+    9. 🌐 Universe Overview    — regime and cross-ticker stats
+   10. 📊 Strategy Backtest    — historical strategy validation
+   11. 🧠 Model Comparison     — ensemble model metrics
+   12. ⚙️ Strategy Catalog     — strategy definitions
+
+universe
+  Print all tickers in the configured universe.
 
 ---------------------------------------
 Run  ts COMMAND --help  for more details
@@ -67,7 +134,6 @@ STEP 1 — ingest
 
 STEP 2 — quality
   Validate the ingested data for gaps, outliers, and bad OHLCV values.
-  Fix any flagged issues before proceeding.
 
 STEP 3 — features
   Compute technical, fundamental, sentiment, and regime features.
@@ -76,44 +142,59 @@ STEP 3 — features
 STEP 4 — train
   Walk-forward train the 14-model ensemble (LightGBM, XGBoost, Ridge, etc.)
   plus 3 ensemble variants. Saves models to the registry and
-  reports/model_comparison.json. Best variant: ensemble_stack_lgbm.
+  reports/model_comparison.json.
 
-STEP 5 — backtest  (optional, for strategy validation)
-  Run a named strategy (momentum, mean-reversion, ml-signal, etc.)
-  against historical gold features to evaluate performance.
+STEP 5 — signals  (quick daily pulse)
+  Check the current BUY/SELL/HOLD table before trading.
+    ts signals --stance BUY --top 20
 
-STEP 6 — paper-trade
-  Start live paper trading with a $100k virtual portfolio.
-  Driven by the ensemble model's daily signals.
+STEP 6 — analyze-all  (optional deep-dive)
+  Generate full ML decision reports for all universe tickers.
+  Feeds the Trade Signals and Decision Reports dashboard pages.
 
-STEP 7 — future-predict
-  Create a new $10k forward-looking forecast session.
-  Scores all tickers, allocates up to 60% across top signals,
-  keeps 40% liquid. Records target dates for 1m/2m/3m/6m/12m horizons.
+STEP 7 — agent-briefing  (optional)
+  Get an LLM-synthesised morning market narrative before you trade.
+
+STEP 8 — future-predict  (start a verifiable forecast)
+  Create a $10k forecast session with dynamic vol-adjusted tier sizing
+  and ≥ 25% cash held back as dry powder for daily redeployment.
+    ts future-predict --budget 10000
 
 ---- DAILY ROUTINE (run every market day) ----
 
-STEP 8 — daily
-  Runs the full pipeline in one shot:
-    ingest → quality → features → predict → paper-trade → future-update
+STEP 9 — daily
+  Runs the full pipeline in one command:
+    ingest → quality → features → predict → paper-trade
+    → future-update (equity snapshot + cash redeployment into new signals)
 
-STEP 9 — paper-status  (optional, check anytime)
-  View current equity, open positions, and PnL for the $100k portfolio.
+STEP 10 — signals  (post-daily check)
+  Review today's updated signals and see what shifted.
 
-STEP 10 — future-status  (optional, check anytime)
-  View live MTM P&L for the $10k forecast portfolio and accuracy
-  of predictions as each horizon (1m/2m/3m/6m/12m) elapses.
+STEP 11 — paper-status  (optional)
+  View current equity, open positions, and PnL for the $100k paper portfolio.
+
+STEP 12 — future-status  (optional)
+  View live MTM P&L for forecast sessions and accuracy as horizons elapse.
 
 ---- ANALYSIS & REPORTING (on demand) ----
 
 analyze / analyze-all
-  Deep-dive decision analysis on one or all tickers.
+  Deep ML decision analysis on one or all tickers.
+  Output: reports/decisions/<TICKER>_<DATE>.json + .md
 
 explain
   Plain-English explanation of an analyze report via DeepSeek V4.
 
+agent-analyze TICKER
+  LLM ReAct agent: news + SHAP + price + calendar → verdict.
+
+agent-portfolio
+  LLM review of every open paper-trade position.
+
 dashboard
-  Launch the Streamlit dashboard for visual exploration of all the above.
+  Streamlit GUI for all of the above. Signal-first layout.
+  Includes candlestick charts, forecast fan charts, live news sentiment,
+  and on-demand SHAP waterfall per ticker (🔭 Stock Analysis page).
 
 universe
   Quickly list all tickers in the configured universe.

@@ -785,27 +785,61 @@ def future_status(
 def future_update(config: str = "configs/default.yaml"):
     """Update equity snapshots for all active future-predict sessions.
 
+    Also attempts to redeploy dry-powder cash when new high-quality signals appear.
     Automatically called by `ts daily`. Safe to run at any time.
     """
-    from .future_predict.forecast import list_sessions, update_session_equity
+    from .future_predict.forecast import (
+        list_sessions, update_session_equity, redeploy_cash,
+    )
+    from .models.model_registry import load_model, best_ensemble_artifact, list_models
 
     cfg = get_config(config)
-    base_dir = cfg.project_root / "future_predict"
+    base_dir   = cfg.project_root / "future_predict"
     ohlcv_path = cfg.path("data_bronze") / "ohlcv_daily.parquet"
-    sessions = list_sessions(base_dir)
+    feat_path  = cfg.path("data_gold") / "features.parquet"
+    sessions   = list_sessions(base_dir)
 
     if not sessions:
         rprint("[dim]No future-predict sessions to update.[/dim]")
         return
 
+    # Load model once for redeployment (optional — gracefully skip if unavailable)
+    _model = _feat_cols = _variant = None
+    try:
+        reg_path = cfg.path("reports") / "models"
+        if list_models(reg_path) and feat_path.exists():
+            art_name = best_ensemble_artifact(reg_path)
+            _model, art = load_model(art_name, registry=reg_path)
+            _feat_cols = art.feature_columns
+            _variant   = art.metadata.get("best_variant", "ensemble_blend")
+    except Exception:
+        pass
+
     updated = 0
     for s in sessions:
         try:
             snap = update_session_equity(s, ohlcv_path)
-            ret = snap["return_pct"]
+            ret   = snap["return_pct"]
             color = "green" if ret >= 0 else "red"
             rprint(f"  [{color}]{s.name}[/{color}]  equity=${snap['equity']:,.0f}  "
                    f"return=[{color}]{ret * 100:+.2f}%[/{color}]")
+
+            # Redeploy dry-powder cash when possible
+            if _model is not None:
+                result = redeploy_cash(
+                    session_dir=s,
+                    features_path=feat_path,
+                    ohlcv_path=ohlcv_path,
+                    model=_model,
+                    feature_columns=_feat_cols,
+                    best_variant=_variant,
+                )
+                if result["redeployed"] > 0:
+                    new_tickers = [p["ticker"] for p in result["new_positions"]]
+                    rprint(
+                        f"    [cyan]Redeployed ${result['redeployed']:,.0f} → "
+                        f"{new_tickers}  (cash left=${result['cash_remaining']:,.0f})[/cyan]"
+                    )
             updated += 1
         except Exception as exc:
             rprint(f"  [yellow]{s.name}: skipped ({exc})[/yellow]")
@@ -937,6 +971,83 @@ def agent_briefing(
     if save and result.success:
         path = orchestrator.save_result(result)
         rprint(f"[dim]Saved → {path}[/dim]")
+
+
+@app.command("signals")
+def signals_cmd(
+    config: str = "configs/default.yaml",
+    stance: str = typer.Option("ALL", "--stance", "-s", help="ALL | BUY | SELL | HOLD"),
+    min_conf: float = typer.Option(0.0, "--min-conf", help="Minimum confidence (0-1)"),
+    top: int = typer.Option(0, "--top", "-n", help="Show only top N rows (0 = all)"),
+):
+    """Print the latest BUY/SELL/HOLD signal table for the whole universe.
+
+    Reads the most recent decision JSON for each ticker from reports/decisions/
+    and displays a colour-coded terminal table.
+    """
+    import json
+    from pathlib import Path
+    from rich.table import Table
+    from rich.console import Console
+
+    cfg = get_config(config)
+    decisions_dir = cfg.path("reports") / "decisions"
+    if not decisions_dir.exists():
+        rprint("[yellow]No decision reports found. Run `ts analyze TICKER` first.[/yellow]")
+        return
+
+    json_files = sorted(decisions_dir.glob("*.json"), reverse=True)
+    latest: dict[str, dict] = {}
+    for jf in json_files:
+        t = jf.name.split("_")[0]
+        if t not in latest:
+            try:
+                latest[t] = json.loads(jf.read_text())
+            except Exception:
+                pass
+
+    rows = sorted(latest.values(), key=lambda d: d.get("confidence", 0), reverse=True)
+
+    # Apply filters
+    if stance.upper() != "ALL":
+        rows = [r for r in rows if r.get("stance", "") == stance.upper()]
+    if min_conf > 0:
+        rows = [r for r in rows if r.get("confidence", 0) >= min_conf]
+    if top > 0:
+        rows = rows[:top]
+
+    table = Table(title="Trade Signals", show_header=True, header_style="bold cyan")
+    table.add_column("Ticker", style="bold white", width=8)
+    table.add_column("Signal", width=7)
+    table.add_column("Confidence", justify="right", width=12)
+    table.add_column("5d Fcst", justify="right", width=9)
+    table.add_column("20d Fcst", justify="right", width=9)
+    table.add_column("As Of", width=12)
+
+    for d in rows:
+        s = d.get("stance", "HOLD")
+        color = {"BUY": "green", "SELL": "red", "HOLD": "yellow"}.get(s, "white")
+        conf = d.get("confidence", 0)
+        f5 = d.get("forecast_5d") or 0
+        f20 = d.get("forecast_20d") or 0
+        table.add_row(
+            d.get("ticker", ""),
+            f"[{color}]{s}[/{color}]",
+            f"{conf:.0%}",
+            f"{f5*100:+.2f}%",
+            f"{f20*100:+.2f}%",
+            d.get("as_of", ""),
+        )
+
+    buy_n = sum(1 for d in latest.values() if d.get("stance") == "BUY")
+    hold_n = sum(1 for d in latest.values() if d.get("stance") == "HOLD")
+    sell_n = sum(1 for d in latest.values() if d.get("stance") == "SELL")
+
+    Console().print(table)
+    rprint(
+        f"\n[green]BUY: {buy_n}[/green]  [yellow]HOLD: {hold_n}[/yellow]  "
+        f"[red]SELL: {sell_n}[/red]  (total {len(latest)} tickers)"
+    )
 
 
 if __name__ == "__main__":

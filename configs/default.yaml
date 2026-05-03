@@ -18,7 +18,7 @@ data:
   source: yfinance
 
 backtest:
-  initial_cash: 100000.0
+  initial_cash: 10000.0
   commission_bps: 1.0          # 1 basis point
   slippage_bps: 2.0            # 2 basis points
   spread_bps: 1.0
@@ -28,9 +28,9 @@ backtest:
   max_position_weight: 0.10    # 10% per-position cap with 100-symbol universe
 
 risk:
-  max_drawdown_kill_switch: 0.25
-  vol_target_annual: 0.15
-  per_trade_risk: 0.01
+  max_drawdown_kill_switch: 0.3
+  vol_target_annual: 0.25
+  per_trade_risk: 0.1
 
 model:
   type: lightgbm
@@ -63,7 +63,6 @@ mlflow:
 
 api_keys:
   fred: ${FRED_API_KEY}
-  # openai key removed — replaced by DeepSeek V4 for all LLM tasks
   deepseek: ${DEEPSEEK_API_KEY}
   newsapi: ${NEWSAPI_KEY}
   sec_user_agent: "research-bot research@example.com"
@@ -77,6 +76,6 @@ llm:
 
 # V2: Quasi-realtime settings
 realtime:
-  refresh_interval_seconds: 300   # dashboard live-price refresh (5 min)
+  refresh_interval_seconds: 30   # dashboard live-price refresh (30 sec)
   intraday_bars_interval: "5m"    # yfinance intraday bar interval
   intraday_lookback_days: 2       # how many days back for intraday bars
