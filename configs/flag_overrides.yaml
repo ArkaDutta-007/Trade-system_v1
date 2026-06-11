@@ -1,0 +1,49 @@
+# Manual state for qualitative flags and event outcomes.
+#
+# The flag engine derives O / I / S (and a best-effort F) from live market and
+# FRED data. Anything set here WINS over the automatic reading. Set color to
+# null to fall back to automatic.
+#
+# Colors: GREEN | YELLOW | RED | null
+# Keep `as_of` current — readings older than max_age_days are flagged stale
+# in `ts flags` / `ts brief` output.
+
+max_age_days: 45
+
+flags:
+  O:
+    color: null
+    note: "auto from Brent (BZ=F). Set RED manually on Hormuz closure / strikes even if price lags."
+    as_of: null
+  F:
+    color: YELLOW
+    note: "PDF expectation for Jun 17 FOMC: hold, hawkish. Update after the meeting + dots."
+    as_of: "2026-06-10"
+  I:
+    color: null
+    note: "auto from FRED CPILFESL m/m (May = 0.2% ✓ green at print)."
+    as_of: null
+  S:
+    color: null
+    note: "auto from ^NDX vs 30,034 / 28,663."
+    as_of: null
+  C:
+    color: GREEN
+    note: "hyperscaler capex maintained/raised as of the v2 PDF. Re-set after late-Jul earnings; TSM Jul 10 monthly rev is the early telemetry."
+    as_of: "2026-06-10"
+
+# Event outcomes referenced by cycle rules and standing rules.
+# null = not yet known. Set the value when the event resolves.
+events:
+  mu_jun24: null                    # beat_raise_flat | beat_gap_up | miss
+  mu_holds_post_earnings_low: null  # true | false (evaluate ~2 weeks after Jun 24)
+  now_q2: null                      # clean_beat | guide_cut
+  crm_q2: null                      # clean_beat | guide_cut
+  now_or_crm_guide_cut: null        # true | false
+  uber_q2: null                     # clean | weak_guide
+  meta_q2_cc_growth_ge_25: null     # true | false
+  meta_q2_bear_case: null           # true (growth <20% cc or DAP decline accelerating)
+  nvda_q2_dc_guidance_intact: null  # true | false
+  gev_clean_q2: null                # true (backlog intact, no further tariff damage)
+  crwv_equity_raise: false          # true the day CRWV announces a raise → same-day sell
+  hormuz_closed: false              # true forces O=RED regardless of price

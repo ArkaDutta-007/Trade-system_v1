@@ -1,0 +1,491 @@
+# ============================================================================
+# Investment Decision Tree v2 — NRA Edition (Jun 10 → Sep 2026)
+# Machine-readable encoding of investment-decision-tree-v2-nra.pdf.
+#
+# This file is the single source of truth for:
+#   - the five flags (O/F/I/S/C) and their GREEN/YELLOW/RED thresholds
+#   - the composite deployment rule
+#   - standing sell/hold rules for existing positions (§3)
+#   - cycle playbooks 0–3 (§4)
+#   - never-buy list (§5), re-entry lockouts, position caps
+#   - catalyst calendar (§2)
+#   - NRA tax engine facts (§8)
+#
+# Quantitative flags (O, I, S) are looked up live. Qualitative flags (F tone,
+# C capex) come from configs/flag_overrides.yaml with an automatic fallback.
+# Research framework only — not personalized financial advice.
+# ============================================================================
+
+version: v2-nra
+as_of: "2026-06-10"
+horizon_end: "2026-09-30"
+owner: Arka
+
+# Sizing: dollar amounts in cycle rules assume this monthly contribution.
+# Scale ±20% for $2k / $3k months.
+monthly_contribution: 2500
+
+baseline:
+  # Jun 10 invested value — anchor for rule 3.4 (15% drawdown → semi freeze).
+  invested_value: 15900.0
+  drawdown_semi_freeze: 0.15
+
+# ── §1 THE FIVE FLAGS ───────────────────────────────────────────────────────
+flags:
+  O:
+    name: "Oil / Iran"
+    metric: "Brent crude front month"
+    source: "yfinance BZ=F"
+    green: "< $85 and falling (or real deal — set via override)"
+    yellow: "$85–105"
+    red: "> $105 sustained (5-day avg), or Hormuz re-closed / strikes resume"
+    thresholds: {green_below: 85.0, red_above: 105.0}
+  F:
+    name: "Fed"
+    metric: "Policy + tone"
+    source: "FRED DFEDTARU trend + manual tone override"
+    green: "Hold, neutral/dovish"
+    yellow: "Hold, hawkish"
+    red: "Hike, or dots/statement signal hikes"
+    lookback_days: 75   # window for detecting a target-rate move
+  I:
+    name: "Inflation"
+    metric: "Core CPI m/m (CPILFESL), headline YoY (CPIAUCSL)"
+    source: "FRED"
+    green: "core m/m ≤ 0.2%"
+    yellow: "core m/m 0.3%"
+    red: "core m/m ≥ 0.4%, or headline YoY > 5%"
+    thresholds: {green_mom: 0.2, red_mom: 0.4, red_headline_yoy: 5.0}
+  S:
+    name: "Semi tape"
+    metric: "Nasdaq-100 level"
+    source: "yfinance ^NDX"
+    green: "> 30,034"
+    yellow: "28,663–30,034"
+    red: "< 28,663 (trend broken; 50-day ≈ 27,834 at print)"
+    thresholds: {green_above: 30034.0, red_below: 28663.0}
+  C:
+    name: "AI capex"
+    metric: "Hyperscaler capex guidance"
+    source: "manual override (earnings coverage); TSM monthly rev = telemetry"
+    green: "Maintained / raised"
+    yellow: "Mixed / murky"
+    red: "Any major announces a capex cut — the one true cycle-breaker"
+
+composite:
+  # GREEN  = ≥4 flags green, 0 red  → deploy 100% of the cycle's cash
+  # YELLOW = anything else          → deploy in 2 halves ~2 weeks apart
+  # RED    = any flag red           → defensives only, max 25% of tranche
+  green_min_greens: 4
+  deployment: {GREEN: 1.0, YELLOW: 0.5, RED: 0.25}
+  # C=RED alone overrides everything for semis — no semi buys, period.
+  semi_freeze_flags: [C, S]
+
+defensives: [NVO, PGR, SPAXX]
+
+# ── Ticker classification (drives semi-freeze and sector gates) ────────────
+ticker_classes:
+  semi:     [NVDA, AMD, TSM, MU, AVGO, ARM, MRVL, QCOM, INTC, GFS, SMCI, SNDK, NBIS, CRWV, APLD, IREN]
+  semicap:  [ASML, LRCX, KLAC, AMAT, TER, SNPS, CDNS, TOELY, SUMCF, SHECY, LITE]
+  hyperscaler: [MSFT, GOOGL, GOOG, AMZN, META, ORCL]
+  defensive: [NVO, PGR, INCY, NBIX, GILD, EXEL, UTHR]
+  speculative: [BE, APLD, IREN, SBET]   # "BE = most speculative, not in any rule"
+
+# ── §3 STANDING SELL / HOLD RULES (existing positions — definitive) ────────
+# NRA prime directive: realized gains cost ≈36% all-in. Winners are not sold
+# for "rebalancing" — concentration is fixed by steering NEW cash elsewhere.
+standing_rules:
+  - tickers: [TSM, NVDA, SPMO, GOOGL, AMD, CRWD, AMZN]
+    kind: hold_winner
+    note: "HOLD — do not trim. Sell only on thesis break (Taiwan escalation, C=RED capex cycle-break)."
+  - tickers: [META]
+    kind: hold_core
+    note: "No sell trigger — contrarian core. Add-rule lives in Cycle 2 (rule 2.3)."
+  - tickers: [MSFT]
+    kind: hold_accumulate
+    note: "Buy-rules in Cycle 0/1."
+  - tickers: [HOOD]
+    kind: stop_and_trim
+    stop_below: 75.0          # close < $75 → SELL ALL (≈15% trail)
+    trim_above: 110.0         # > $110 blow-off → TRIM 1/2
+    note: "Gain lands in the 2026 tax shield — a HOOD sale is ~federally free this year."
+  - tickers: [NOW]
+    kind: probation_floor
+    hard_floor: 95.0          # closes < $95 → sell without waiting
+    event_key: now_q2
+    event_sell_value: guide_cut
+    note: "Probation through late-Jul earnings. Guide cut → SELL, same-week redeploy into MSFT."
+  - tickers: [CRM]
+    kind: probation_floor
+    hard_floor: 155.0
+    event_key: crm_q2
+    event_sell_value: guide_cut
+    note: "Same swap logic as NOW."
+  - tickers: [UBER]
+    kind: probation_band
+    sell_below: 62.0
+    strength_exit: [78.0, 82.0]   # bounces here first → SELL into strength
+    event_key: uber_q2
+    event_sell_value: weak_guide
+    note: "Probation into ~early-Aug earnings."
+  - tickers: [DASH]
+    kind: exit_band
+    recovery_exit: [170.0, 185.0]
+    capitulation_below: 140.0
+    note: "No tax reason to rush — NRA losses past the shield do nothing."
+  - tickers: [CRWV]
+    kind: event_kill_switch
+    event_key: crwv_equity_raise
+    note: "HOLD tiny, never add. Announces an equity raise → SELL same day (SMCI precedent −13–21%)."
+  - tickers: [NFLX, SPOT, ORCL, RDDT]
+    kind: starmine_review
+    starmine_below: 2.0
+    note: "Small, fine. StarMine < 2.0 → review."
+  - tickers: [TW]
+    kind: floor
+    sell_below: 90.0
+    note: "Sell if closes < $90."
+  - tickers: [BCS]
+    kind: hold
+    note: "BCS benefits from higher-for-longer."
+
+# ── §5 NEVER-BUY LIST (watchlist verdicts, StarMine ≤ 3) ────────────────────
+never_buy:
+  TSLA: 0.5
+  COIN: 0.5
+  DASH: 0.7
+  RBLX: 0.2
+  ALSN: 0.7
+  Z: 0.7
+  NKE: 0.2
+  HIMS: 0.9
+  CORT: 0.8
+  HOOD: 1.5    # hold ≠ add
+  UBER: 1.2    # hold ≠ add
+  JPM: 1.1
+  CVNA: 3.0
+  BABA: 2.7
+  APLD: 2.7    # dilution-funded infra class
+  KGC: 2.1
+  AEM: 2.1
+  RL: 1.8
+  CL: 1.9
+  VRTX: 2.4
+  ABBV: 7.5    # demoted for NRA specifically — 25–30% dividend leak (§8)
+
+# Re-entry lockouts: the 7 cleanup names. Re-entry EVER requires
+# StarMine > 6 AND price > 50-day MA. (At print, all fail.)
+reentry_lockouts:
+  tickers: [SBET, SQNS, MNDY, INTU, DUOL, COIN, SNAP]
+  min_starmine: 6.0
+  require_above_sma50: true
+
+# ── Position caps (rule 3.5 + per-name caps) ────────────────────────────────
+position_caps:
+  # Any position > max_pct: do NOT sell — new cash is barred from that name
+  # until weight < resume_pct.
+  max_pct: 13.0
+  resume_pct: 11.0
+  per_ticker:
+    MU: 4.0       # China memory risk — hard cap no matter how good Jun 24 looks
+    META: 13.0    # rule 2.3 cap
+    TSM: 12.0     # rule 1.3 substitution guard
+
+# ── §2 CATALYST CALENDAR ────────────────────────────────────────────────────
+catalysts:
+  - {date: "2026-06-11", event: "PPI", flags: [I]}
+  - {date: "2026-06-12", event: "SpaceX IPO (~$1.75T) — liquidity noise; mega-cap dip this week ≠ signal", flags: []}
+  - {date: "2026-06-16", event: "FOMC day 1 (Warsh's first meeting) + retail sales", flags: [F]}
+  - {date: "2026-06-17", event: "FOMC decision + dots — nothing gets bought before this", flags: [F]}
+  - {date: "2026-06-24", event: "Micron earnings — the MU binary (rules 0.5–0.8)", flags: [S]}
+  - {date: "2026-07-02", event: "June jobs report (~Jul 2–3)", flags: [F]}
+  - {date: "2026-07-10", event: "TSM monthly/Q2 revenue — best real-time AI telemetry", flags: [C]}
+  - {date: "2026-07-14", event: "June CPI (~Jul 14–16)", flags: [I]}
+  - {date: "2026-07-15", event: "ASML earnings", flags: [C, S]}
+  - {date: "2026-07-16", event: "TSM earnings", flags: [C, S]}
+  - {date: "2026-07-28", event: "FOMC Jul 28–29 + late-Jul MSFT/META/GOOGL/AMZN earnings — the capex verdict", flags: [C, F]}
+  - {date: "2026-08-12", event: "July CPI (~Aug 12)", flags: [I]}
+  - {date: "2026-08-25", event: "NVDA earnings (late Aug) + Jackson Hole window", flags: [C, F]}
+  - {date: "2026-09-30", event: "Rolling: Iran talks · CXMT Shanghai listing · YMTC IPO", flags: [O]}
+
+# ── §4 CYCLE PLAYBOOKS ──────────────────────────────────────────────────────
+# Conditions:
+#   flags_any: {F: [YELLOW]}  → flag F must be one of the listed colors
+#   flags_not: {S: [RED]}     → flag S must NOT be any of the listed colors
+#   composite: [YELLOW]       → composite must be one of these
+#   event: {key: mu_jun24, equals: beat_raise_flat}  → manual event in
+#          configs/flag_overrides.yaml must equal this value
+# Orders:
+#   max_price / min_price / price_range guard execution — if price is outside
+#   the range at order time, THE RULE DOES NOT FIRE.
+cycles:
+  - id: "0.0"
+    cycle: 0
+    window: ["2026-06-10", "2026-06-17"]
+    label: "Volatility cluster — BUY NOTHING, HOLD EVERYTHING"
+    condition: {}
+    orders: []
+    note: "SpaceX IPO + Warsh FOMC. Cash earns ~4% in SPAXX."
+
+  - id: "0.1"
+    cycle: 0
+    window: ["2026-06-18", "2026-06-30"]
+    label: "Post-FOMC base case"
+    condition:
+      flags_any: {F: [YELLOW], I: [GREEN]}
+      flags_not: {S: [RED]}
+    orders:
+      - {ticker: NVO, dollars: 450, max_price: 45.0, approx_shares: "~10 sh"}
+      - {ticker: MSFT, dollars: 400, price_range: [380.0, 410.0], approx_shares: "1 sh"}
+    note: "Rest stays SPAXX."
+
+  - id: "0.2"
+    cycle: 0
+    window: ["2026-06-18", "2026-06-30"]
+    label: "Dovish surprise — all of 0.1 plus GOOGL"
+    condition:
+      flags_any: {F: [GREEN]}
+      flags_not: {S: [RED]}
+    includes: ["0.1"]
+    orders:
+      - {ticker: GOOGL, dollars: 700, max_price: 365.0, approx_shares: "2 sh"}
+
+  - id: "0.3"
+    cycle: 0
+    window: ["2026-06-18", "2026-06-30"]
+    label: "F=RED — buy nothing, re-run flags Jul 1"
+    condition:
+      flags_any: {F: [RED]}
+    orders: []
+
+  - id: "0.4"
+    cycle: 0
+    window: ["2026-06-18", "2026-06-30"]
+    label: "S=RED — suspend 0.1/0.2; only the NVO leg may execute"
+    condition:
+      flags_any: {S: [RED]}
+    orders:
+      - {ticker: NVO, dollars: 450, max_price: 45.0}
+
+  - id: "0.5"
+    cycle: 0
+    window: ["2026-06-10", "2026-06-24"]
+    label: "MU before earnings — BUY $0, no exceptions (binary events aren't entries)"
+    condition: {}
+    orders: []
+
+  - id: "0.6"
+    cycle: 0
+    window: ["2026-06-25", "2026-07-15"]
+    label: "MU beat+raise, flat/down 1–3d (sell-the-news)"
+    condition:
+      event: {key: mu_jun24, equals: beat_raise_flat}
+    orders:
+      - {ticker: MU, dollars: 450, spread_weeks: 2, cap_pct: 4.0, approx_shares: "~0.5 sh"}
+
+  - id: "0.7"
+    cycle: 0
+    window: ["2026-06-25", "2026-07-15"]
+    label: "MU beat, gaps up >10% — do not chase; revisit at gap-fill or 20-day MA"
+    condition:
+      event: {key: mu_jun24, equals: beat_gap_up}
+    orders: []
+
+  - id: "0.8"
+    cycle: 0
+    window: ["2026-06-25", "2026-07-22"]
+    label: "MU miss/weak guide — no MU for 4 weeks; semicap sympathy drop >8% w/ intact guide = Cycle-1 semi pick"
+    condition:
+      event: {key: mu_jun24, equals: miss}
+    orders: []
+
+  - id: "1.1"
+    cycle: 1
+    window: ["2026-07-01", "2026-07-31"]
+    label: "July base case (composite YELLOW)"
+    condition:
+      flags_not: {S: [RED], O: [RED], F: [RED], I: [RED]}
+      flags_any: {C: [GREEN]}
+    orders:
+      - {ticker: ASML, dollars: 700, max_price: 1750.0, half: 1, approx_shares: "~0.4 sh"}
+      - {ticker: PGR, dollars: 350, max_price: 205.0, half: 1, approx_shares: "~1.7 sh"}
+      - {ticker: GOOGL, dollars: 700, max_price: 365.0, half: 2, requires_flag: {I: [GREEN]}}
+      - {ticker: MSFT, dollars: 400, max_price: 410.0, half: 2, requires_flag: {I: [YELLOW]}}
+    note: "Half 1 ≈ Jul 1–5, Half 2 after CPI ≈ Jul 15. I=RED → hold cash."
+
+  - id: "1.2"
+    cycle: 1
+    window: ["2026-07-01", "2026-07-31"]
+    label: "O flips GREEN — relief-rally config: both halves immediately + LRCX"
+    condition:
+      flags_any: {O: [GREEN]}
+    includes: ["1.1"]
+    orders:
+      - {ticker: LRCX, dollars: 650, max_price: 330.0, approx_shares: "2 sh"}
+
+  - id: "1.3"
+    cycle: 1
+    window: ["2026-07-01", "2026-07-31"]
+    label: "TSM alternative — may substitute $300 TSM for the ASML leg (never both)"
+    condition:
+      price_below: {TSM: 390.0}
+      position_below_pct: {TSM: 12.0}
+    orders:
+      - {ticker: TSM, dollars: 300, max_price: 390.0, substitutes_for: ASML}
+
+  - id: "1.4"
+    cycle: 1
+    window: ["2026-07-01", "2026-07-31"]
+    label: "Any flag RED — defensives only, ≤$500 NVO/PGR, rest SPAXX"
+    condition:
+      composite: [RED]
+    orders:
+      - {ticker: NVO, dollars: 250}
+      - {ticker: PGR, dollars: 250}
+
+  - id: "1.5"
+    cycle: 1
+    window: ["2026-07-01", "2026-07-31"]
+    label: "S=RED — zero semi buys; ASML/LRCX legs → MSFT or cash"
+    condition:
+      flags_any: {S: [RED]}
+    orders:
+      - {ticker: MSFT, dollars: 700, max_price: 410.0}
+
+  - id: "1.6"
+    cycle: 1
+    window: ["2026-07-08", "2026-07-31"]
+    label: "MU follow-through — complete the $450 only if MU holds its post-earnings low"
+    condition:
+      event: {key: mu_holds_post_earnings_low, equals: true}
+    orders:
+      - {ticker: MU, dollars: 450, cap_pct: 4.0}
+
+  - id: "2.1"
+    cycle: 2
+    window: ["2026-08-01", "2026-08-31"]
+    label: "C=GREEN — buy the semicap laggard (worst 1-mo of ASML/LRCX/KLAC w/ StarMine ≥8.5) + 2nd diversifier"
+    condition:
+      flags_any: {C: [GREEN]}
+      flags_not: {S: [RED]}
+    orders:
+      - {ticker: SEMICAP_LAGGARD, dollars: 900, choose_from: [ASML, LRCX, KLAC], min_starmine: 8.5}
+      - {ticker: DIVERSIFIER, dollars: 600, choose_from: [NVO, PGR, INCY], rule: "lowest vs its 50-day, not already owned"}
+
+  - id: "2.2"
+    cycle: 2
+    window: ["2026-08-01", "2026-08-31"]
+    label: "C=RED — semi freeze: MSFT + defensive, probation bar rises"
+    condition:
+      flags_any: {C: [RED]}
+    orders:
+      - {ticker: MSFT, dollars: 800, approx_shares: "2 sh"}
+      - {ticker: NVO, dollars: 600, alt: PGR}
+    note: "NOW/CRM need clean beats to survive their next prints."
+
+  - id: "2.3"
+    cycle: 2
+    window: ["2026-07-28", "2026-08-31"]
+    label: "META add — post-earnings, cc growth ≥25%, price ≤ $580, C≠RED"
+    condition:
+      event: {key: meta_q2_cc_growth_ge_25, equals: true}
+      flags_not: {C: [RED]}
+      price_below: {META: 580.0}
+    orders:
+      - {ticker: META, dollars: 500, max_price: 580.0, cap_pct: 13.0, approx_shares: "~0.9 sh"}
+
+  - id: "2.4"
+    cycle: 2
+    window: ["2026-07-28", "2026-08-31"]
+    label: "META growth <20% cc or DAP decline accelerating — BUY $0 (still HOLD)"
+    condition:
+      event: {key: meta_q2_bear_case, equals: true}
+    orders: []
+
+  - id: "2.5"
+    cycle: 2
+    window: ["2026-08-20", "2026-09-15"]
+    label: "NVDA post-earnings dip — the only NVDA add allowed (already ~9%)"
+    condition:
+      event: {key: nvda_q2_dc_guidance_intact, equals: true}
+      price_below: {NVDA: 180.0}
+    orders:
+      - {ticker: NVDA, dollars: 300, max_price: 180.0, approx_shares: "~1.6 sh"}
+
+  - id: "2.6"
+    cycle: 2
+    window: ["2026-07-25", "2026-08-31"]
+    label: "NOW/CRM guide cut → SELL → proceeds fund 2.2's MSFT leg same week"
+    condition:
+      event: {key: now_or_crm_guide_cut, equals: true}
+    orders:
+      - {ticker: MSFT, dollars: 800, funded_by: "NOW/CRM sale proceeds"}
+
+  - id: "3.1"
+    cycle: 3
+    window: ["2026-09-01", "2026-09-30"]
+    label: "O=GREEN + C=GREEN — pyramid best Jul/Aug buy + start GEV after a clean Q2 print"
+    condition:
+      flags_any: {O: [GREEN], C: [GREEN]}
+      event: {key: gev_clean_q2, equals: true}
+    orders:
+      - {ticker: BEST_RECENT_BUY, dollars: 700, rule: "best performer among your Jul/Aug buys"}
+      - {ticker: GEV, dollars: 450, price_range: [800.0, 900.0], approx_shares: "~0.5 sh"}
+
+  - id: "3.2"
+    cycle: 3
+    window: ["2026-09-01", "2026-09-30"]
+    label: "O still YELLOW — repeat the 1.1 structure with unfilled legs; no GEV"
+    condition:
+      flags_any: {O: [YELLOW]}
+    includes: ["1.1"]
+    orders: []
+
+  - id: "3.3"
+    cycle: 3
+    window: ["2026-09-01", "2026-09-30"]
+    label: "O=RED — 100% of tranche → NVO/PGR/SPAXX, nothing else"
+    condition:
+      flags_any: {O: [RED]}
+    orders:
+      - {ticker: NVO, dollars: 0, note: "split tranche across NVO/PGR/SPAXX"}
+
+  - id: "3.4"
+    cycle: 3
+    window: ["2026-06-10", "2026-09-30"]
+    label: "Portfolio drawdown >15% from Jun 10 (~$13.5k) — suspend ALL semi adds for the quarter"
+    condition:
+      portfolio_drawdown_gt: 0.15
+    orders: []
+
+  - id: "3.5"
+    cycle: 3
+    window: ["2026-06-10", "2026-12-31"]
+    label: "Concentration check (NRA version) — >13% positions: bar new cash until <11%, never sell"
+    condition: {}
+    orders: []
+
+# ── §8 NRA TAX ENGINE ───────────────────────────────────────────────────────
+tax:
+  status: "Nonresident alien (F-1 yr 3, 183+ days) · NY State tax resident"
+  federal_rate: 0.30          # flat on net US-source capital gains (Schedule NEC, 1040-NR)
+  state_rate: 0.06            # NY at bracket
+  shield_year: 2026
+  # Realized YTD baseline (from the portfolio JSON cleanup ledger). The blotter
+  # adds to this. Net ≈ –$905 → ~$905 of additional 2026 gains cost ~$0.
+  notes:
+    - "No long-term rate, no short-term rate — holding period is irrelevant federally."
+    - "Losses are same-year-only: no carryforward, no $3k income offset. Unabsorbed losses evaporate Dec 31."
+    - "Never trim winners outside the shield while 183-day NRA + NY resident (~36% haircut)."
+    - "Departure-year window (<183 days present): US-source gains 0% federal — the natural year to realize big embedded gains; end NY domicile first."
+    - "Dividends leak 25–30% (US-India treaty trims portfolio dividends to ~25%) → ABBV demoted; prefer sub-1% yielders and zero-dividend growth."
+    - "SPAXX distributions generally treaty/portfolio-interest-exempt for NRAs."
+    - "Confirm Fidelity W-8BEN on file (expect 1042-S, not 1099-B/DIV)."
+
+# Pre-buy chart check (§7) — surfaced in the briefing as a manual checklist.
+prebuy_checklist:
+  - "Price vs 50-day MA — quality below it = dip; >15% above = chase"
+  - "Price vs 200-day MA — below needs a fundamental reason"
+  - "Distance from 52-wk high — quality at −10–20% = sweet spot; −40%+ = market knows something"
+  - "Unfilled earnings gaps — gap-downs above = resistance; gap-ups below = support"
+  - "Volume — shrinking down-days + expanding up-days = accumulation"

@@ -1,0 +1,169 @@
+# Master research universe (153 symbols).
+#
+# Superset: the original universe_100 list merged with every ticker from
+# "portfolio and watchlist.json" (holdings + watchlist + recently-sold).
+# The daily/decision pipeline runs on configs/universe_core.yaml by default;
+# use this master list for breadth (training, cross-sectional context):
+#   ts ingest --universe master
+
+name: universe_master
+benchmark: SPY
+
+required:
+  - META
+  - COIN
+  - AMZN
+  - INTC
+  - SNPS
+  - DUOL
+  - AVGO
+  - MSFT
+  - SNAP
+  - MRVL
+  - SQNS
+  - TW
+  - TSM
+  - ADBE
+  - INTU
+  - UBER
+  - CRM
+  - GOOG
+  - NOW
+  - LLY
+  - SFM
+  - SBET
+  - MNDY
+  - ALSN
+  - NVDA
+  - NFLX
+  - AAPL
+  - SMCI
+  - ARM
+  - CRWD
+  - QCOM
+  - DELL
+  - IBM
+  - PANW
+  - GE
+  - RDDT
+  - RBLX
+  - DASH
+  - UNH
+  - ABNB
+  - ZM
+  - DBX
+  - CRWV
+  - ORCL
+  - AMD
+  - NBIS
+  - SPOT
+  - MDB
+  - AMAT
+  - MU
+  - LRCX
+  - ASML
+
+additions:
+  - GOOGL
+  - TSLA
+  - PLTR
+  - SHOP
+  - SNOW
+  - DDOG
+  - NET
+  - ZS
+  - OKTA
+  - PYPL
+  - XYZ
+  - DKNG
+  - BRK-B
+  - JPM
+  - BAC
+  - GS
+  - V
+  - MA
+  - AXP
+  - COST
+  - WMT
+  - HD
+  - MCD
+  - NKE
+  - DIS
+  - KO
+  - PEP
+  - JNJ
+  - PFE
+  - ABBV
+  - MRK
+  - TMO
+  - PG
+  - BA
+  - CAT
+  - DE
+  - HON
+  - RTX
+  - XOM
+  - CVX
+  - VZ
+  - SPY
+  - QQQ
+  - XLK
+  - XLF
+  - XLE
+  - XLV
+  - XLI
+
+  # Merged from portfolio-and-watchlist JSON (2026-06-10):
+  - AEM
+  - APLD
+  - APP
+  - BABA
+  - BCS
+  - BE
+  - CBOE
+  - CDNS
+  - CL
+  - CME
+  - CORT
+  - CVLT
+  - CVNA
+  - DD
+  - DOCU
+  - EAT
+  - EQIX
+  - ETSY
+  - EXEL
+  - F
+  - FNV
+  - GEV
+  - GFS
+  - GILD
+  - GM
+  - HIMS
+  - HOOD
+  - INCY
+  - IREN
+  - KGC
+  - KLAC
+  - LITE
+  - MKKGY
+  - NBIX
+  - NGG
+  - NTNX
+  - NVO
+  - NVS
+  - PGR
+  - RL
+  - SHECY
+  - SNDK
+  - SPMO
+  - STRL
+  - SUMCF
+  - T
+  - TEAM
+  - TER
+  - TOELY
+  - UTHR
+  - VRSN
+  - VRTX
+  - Z

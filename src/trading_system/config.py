@@ -101,6 +101,31 @@ class Config:
         rel = self.raw["paths"][key]
         return (self.project_root / rel).resolve()
 
+    def use_universe(self, universe: str | Path | None) -> "Config":
+        """Swap the active universe in place.
+
+        Accepts a named alias from `universe_files` (core | master | 100)
+        or a direct path to a universe YAML. Returns self for chaining.
+        """
+        if not universe:
+            return self
+        aliases = self.raw.get("universe_files") or {}
+        rel = aliases.get(str(universe), universe)
+        upath = (self.project_root / rel).resolve()
+        if not upath.exists():
+            raise FileNotFoundError(f"universe file not found: {upath} (from {universe!r})")
+        with open(upath) as f:
+            u = yaml.safe_load(f)
+        tickers = list(dict.fromkeys((u.get("required") or []) + (u.get("additions") or [])))
+        self.raw["universe"] = {
+            "name": u.get("name", str(universe)),
+            "benchmark": u.get("benchmark", "SPY"),
+            "tickers": tickers,
+            "required": u.get("required") or [],
+            "additions": u.get("additions") or [],
+        }
+        return self
+
     def __getitem__(self, k: str) -> Any:
         return self.raw[k]
 

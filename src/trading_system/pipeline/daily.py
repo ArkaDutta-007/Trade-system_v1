@@ -153,6 +153,56 @@ def run_daily_pipeline(cfg: Config | None = None) -> Path:
     )
     prices = dict(zip(todays_prices["ticker"], todays_prices["adj_close"]))
 
+    # 7b. Flag overlay on today's deployment (v2 playbook §1):
+    #     composite scales gross deployment (GREEN 100% / YELLOW 50% / RED 25%),
+    #     semi freeze zeroes semi+semicap buys, never-buy names get no new weight.
+    flags_summary = None
+    standing_checks_dicts: list[dict] = []
+    try:
+        from ..flags import get_flag_snapshot
+        from ..playbook import evaluate_standing_rules, load_playbook, load_portfolio
+
+        playbook = load_playbook(cfg)
+        snapshot = get_flag_snapshot(
+            cfg, max_age_minutes=float(cfg.get("playbook", {}).get("flag_cache_minutes", 60))
+        )
+        flags_summary = snapshot.to_dict()
+        frac = snapshot.composite.deployment_fraction
+        gated = {}
+        dropped: dict[str, str] = {}
+        for t, w in target.items():
+            if w > 0 and t in playbook.never_buy:
+                dropped[t] = "never-buy list (§5)"
+                continue
+            if w > 0 and snapshot.composite.semi_freeze and playbook.is_semi(t):
+                dropped[t] = "semi freeze (C/S=RED)"
+                continue
+            if w > 0 and snapshot.composite.defensives_only and t not in playbook.defensives:
+                dropped[t] = "composite RED — defensives only"
+                continue
+            gated[t] = w * frac if w > 0 else w
+        if dropped:
+            logger.info(f"flag overlay dropped buys: {dropped}")
+        logger.info(f"flag overlay: {snapshot.summary_line()}")
+        target = gated
+
+        # Standing-rule checks against today's closes (live audit in the report)
+        try:
+            portfolio = load_portfolio(cfg)
+            checks = evaluate_standing_rules(playbook, portfolio, prices)
+            standing_checks_dicts = [c.to_dict() for c in checks]
+            hot = [c for c in checks if c.status in ("TRIGGERED", "NEAR")]
+            for c in hot:
+                emit_alert(
+                    "WARNING" if c.status == "NEAR" else "ERROR",
+                    f"standing rule {c.status}: {c.ticker} {c.action}",
+                    {"detail": c.detail},
+                )
+        except FileNotFoundError:
+            logger.debug("portfolio JSON not found — skipping standing-rule checks")
+    except Exception as e:
+        logger.warning(f"flag overlay skipped (non-fatal): {e}")
+
     broker = PaperBroker.from_journal(reports / "paper_broker.json", cost_bps=cost.total_bps)
     equity = broker.equity(prices) if broker.holdings else cfg["backtest"]["initial_cash"]
     orders = weights_to_orders(target, broker.holdings, prices, equity)
@@ -197,6 +247,8 @@ def run_daily_pipeline(cfg: Config | None = None) -> Path:
         "run_at": datetime.utcnow().isoformat(),
         "as_of_date": str(today),
         "metrics": {k: (float(v) if hasattr(v, "__float__") else v) for k, v in metrics.items()},
+        "flags": flags_summary,
+        "standing_rule_checks": standing_checks_dicts,
         "todays_target_weights": target,
         "todays_orders": [
             {"ticker": o.ticker, "qty": o.qty, "side": o.side, "notional": o.notional}

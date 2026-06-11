@@ -14,6 +14,8 @@ trading-system/
 ├── data/                # raw / bronze / silver / gold (parquet)
 ├── src/trading_system/
 │   ├── ingestion/       # market_data, sec_filings, macro_fred, news_events, calendar_events
+│   ├── flags/           # V3: live O/F/I/S/C flag lookups + composite regime
+│   ├── playbook/        # V3: standing rules, compliance, cycles, NRA tax, blotter, briefing
 │   ├── features/        # technical, regimes, fundamentals, sentiment, event_features, build
 │   ├── strategies/      # baseline_momentum, mean_reversion, event_driven, ml_signal
 │   ├── backtesting/     # vectorized, event_driven, slippage, metrics
@@ -28,10 +30,53 @@ trading-system/
 │   ├── cli.py           # `ts` command-line entry point
 │   └── config.py
 ├── tests/               # unit, integration, data_quality, leakage_tests, backtest_regression
-├── configs/default.yaml
+├── configs/             # default.yaml · universe_core/master · playbook_v2 · flag_overrides
 ├── scripts/             # dashboard.py, prefect_flow.py
 └── pyproject.toml
 ```
+
+## Decision-tree playbook v2 (NRA edition)
+
+The system enforces `investment-decision-tree-v2-nra.pdf`, encoded in
+[`configs/playbook_v2.yaml`](configs/playbook_v2.yaml). Portfolio truth comes
+from `portfolio and watchlist.json` (Fidelity snapshot); post-snapshot fills
+are layered on via the blotter.
+
+### The five flags — live lookup
+
+| Flag | Metric | Source | GREEN / YELLOW / RED |
+| --- | --- | --- | --- |
+| **O** Oil/Iran | Brent front month | yfinance `BZ=F` | <85 falling / 85–105 / >105 sustained |
+| **F** Fed | policy + tone | FRED `DFEDTARU` trend + override | dovish hold / hawkish hold / hike |
+| **I** Inflation | core CPI m/m | FRED `CPILFESL` (keyless) | ≤0.2 / 0.3 / ≥0.4 or headline>5% |
+| **S** Semi tape | Nasdaq-100 | yfinance `^NDX` | >30,034 / band / <28,663 |
+| **C** AI capex | hyperscaler guidance | manual override | maintained / mixed / any cut |
+
+Composite: GREEN (≥4 green, 0 red) → deploy 100% · YELLOW → halves ·
+RED (any red) → defensives only, 25% max. **C=RED or S=RED → semi freeze.**
+Qualitative state lives in [`configs/flag_overrides.yaml`](configs/flag_overrides.yaml)
+(F tone, C capex, event outcomes like `mu_jun24`); stale overrides are flagged.
+
+```bash
+ts flags --refresh      # live flag board + composite + semi-freeze state
+ts brief                # one-page morning briefing (writes reports/briefings/)
+ts playbook             # which §4 cycle rules fire today, with price guards
+ts check ASML BUY 700   # pre-trade compliance: never-buy, lockouts, caps, freeze
+ts check TSM SELL       # sell screen with NRA tax impact (~36% / 2026 shield)
+ts log-trade HOOD SELL 3.627 76.10   # blotter + realized P&L → tax shield
+ts tax                  # 2026 shield status (≈$905 of gains at $0 federal)
+```
+
+How it gates decisions:
+
+* `ts analyze` / `analyze-all` — a model BUY must clear compliance (never-buy
+  §5, re-entry lockouts, 13%/4% caps, semi freeze, composite RED) or it is
+  downgraded to HOLD; a TRIGGERED §3 standing rule (e.g. HOOD < $75) forces
+  SELL; held-name SELLs get their tax impact attached. Audit trail lands in
+  the report's `playbook` grounding.
+* `ts daily` — today's target weights are scaled by the composite deployment
+  fraction; semi-class and never-buy names are zeroed under freeze; standing
+  rule breaches raise alerts and are written into the daily report JSON.
 
 ## Install
 
@@ -103,19 +148,21 @@ Each report contains:
 * **Model groundings:** model score (5d expected return), feature columns,
   top features by mean-absolute SHAP
 
-## Universe (100 symbols)
+## Universes
 
-Defined in [`configs/universe_100.yaml`](configs/universe_100.yaml):
+Two maintained lists, switchable per command with `--universe` (`-u`):
 
-* **52 required** (your input): META, COIN, AMZN, INTC, SNPS, DUOL, AVGO,
-  MSFT, SNAP, MRVL, SQNS, TW, TSM, ADBE, INTU, UBER, CRM, GOOG, NOW, LLY,
-  SFM, SBET, MNDY, ALSN, NVDA, NFLX, AAPL, SMCI, ARM, CRWD, QCOM, DELL, IBM,
-  PANW, GE, RDDT, RBLX, DASH, UNH, ABNB, ZM, DBX, CRWV, ORCL, AMD, NBIS,
-  SPOT, MDB, AMAT, MU, LRCX, ASML.
-* **48 additions** for breadth and benchmarks: GOOGL, TSLA, PLTR, SHOP, SNOW,
-  DDOG, NET, ZS, OKTA, PYPL, SQ, DKNG, BRK-B, JPM, BAC, GS, V, MA, AXP, COST,
-  WMT, HD, MCD, NKE, DIS, KO, PEP, JNJ, PFE, ABBV, MRK, TMO, PG, BA, CAT, DE,
-  HON, RTX, XOM, CVX, VZ, SPY, QQQ, XLK, XLF, XLE, XLV, XLI.
+* **core (default)** — [`configs/universe_core.yaml`](configs/universe_core.yaml),
+  118 symbols generated from `portfolio and watchlist.json`: 21 holdings +
+  watchlist (110) + the 7 lockout-monitor names (sold in cleanup, tracked only
+  for the re-entry rule StarMine > 6 AND price > 50-day MA) + SPY/QQQ.
+  The full pipeline (ingest → quality → features → analyze → daily → brief)
+  runs on this list.
+* **master** — [`configs/universe_master.yaml`](configs/universe_master.yaml),
+  153 symbols: the original 100-name research universe merged with every
+  ticker from the portfolio JSON. Use for breadth (training, cross-sectional
+  context): `ts ingest -u master && ts features -u master && ts train`.
+  The legacy list survives as `--universe 100`.
 
 `ts analyze GOOGL` works for tickers outside the configured universe too —
 it fetches that symbol on the fly and runs the full decision pipeline.

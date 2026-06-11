@@ -1,0 +1,138 @@
+# Core trading universe — generated from "portfolio and watchlist.json"
+# (snapshot 2026-06-10). This is the default universe for the full pipeline:
+# ingest, quality, features, analyze, daily, brief.
+#
+# Groups (informational — the loader flattens required + additions):
+#   holdings        (21): current positions across both Fidelity accounts
+#   watchlist-only  (92): monitored, not held
+#   lockout-monitor (3): sold in cleanup; tracked only for the
+#                        re-entry rule (StarMine > 6 AND price > 50-day MA)
+
+name: universe_core
+benchmark: SPY
+
+required:
+  # -- holdings --
+  - AMD
+  - AMZN
+  - BCS
+  - CRM
+  - CRWD
+  - CRWV
+  - DASH
+  - GOOGL
+  - HOOD
+  - META
+  - MSFT
+  - NFLX
+  - NOW
+  - NVDA
+  - ORCL
+  - RDDT
+  - SPMO
+  - SPOT
+  - TSM
+  - TW
+  - UBER
+  # -- watchlist (not held) --
+  - AAPL
+  - ABBV
+  - ABNB
+  - ADBE
+  - AEM
+  - ALSN
+  - AMAT
+  - APLD
+  - APP
+  - ARM
+  - ASML
+  - AVGO
+  - BABA
+  - BAC
+  - BE
+  - CBOE
+  - CDNS
+  - CL
+  - CME
+  - COIN
+  - CORT
+  - COST
+  - CVLT
+  - CVNA
+  - DBX
+  - DD
+  - DELL
+  - DIS
+  - DOCU
+  - DUOL
+  - EAT
+  - EQIX
+  - ETSY
+  - EXEL
+  - F
+  - FNV
+  - GE
+  - GEV
+  - GFS
+  - GILD
+  - GM
+  - GOOG
+  - HIMS
+  - IBM
+  - INCY
+  - INTC
+  - IREN
+  - JPM
+  - KGC
+  - KLAC
+  - LITE
+  - LLY
+  - LRCX
+  - MDB
+  - MKKGY
+  - MNDY
+  - MRVL
+  - MU
+  - NBIS
+  - NBIX
+  - NET
+  - NGG
+  - NKE
+  - NTNX
+  - NVO
+  - NVS
+  - PANW
+  - PGR
+  - PLTR
+  - QCOM
+  - RBLX
+  - RL
+  - SFM
+  - SHECY
+  - SMCI
+  - SNAP
+  - SNDK
+  - SNPS
+  - STRL
+  - SUMCF
+  - T
+  - TEAM
+  - TER
+  - TOELY
+  - TSLA
+  - UNH
+  - UTHR
+  - VRSN
+  - VRTX
+  - WMT
+  - Z
+  - ZM
+  # -- recently sold: re-entry lockout monitoring only --
+  - INTU
+  - SBET
+  - SQNS
+
+additions:
+  # benchmarks / regime context
+  - SPY
+  - QQQ

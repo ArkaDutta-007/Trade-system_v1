@@ -12,7 +12,7 @@ from .config import get_config
 from .decision import analyze_symbol, analyze_all
 from .decision.explain import explain_report, DEEPSEEK_DEFAULT_MODEL
 from .features import build_feature_matrix
-from .ingestion import ingest_universe, fetch_news
+from .ingestion import ingest_universe, fetch_news, compute_apprehension_scores
 from .models.shap_analysis import compute_shap_summary
 from .models.train import FeatureSpec, train_walk_forward
 from .pipeline import run_daily_pipeline
@@ -35,11 +35,16 @@ STRATS = {
     "mean_reversion": lambda: MeanReversionAfterDrop(),
 }
 
+UNIVERSE_OPT = typer.Option(
+    "", "--universe", "-u",
+    help="Universe to use: core (default, from portfolio JSON) | master | 100 | path to YAML",
+)
+
 
 @app.command()
-def ingest(config: str = "configs/default.yaml"):
+def ingest(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     """Ingest the configured universe to bronze parquet."""
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     out = ingest_universe(cfg)
     rprint(f"[green]Wrote {out}[/green]")
 
@@ -99,9 +104,9 @@ def quality(config: str = "configs/default.yaml"):
 
 
 @app.command()
-def features(config: str = "configs/default.yaml"):
+def features(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     """Build the feature matrix and write to gold."""
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     df = pl.read_parquet(cfg.path("data_bronze") / "ohlcv_daily.parquet")
     feat = build_feature_matrix(df, benchmark=cfg["universe"]["benchmark"])
     out = cfg.path("data_gold") / "features.parquet"
@@ -114,11 +119,12 @@ def features(config: str = "configs/default.yaml"):
 def backtest(
     strategy: str = typer.Argument("momentum_rotation"),
     config: str = "configs/default.yaml",
+    universe: str = UNIVERSE_OPT,
 ):
     """Backtest a named strategy on the gold features."""
     if strategy not in STRATS:
         raise typer.BadParameter(f"Unknown strategy: {strategy}. Options: {list(STRATS)}")
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     ohlcv = pl.read_parquet(cfg.path("data_bronze") / "ohlcv_daily.parquet")
     feats_path = cfg.path("data_gold") / "features.parquet"
     feat = pl.read_parquet(feats_path) if feats_path.exists() else build_feature_matrix(ohlcv)
@@ -273,9 +279,9 @@ def train(config: str = "configs/default.yaml"):
 
 
 @app.command()
-def daily(config: str = "configs/default.yaml"):
+def daily(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     """Run the full daily pipeline."""
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     path = run_daily_pipeline(cfg)
     rprint(f"[green]Daily report: {path}[/green]")
 
@@ -428,9 +434,9 @@ def dashboard(config: str = "configs/default.yaml"):
 
 
 @app.command()
-def universe(config: str = "configs/default.yaml"):
+def universe(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     """Print the configured universe."""
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     u = cfg["universe"]
     rprint(f"[bold]Universe:[/bold] {u.get('name')} (benchmark={u.get('benchmark')})")
     rprint(f"[bold]Required ({len(u.get('required', []))}):[/bold] {', '.join(u.get('required', []))}")
@@ -443,9 +449,10 @@ def analyze(
     ticker: str = typer.Argument(..., help="Symbol to analyze (e.g. GOOGL)"),
     config: str = "configs/default.yaml",
     no_report: bool = typer.Option(False, "--no-report", help="Skip writing markdown/JSON"),
+    universe: str = UNIVERSE_OPT,
 ):
     """Run the full decision pipeline on a single symbol and write a report."""
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     res = analyze_symbol(ticker.upper(), cfg=cfg, write_report=not no_report)
     color = {"BUY": "green", "SELL": "red", "HOLD": "yellow"}.get(res.stance, "white")
     rprint(
@@ -463,9 +470,9 @@ def analyze(
 
 
 @app.command("analyze-all")
-def analyze_all_cmd(config: str = "configs/default.yaml"):
+def analyze_all_cmd(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     """Run the decision pipeline across the entire configured universe."""
-    cfg = get_config(config)
+    cfg = get_config(config).use_universe(universe)
     results = analyze_all(cfg)
     counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
     for r in results:
@@ -1048,6 +1055,260 @@ def signals_cmd(
         f"\n[green]BUY: {buy_n}[/green]  [yellow]HOLD: {hold_n}[/yellow]  "
         f"[red]SELL: {sell_n}[/red]  (total {len(latest)} tickers)"
     )
+
+
+# ── V3: Decision-tree playbook commands (flags / brief / playbook / check) ───
+
+def _flag_color_style(color: str) -> str:
+    return {"GREEN": "green", "YELLOW": "yellow", "RED": "red"}.get(color, "magenta")
+
+
+@app.command("flags")
+def flags_cmd(
+    config: str = "configs/default.yaml",
+    refresh: bool = typer.Option(False, "--refresh", "-r", help="Force live lookups (ignore cache)"),
+    as_json: bool = typer.Option(False, "--json", help="Print raw snapshot JSON"),
+):
+    """Live lookup of the five flags (O/F/I/S/C) + composite deployment rule.
+
+    O Brent · F Fed · I core CPI m/m · S NDX level · C AI capex.
+    Quantitative flags are fetched live (yfinance + FRED, keyless); qualitative
+    ones (F tone, C) come from configs/flag_overrides.yaml.
+    """
+    import json as _json
+    from rich.table import Table
+    from rich.console import Console
+    from .flags import get_flag_snapshot, FLAG_ORDER
+
+    cfg = get_config(config)
+    snap = get_flag_snapshot(
+        cfg, refresh=refresh,
+        max_age_minutes=float(cfg.get("playbook", {}).get("flag_cache_minutes", 60)),
+    )
+    if as_json:
+        rprint(_json.dumps(snap.to_dict(), indent=2, default=str))
+        return
+
+    table = Table(title=f"Flag Board — {snap.as_of}", show_lines=True)
+    table.add_column("Flag", style="bold")
+    table.add_column("Color")
+    table.add_column("Value", justify="right")
+    table.add_column("Reading")
+    table.add_column("Source", style="dim")
+    for f in FLAG_ORDER:
+        r = snap.readings[f]
+        c = _flag_color_style(r.color.value)
+        stale = " ⚠stale" if r.stale else ""
+        table.add_row(
+            f"{f} · {r.name}",
+            f"[{c}]{r.color.value}[/{c}]{stale}",
+            str(r.value) if r.value is not None else "—",
+            r.detail,
+            r.source,
+        )
+    Console().print(table)
+
+    comp = snap.composite
+    cc = _flag_color_style(comp.color.value)
+    rprint(f"\n[bold]COMPOSITE: [{cc}]{comp.color.value}[/{cc}][/bold] — {comp.rationale}")
+    if comp.semi_freeze:
+        rprint("[red bold]SEMI FREEZE — no semi/semicap buys, period.[/red bold]")
+    for w in comp.data_warnings:
+        rprint(f"[yellow]⚠ {w}[/yellow]")
+
+
+@app.command("brief")
+def brief_cmd(
+    config: str = "configs/default.yaml",
+    refresh: bool = typer.Option(False, "--refresh", "-r", help="Force fresh flag lookups"),
+    no_write: bool = typer.Option(False, "--no-write", help="Print only, skip writing files"),
+):
+    """Morning briefing: flags, catalysts, standing rules, cycle rules, caps, tax shield."""
+    from rich.markdown import Markdown
+    from rich.console import Console
+    from .flags import get_flag_snapshot
+    from .playbook import build_briefing, render_markdown, write_briefing
+
+    cfg = get_config(config)
+    snap = get_flag_snapshot(
+        cfg, refresh=refresh,
+        max_age_minutes=float(cfg.get("playbook", {}).get("flag_cache_minutes", 60)),
+    )
+    brief = build_briefing(cfg, snap)
+    md = render_markdown(brief)
+    Console().print(Markdown(md))
+    if not no_write:
+        md_path, json_path = write_briefing(cfg, brief)
+        rprint(f"\n[dim]written: {md_path}\n         {json_path}[/dim]")
+
+
+@app.command("playbook")
+def playbook_cmd(
+    config: str = "configs/default.yaml",
+    cycle: int = typer.Option(-1, "--cycle", help="Show only this cycle (0–3)"),
+    all_rules: bool = typer.Option(False, "--all", help="Include INACTIVE rules"),
+):
+    """Evaluate the §4 cycle rules against live flags, prices, and events."""
+    from rich.console import Console
+    from rich.table import Table
+    from .flags import get_flag_snapshot
+    from .playbook import evaluate_cycles, load_playbook, load_portfolio
+    from .playbook.briefing import _live_prices
+
+    cfg = get_config(config)
+    pb = load_playbook(cfg)
+    pf = load_portfolio(cfg)
+    snap = get_flag_snapshot(
+        cfg, max_age_minutes=float(cfg.get("playbook", {}).get("flag_cache_minutes", 60))
+    )
+    prices = _live_prices(pb, pf)
+    evals = evaluate_cycles(pb, pf, snap, prices, include_inactive=all_rules)
+    if cycle >= 0:
+        evals = [e for e in evals if e.cycle == cycle]
+
+    rprint(f"[bold]{snap.summary_line()}[/bold]\n")
+    table = Table(title="Cycle Rules", show_lines=True)
+    table.add_column("Rule", style="bold", width=6)
+    table.add_column("Status", width=14)
+    table.add_column("Label")
+    table.add_column("Why / Orders")
+    style = {
+        "FIRES": "green", "PRICE_GUARD": "yellow",
+        "AWAITING_EVENT": "cyan", "BLOCKED_FLAGS": "red", "INACTIVE": "dim",
+    }
+    for e in evals:
+        s = style.get(e.status, "white")
+        bits = list(e.reasons)
+        for o in e.orders:
+            px = f"{o.price:.2f}" if o.price else "?"
+            mark = "✓" if o.price_ok else "✗"
+            comp = (o.compliance or {}).get("verdict", "")
+            bits.append(f"{mark} {o.ticker} ${o.dollars:,.0f} (guard {o.guard}, last {px}) {comp}")
+        table.add_row(e.rule_id, f"[{s}]{e.status}[/{s}]", e.label, "\n".join(bits) or "—")
+    Console().print(table)
+
+
+@app.command("check")
+def check_cmd(
+    ticker: str = typer.Argument(..., help="Symbol to screen"),
+    side: str = typer.Argument("BUY", help="BUY or SELL"),
+    dollars: float = typer.Argument(0.0, help="Order size in USD (SELL: 0 = full position)"),
+    config: str = "configs/default.yaml",
+):
+    """Pre-trade compliance check: never-buy, lockouts, caps, semi freeze, tax."""
+    from .flags import get_flag_snapshot
+    from .playbook import blotter_realized, check_trade, load_playbook, load_portfolio
+    from .playbook.briefing import _live_prices
+
+    cfg = get_config(config)
+    pb = load_playbook(cfg)
+    pf = load_portfolio(cfg)
+    snap = get_flag_snapshot(
+        cfg, max_age_minutes=float(cfg.get("playbook", {}).get("flag_cache_minutes", 60))
+    )
+    prices = _live_prices(pb, pf)
+
+    # 50d MA for lockout names (needed for the re-entry condition)
+    sma50: dict[str, float] = {}
+    if ticker.upper() in pb.lockout_tickers:
+        try:
+            from .flags.lookups import _yf_history
+            px = _yf_history(ticker.upper(), period="6mo").sort("date")
+            sma50[ticker.upper()] = float(px["close"].tail(50).mean())
+        except Exception:
+            pass
+
+    realized = blotter_realized(cfg.path("reports"), year=int(pb.tax.get("shield_year", 2026)))
+    res = check_trade(
+        ticker, side, dollars, pb, pf,
+        snapshot=snap, prices=prices, sma50=sma50, blotter_realized=realized,
+    )
+    color = "green" if res.allowed else "red"
+    rprint(f"[bold {color}]{res.verdict}[/bold {color}] — {res.side} {res.ticker} "
+           + (f"${dollars:,.0f}" if dollars else "(full position)" if res.side == 'SELL' else ""))
+    for v in res.violations:
+        rprint(f"  [red]✗ {v}[/red]")
+    for w in res.warnings:
+        rprint(f"  [yellow]⚠ {w}[/yellow]")
+    if res.tax:
+        rprint(f"  [cyan]tax: {res.tax['note']}[/cyan]")
+    rprint(f"\n[dim]{snap.summary_line()}[/dim]")
+
+
+@app.command("log-trade")
+def log_trade_cmd(
+    ticker: str = typer.Argument(...),
+    side: str = typer.Argument(..., help="BUY or SELL"),
+    qty: float = typer.Argument(...),
+    price: float = typer.Argument(...),
+    account: str = typer.Option("Z32148892", "--account"),
+    basis: float = typer.Option(-1.0, "--basis", help="Average cost basis (SELL: enables realized P&L)"),
+    date_str: str = typer.Option("", "--date", help="Trade date YYYY-MM-DD (default today)"),
+    note: str = typer.Option("", "--note"),
+    config: str = "configs/default.yaml",
+):
+    """Log an executed fill to the blotter (reports/blotter.csv).
+
+    Runs the compliance check first and stores its verdict alongside the fill —
+    SELL realized P&L feeds the 2026 NRA tax-shield tracker automatically.
+    """
+    from .flags import get_flag_snapshot
+    from .playbook import check_trade, load_playbook, load_portfolio, log_trade
+
+    cfg = get_config(config)
+    verdict = ""
+    try:
+        pb = load_playbook(cfg)
+        pf = load_portfolio(cfg)
+        snap = get_flag_snapshot(
+            cfg, max_age_minutes=float(cfg.get("playbook", {}).get("flag_cache_minutes", 60))
+        )
+        res = check_trade(ticker, side, qty * price, pb, pf, snapshot=snap,
+                          prices={ticker.upper(): price})
+        verdict = res.verdict
+        if not res.allowed:
+            rprint(f"[red bold]NOTE: this fill violates the playbook:[/red bold]")
+            for v in res.violations:
+                rprint(f"  [red]✗ {v}[/red]")
+        # auto-fill basis from the portfolio snapshot if not provided
+        if basis < 0 and side.upper() == "SELL":
+            pos = pf.position(ticker)
+            if pos:
+                basis = pos.average_cost
+                rprint(f"[dim]basis from portfolio snapshot: {basis:.2f}[/dim]")
+    except Exception as e:
+        rprint(f"[yellow]compliance check skipped: {e}[/yellow]")
+
+    row = log_trade(
+        cfg.path("reports"), ticker, side, qty, price,
+        trade_date=date_str or None, account=account,
+        avg_cost_basis=basis if basis >= 0 else None,
+        compliance_verdict=verdict, note=note,
+    )
+    rprint(f"[green]logged:[/green] {row['trade_date']} {row['side']} {row['qty']} "
+           f"{row['ticker']} @ {row['price']} (${row['dollars']:,.2f})"
+           + (f"  realized P&L: {row['realized_pnl']}" if row['realized_pnl'] != "" else ""))
+
+
+@app.command("tax")
+def tax_cmd(config: str = "configs/default.yaml"):
+    """2026 NRA tax-shield status (JSON cleanup ledger + blotter SELLs)."""
+    from .playbook import blotter_realized, load_playbook, load_portfolio, shield_status
+
+    cfg = get_config(config)
+    pb = load_playbook(cfg)
+    pf = load_portfolio(cfg)
+    realized = blotter_realized(cfg.path("reports"), year=int(pb.tax.get("shield_year", 2026)))
+    s = shield_status(pb, pf, realized)
+    rprint(f"[bold]NRA Tax Shield — {s.year}[/bold]")
+    rprint(f"  realized gains:   [green]{s.realized_gains:+,.2f}[/green]")
+    rprint(f"  realized losses:  [red]{s.realized_losses:+,.2f}[/red]")
+    rprint(f"  net realized:     {s.net_realized:+,.2f}")
+    c = "green" if s.shield_remaining > 0 else "yellow"
+    rprint(f"  shield remaining: [{c}]${s.shield_remaining:,.2f}[/{c}] of gains at ~$0 tax (expires Dec 31)")
+    rprint(f"  beyond shield:    ~{s.all_in_rate:.0%} all-in haircut on net gains")
+    for n in pb.tax.get("notes", []):
+        rprint(f"  [dim]· {n}[/dim]")
 
 
 if __name__ == "__main__":

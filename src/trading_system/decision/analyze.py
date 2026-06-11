@@ -182,6 +182,102 @@ def _stance(
     return "HOLD", reasons
 
 
+def _playbook_overlay(
+    ticker: str,
+    stance: str,
+    cfg: Config,
+    last_price: float | None,
+) -> tuple[str, list[str], dict]:
+    """Apply the v2 decision-tree playbook on top of the model stance.
+
+    Order of authority (PDF is explicit that §3 rules are definitive):
+      1. A TRIGGERED standing rule forces its action (SELL/TRIM/REVIEW).
+      2. A BUY must clear pre-trade compliance (never-buy, lockouts, caps,
+         semi freeze, composite RED) or it is downgraded to HOLD.
+      3. A SELL of a held name gets its NRA tax impact attached.
+    Fails soft: any error leaves the model stance untouched.
+    """
+    reasons: list[str] = []
+    grounding: dict = {"available": False}
+    try:
+        from ..flags import get_flag_snapshot
+        from ..playbook import (
+            blotter_realized,
+            check_trade,
+            evaluate_standing_rules,
+            load_playbook,
+            load_portfolio,
+            shield_status,
+        )
+
+        playbook = load_playbook(cfg)
+        portfolio = load_portfolio(cfg)
+        cache_min = float(cfg.get("playbook", {}).get("flag_cache_minutes", 60))
+        snapshot = get_flag_snapshot(cfg, max_age_minutes=cache_min)
+
+        prices = {ticker: last_price} if last_price else {}
+        checks = [
+            c for c in evaluate_standing_rules(playbook, portfolio, prices)
+            if c.ticker == ticker
+        ]
+        triggered = [c for c in checks if c.status == "TRIGGERED"]
+        near = [c for c in checks if c.status == "NEAR"]
+
+        grounding = {
+            "available": True,
+            "flags": snapshot.summary_line(),
+            "composite": snapshot.composite.color.value,
+            "deployment_fraction": snapshot.composite.deployment_fraction,
+            "semi_freeze": snapshot.composite.semi_freeze,
+            "standing_rules": [c.to_dict() for c in checks],
+            "held": portfolio.position(ticker) is not None,
+            "never_buy": ticker in playbook.never_buy,
+            "lockout": ticker in playbook.lockout_tickers,
+        }
+
+        if triggered:
+            c = triggered[0]
+            if c.action.startswith(("SELL", "TRIM")):
+                reasons.append(
+                    f"standing rule §3 [{c.kind}] TRIGGERED: {c.action} — {c.detail} (overrides model stance)"
+                )
+                stance = "SELL"
+            else:
+                reasons.append(f"standing rule §3 [{c.kind}] TRIGGERED: {c.action} — {c.detail}")
+        for c in near:
+            reasons.append(f"standing rule watch: {c.detail}")
+
+        enforce = bool(cfg.get("playbook", {}).get("enforce_in_decisions", True))
+        if stance == "BUY" and enforce:
+            comp = check_trade(
+                ticker, "BUY", 0.0, playbook, portfolio,
+                snapshot=snapshot, prices=prices,
+            )
+            grounding["compliance"] = comp.to_dict()
+            if not comp.allowed:
+                reasons.append("playbook blocks BUY → downgraded to HOLD:")
+                reasons.extend(f"  ✗ {v}" for v in comp.violations)
+                stance = "HOLD"
+            else:
+                reasons.extend(f"compliance note: {w}" for w in comp.warnings)
+
+        if stance == "SELL" and portfolio.position(ticker) is not None:
+            realized = blotter_realized(cfg.path("reports"), year=int(playbook.tax.get("shield_year", 2026)))
+            shield = shield_status(playbook, portfolio, realized)
+            pos = portfolio.position(ticker)
+            px = last_price or pos.last_price
+            from ..playbook import sell_impact
+
+            impact = sell_impact(pos.quantity, px, pos.average_cost, shield)
+            grounding["tax_impact_full_exit"] = impact
+            reasons.append(f"NRA tax (full exit): {impact['note']}")
+
+    except Exception as e:
+        logger.warning(f"playbook overlay skipped for {ticker}: {e}")
+        grounding = {"available": False, "error": str(e)}
+    return stance, reasons, grounding
+
+
 def analyze_symbol(
     ticker: str,
     cfg: Config | None = None,
@@ -294,6 +390,13 @@ def analyze_symbol(
     # ---- Stance ----
     stance, stance_reasons = _stance(score, confidence, row, cfg)
 
+    # ---- Playbook overlay (flags + standing rules + compliance + tax) ----
+    last_price = row.get("adj_close") or row.get("close")
+    stance, playbook_reasons, playbook_grounding = _playbook_overlay(
+        ticker, stance, cfg, float(last_price) if last_price else None
+    )
+    stance_reasons = stance_reasons + playbook_reasons
+
     # ---- Groundings ----
     events = _load_events(cfg)
     apprehension_df = _load_apprehension(cfg)
@@ -304,6 +407,7 @@ def analyze_symbol(
         "events": event_grounding(events, ticker),
         "apprehension": _apprehension_grounding(apprehension_df, ticker),
         "model": model_grounding(score if score_source != "rules" else None, feature_columns, shap_summary),
+        "playbook": playbook_grounding,
     }
 
     rationale = stance_reasons + (rule_reasons if score_source == "rules" else [])

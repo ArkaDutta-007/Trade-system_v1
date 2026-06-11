@@ -10,7 +10,22 @@ paths:
   duckdb: data/warehouse.duckdb
 
 # The universe is loaded from a separate file so it can be swapped per run.
-universe_file: configs/universe_100.yaml
+# Default = the core list generated from "portfolio and watchlist.json"
+# (holdings + watchlist + lockout-monitor names). Swap per run with
+# `--universe master` (153-name research superset) or `--universe 100` (legacy).
+universe_file: configs/universe_core.yaml
+universe_files:
+  core: configs/universe_core.yaml
+  master: configs/universe_master.yaml
+  "100": configs/universe_100.yaml
+
+# V3: Decision-tree playbook (flags + standing rules + cycles + NRA tax)
+playbook:
+  file: configs/playbook_v2.yaml
+  overrides: configs/flag_overrides.yaml
+  portfolio: "portfolio and watchlist.json"
+  flag_cache_minutes: 60      # reuse flag snapshot within this window
+  enforce_in_decisions: true  # gate BUY stances through pre-trade compliance
 
 data:
   start_date: "2010-01-01"
