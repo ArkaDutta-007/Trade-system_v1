@@ -6,6 +6,7 @@ uses. It caches snapshots in data/silver/flags_latest.json so a batch run
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -87,17 +88,38 @@ def build_snapshot(cfg: Config) -> FlagSnapshot:
     ov_flags = ov.get("flags", {}) or {}
     events = ov.get("events", {}) or {}
     max_age_days = int(ov.get("max_age_days", 45))
+    silver = cfg.path("data_silver")
 
-    readings = {
-        "O": lookup_oil(
+    # Run the five lookups concurrently — the board builds in ~one slow call's
+    # time (a blocked FRED host no longer serializes behind the price feeds).
+    tasks = {
+        "O": lambda: lookup_oil(
             thresholds=flag_cfg.get("O", {}).get("thresholds"),
             hormuz_closed=bool(events.get("hormuz_closed")),
         ),
-        "F": lookup_fed(lookback_days=int(flag_cfg.get("F", {}).get("lookback_days", 75))),
-        "I": lookup_inflation(thresholds=flag_cfg.get("I", {}).get("thresholds")),
-        "S": lookup_semi_tape(thresholds=flag_cfg.get("S", {}).get("thresholds")),
-        "C": lookup_capex(),
+        "F": lambda: lookup_fed(
+            lookback_days=int(flag_cfg.get("F", {}).get("lookback_days", 75)),
+            cache_dir=silver,
+        ),
+        "I": lambda: lookup_inflation(
+            thresholds=flag_cfg.get("I", {}).get("thresholds"), cache_dir=silver,
+        ),
+        "S": lambda: lookup_semi_tape(thresholds=flag_cfg.get("S", {}).get("thresholds")),
+        "C": lambda: lookup_capex(),
     }
+    readings: dict[str, FlagReading] = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {f: ex.submit(fn) for f, fn in tasks.items()}
+        for f, fut in futures.items():
+            try:
+                readings[f] = fut.result(timeout=30)
+            except Exception as e:
+                logger.warning(f"{f} flag lookup errored: {e}")
+                readings[f] = FlagReading(
+                    flag=f, name=f, color=FlagColor.UNKNOWN, value=None,
+                    detail=f"lookup error: {e}", source="error",
+                    as_of=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                )
     for f, r in readings.items():
         readings[f] = _apply_override(r, ov_flags.get(f), max_age_days)
 

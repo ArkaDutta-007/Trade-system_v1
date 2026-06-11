@@ -130,12 +130,14 @@ with st.sidebar:
     page = st.radio(
         "Navigation",
         [
+            "🚦 Trading Desk",
+            "🧭 Playbook & Tax",
             "🎯 Trade Signals",
             "📈 Future Predictions",
             "🔍 Stock Screener",
             "📋 Decision Reports",
-            "� Stock Analysis",
-            "�💼 Paper Simulation",
+            "🔭 Stock Analysis",
+            "💼 Paper Simulation",
             "⚡ Live Prices",
             "🤖 Agent Analysis",
             "🌐 Universe Overview",
@@ -166,9 +168,20 @@ with st.sidebar:
         slippage = float(cfg["backtest"]["slippage_bps"])
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Page: Trading Desk + Playbook & Tax  (V3 — live flags + playbook engine)
+# ─────────────────────────────────────────────────────────────────────────────
+if page == "🚦 Trading Desk":
+    import desk
+    desk.render_trading_desk(cfg)
+
+elif page == "🧭 Playbook & Tax":
+    import desk
+    desk.render_playbook_tax(cfg)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Page: Trade Signals  (PRIMARY PAGE)
 # ─────────────────────────────────────────────────────────────────────────────
-if page == "🎯 Trade Signals":
+elif page == "🎯 Trade Signals":
     features = _load_features()
     st.header("🎯 Trade Signals")
     st.caption(

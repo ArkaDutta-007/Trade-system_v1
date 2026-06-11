@@ -78,6 +78,33 @@ How it gates decisions:
   fraction; semi-class and never-buy names are zeroed under freeze; standing
   rule breaches raise alerts and are written into the daily report JSON.
 
+### Live local desk (`ts dashboard`)
+
+Two flag/playbook pages front the Streamlit dashboard:
+
+* **🚦 Trading Desk** — an auto-refreshing live block (`st.fragment`, pick
+  Off / 5s / 15s / 30s / 60s) showing the O/F/I/S/C flag board, composite +
+  deployment %, a live holdings price strip, and **standing-rule alerts
+  evaluated at live prices** (so HOOD crossing $75 lights up intraday). Below
+  it: concentration vs caps, the 21-day catalyst calendar, and the tax shield.
+* **🧭 Playbook & Tax** — cycle-rule evaluation (§4), a pre-trade compliance
+  widget, the 2026 tax-shield panel, and the blotter with an inline log form.
+
+### Data resilience (no paid feeds)
+
+The flag board must never hang or read a bad value as a signal:
+
+* **Macro (F, I)** uses a three-tier feed — official FRED API
+  (`api.stlouisfed.org`, free key) → keyless `fredgraph.csv` →
+  disk cache (`data/silver/macro_cache/`). On some networks the keyless host
+  is blocked while the API host works, so set `FRED_API_KEY`; either way,
+  monthly/daily series cache for 12 h so an outage degrades to a clearly
+  labelled "cached" reading, not a failure.
+* The five lookups run **concurrently**, so the board builds in ~1 call's time
+  (≈0.5 s warm) instead of five serial round-trips.
+* yfinance NaN closes (intermittent on indices/futures) are dropped before
+  classification — a NaN can never silently land "in band".
+
 ## Install
 
 ```bash

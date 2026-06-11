@@ -16,18 +16,16 @@ Every lookup degrades to ``FlagColor.UNKNOWN`` instead of raising.
 """
 from __future__ import annotations
 
-import io
-import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import polars as pl
 
 from ..utils import get_logger
+from .datafeed import fred_series
 from .models import FlagColor, FlagReading
 
 logger = get_logger(__name__)
-
-_FREDGRAPH_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
 
 
 def _now_iso() -> str:
@@ -112,38 +110,21 @@ def _yf_history(symbol: str, period: str = "6mo") -> pl.DataFrame:
     hist = yf.Ticker(symbol).history(period=period, auto_adjust=True)
     if hist is None or len(hist) == 0:
         raise RuntimeError(f"no history for {symbol}")
-    return pl.DataFrame({
+    df = pl.DataFrame({
         "date": [d.date() for d in hist.index.to_pydatetime()],
         "close": hist["Close"].astype(float).tolist(),
     })
+    # yfinance intermittently appends a NaN-close row (esp. for indices/futures).
+    # A NaN must never reach a classifier — it would silently read as "in band".
+    df = df.filter(pl.col("close").is_not_null() & pl.col("close").is_not_nan())
+    if df.is_empty():
+        raise RuntimeError(f"{symbol} returned no valid (non-NaN) closes")
+    return df
 
 
-def fetch_fred_csv(series_id: str, timeout: float = 15.0) -> pl.DataFrame:
-    """Fetch a FRED series via fredapi (if keyed) or the keyless fredgraph CSV."""
-    api_key = os.environ.get("FRED_API_KEY")
-    if api_key:
-        try:
-            from fredapi import Fred
-
-            s = Fred(api_key=api_key).get_series(series_id)
-            return pl.DataFrame({
-                "date": [d.date() for d in s.index.to_pydatetime()],
-                "value": s.values.astype(float).tolist(),
-            }).drop_nulls()
-        except Exception as e:  # fall through to keyless endpoint
-            logger.debug(f"fredapi failed for {series_id}: {e}")
-
-    import requests
-
-    resp = requests.get(_FREDGRAPH_URL.format(sid=series_id), timeout=timeout)
-    resp.raise_for_status()
-    df = pl.read_csv(io.BytesIO(resp.content), null_values=["."])
-    date_col, val_col = df.columns[0], df.columns[1]
-    return (
-        df.rename({date_col: "date", val_col: "value"})
-        .with_columns(pl.col("date").cast(pl.Date), pl.col("value").cast(pl.Float64))
-        .drop_nulls()
-    )
+def fetch_fred_csv(series_id: str, cache_dir: Path | None = None) -> pl.DataFrame:
+    """Back-compat thin wrapper over the resilient datafeed (cache→API→CSV)."""
+    return fred_series(series_id, cache_dir=cache_dir).df
 
 
 # ─────────────────────────── live lookups ────────────────────────────────────
@@ -173,9 +154,10 @@ def lookup_oil(thresholds: dict | None = None, hormuz_closed: bool = False) -> F
         )
 
 
-def lookup_fed(lookback_days: int = 75) -> FlagReading:
+def lookup_fed(lookback_days: int = 75, cache_dir: Path | None = None) -> FlagReading:
     try:
-        df = fetch_fred_csv("DFEDTARU").sort("date")
+        res = fred_series("DFEDTARU", cache_dir=cache_dir)
+        df = res.df.sort("date")
         last = float(df["value"][-1])
         as_of_date = df["date"][-1]
         from datetime import timedelta
@@ -185,29 +167,33 @@ def lookup_fed(lookback_days: int = 75) -> FlagReading:
         prev = float(ref["value"][-1]) if len(ref) else last
         move = "hike" if last > prev + 1e-9 else ("cut" if last < prev - 1e-9 else "hold")
         color, detail = classify_fed(move)
+        cache_tag = f" [{res.source}, {res.age_hours:.0f}h old]" if res.from_cache else ""
         return FlagReading(
             flag="F", name="Fed", color=color, value=last,
-            detail=f"target upper {last:.2f}% (vs {prev:.2f}% {lookback_days}d ago, as of {as_of_date}) — {detail}",
-            source="live", as_of=_now_iso(),
-            extras={"move": move, "prev": prev, "series_as_of": str(as_of_date)},
+            detail=f"target upper {last:.2f}% (vs {prev:.2f}% {lookback_days}d ago, as of {as_of_date}) — {detail}{cache_tag}",
+            source="live" if not res.from_cache else "cache",
+            as_of=_now_iso(),
+            extras={"move": move, "prev": prev, "series_as_of": str(as_of_date), "feed": res.source},
         )
     except Exception as e:
         logger.warning(f"F flag lookup failed: {e}")
         return FlagReading(
             flag="F", name="Fed", color=FlagColor.UNKNOWN, value=None,
-            detail=f"lookup failed: {e}", source="error", as_of=_now_iso(),
+            detail=f"lookup failed ({e}); set FRED_API_KEY or the F override",
+            source="error", as_of=_now_iso(),
         )
 
 
-def lookup_inflation(thresholds: dict | None = None) -> FlagReading:
+def lookup_inflation(thresholds: dict | None = None, cache_dir: Path | None = None) -> FlagReading:
     t = thresholds or {}
     try:
-        core = fetch_fred_csv("CPILFESL").sort("date")
+        res = fred_series("CPILFESL", cache_dir=cache_dir)
+        core = res.df.sort("date")
         core_mom = (float(core["value"][-1]) / float(core["value"][-2]) - 1.0) * 100.0
         core_month = str(core["date"][-1])
         headline_yoy = None
         try:
-            head = fetch_fred_csv("CPIAUCSL").sort("date")
+            head = fred_series("CPIAUCSL", cache_dir=cache_dir).df.sort("date")
             if len(head) >= 13:
                 headline_yoy = (float(head["value"][-1]) / float(head["value"][-13]) - 1.0) * 100.0
         except Exception:
@@ -218,17 +204,20 @@ def lookup_inflation(thresholds: dict | None = None) -> FlagReading:
             red_headline_yoy=t.get("red_headline_yoy", 5.0),
         )
         hl = f", headline {headline_yoy:.1f}% YoY" if headline_yoy is not None else ""
+        cache_tag = f" [{res.source}, {res.age_hours:.0f}h old]" if res.from_cache else ""
         return FlagReading(
             flag="I", name="Inflation", color=color, value=round(core_mom, 3),
-            detail=f"{detail} (print month {core_month}{hl})",
-            source="live", as_of=_now_iso(),
-            extras={"core_month": core_month, "headline_yoy": headline_yoy},
+            detail=f"{detail} (print month {core_month}{hl}){cache_tag}",
+            source="live" if not res.from_cache else "cache",
+            as_of=_now_iso(),
+            extras={"core_month": core_month, "headline_yoy": headline_yoy, "feed": res.source},
         )
     except Exception as e:
         logger.warning(f"I flag lookup failed: {e}")
         return FlagReading(
             flag="I", name="Inflation", color=FlagColor.UNKNOWN, value=None,
-            detail=f"lookup failed: {e}", source="error", as_of=_now_iso(),
+            detail=f"lookup failed ({e}); set FRED_API_KEY or the I override",
+            source="error", as_of=_now_iso(),
         )
 
 

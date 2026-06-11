@@ -103,7 +103,12 @@ agent-briefing
     --save / --no-save
 
 dashboard
-  Launch the Streamlit dashboard (12 pages, signal-first layout).
+  Launch the Streamlit dashboard (14 pages, desk-first layout).
+    0a. 🚦 Trading Desk        — LIVE auto-refreshing O/F/I/S/C flag board,
+                                  live holdings strip, standing-rule alerts at
+                                  live prices, caps, catalysts, tax shield
+    0b. 🧭 Playbook & Tax      — cycle rules (§4), pre-trade compliance check,
+                                  2026 NRA tax shield, trade blotter + log form
     1. 🎯 Trade Signals        — colour-coded BUY/SELL/HOLD table, filter & drill-down
     2. 📈 Future Predictions   — active forecast sessions, positions, MTM P&L
     3. 🔍 Stock Screener       — factor-based universe filter
