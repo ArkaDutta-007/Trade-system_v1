@@ -105,14 +105,40 @@ def quality(config: str = "configs/default.yaml"):
 
 @app.command()
 def features(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
-    """Build the feature matrix and write to gold."""
+    """Build the feature matrix (technical + extended + macro + events) → gold."""
+    from trading_system.features.context import build_macro_inputs
+    from trading_system.features.reserve import reserve_report
+
     cfg = get_config(config).use_universe(universe)
     df = pl.read_parquet(cfg.path("data_bronze") / "ohlcv_daily.parquet")
-    feat = build_feature_matrix(df, benchmark=cfg["universe"]["benchmark"])
+
+    # Optional silver inputs (present once `ts daily` / news ingestion has run)
+    silver = cfg.path("data_silver")
+    events = pl.read_parquet(silver / "events.parquet") if (silver / "events.parquet").exists() else None
+    appr_p = silver / "apprehension_scores.parquet"
+    apprehension = pl.read_parquet(appr_p) if appr_p.exists() else None
+
+    macro_features, econ_cal, earnings_cal = build_macro_inputs(
+        cfg, tickers=list(cfg["universe"]["tickers"]), with_earnings=True
+    )
+    feat = build_feature_matrix(
+        df,
+        events=events,
+        apprehension=apprehension,
+        economic_calendar=econ_cal,
+        earnings_calendar=earnings_cal,
+        macro_features=macro_features,
+        benchmark=cfg["universe"]["benchmark"],
+    )
     out = cfg.path("data_gold") / "features.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     feat.write_parquet(out, compression="zstd")
-    rprint(f"[green]Wrote {len(feat)} rows to {out}[/green]")
+    rprint(f"[green]Wrote {len(feat)} rows × {feat.width} cols to {out}[/green]")
+    rep = reserve_report(feat)
+    rprint(f"[cyan]feature reserve present: {rep['_total']['present']}/"
+           f"{rep['_total']['reserve_size']}[/cyan] "
+           + " · ".join(f"{g}:{i['present']}/{i['defined']}"
+                        for g, i in rep.items() if not g.startswith('_')))
 
 
 @app.command()
