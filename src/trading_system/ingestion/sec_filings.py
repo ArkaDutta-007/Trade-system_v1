@@ -36,8 +36,10 @@ def fetch_recent_filings(
         logger.warning(f"Could not load SEC ticker map: {e}")
         return pl.DataFrame()
 
+    from ..utils import track
+
     rows = []
-    for t in tickers:
+    for t in track(list(tickers), "SEC filings"):
         cik = cik_map.get(t.upper())
         if cik is None:
             logger.info(f"No CIK for {t}, skipping")

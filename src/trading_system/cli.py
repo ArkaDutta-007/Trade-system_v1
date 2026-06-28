@@ -663,10 +663,14 @@ def analyze(
 
 
 @app.command("analyze-all")
-def analyze_all_cmd(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
-    """Run the decision pipeline across the entire configured universe."""
+def analyze_all_cmd(
+    config: str = "configs/default.yaml",
+    universe: str = UNIVERSE_OPT,
+    workers: int = typer.Option(6, help="concurrent workers (1 = serial); IV+LLM bound"),
+):
+    """Run the decision pipeline across the entire configured universe (threaded)."""
     cfg = get_config(config).use_universe(universe)
-    results = analyze_all(cfg)
+    results = analyze_all(cfg, workers=workers)
     counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
     for r in results:
         counts[r.stance] = counts.get(r.stance, 0) + 1

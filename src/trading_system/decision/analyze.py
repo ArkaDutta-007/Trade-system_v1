@@ -507,13 +507,32 @@ def analyze_symbol(
     return result
 
 
-def analyze_all(cfg: Config | None = None) -> list[DecisionResult]:
-    """Run analyze_symbol over the configured universe."""
+def analyze_all(
+    cfg: Config | None = None,
+    workers: int = 6,
+    write_report: bool = True,
+) -> list[DecisionResult]:
+    """Run analyze_symbol over the configured universe (threaded + progress).
+
+    Each call is dominated by network latency (option-implied vol + DeepSeek
+    narration), so a small thread pool gives a big wall-clock win. ``workers`` is
+    kept modest to stay under DeepSeek rate limits; set 1 for fully serial.
+    """
+    from ..utils import parallel_map
+
     cfg = cfg or get_config()
-    out = []
-    for t in cfg["universe"]["tickers"]:
+    tickers = list(cfg["universe"]["tickers"])
+
+    def _one(t: str) -> DecisionResult | None:
         try:
-            out.append(analyze_symbol(t, cfg=cfg))
+            return analyze_symbol(t, cfg=cfg, write_report=write_report)
         except Exception as e:
             logger.warning(f"analyze_symbol({t}) failed: {e}")
-    return out
+            return None
+
+    if workers and workers > 1:
+        results = parallel_map(_one, tickers, workers=workers, description="analyze-all")
+    else:
+        from ..utils import track
+        results = [_one(t) for t in track(tickers, "analyze-all")]
+    return [r for r in results if r is not None]

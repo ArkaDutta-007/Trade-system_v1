@@ -123,6 +123,8 @@ def collect_newsdata_articles(
     max_tickers: int = 180,
 ) -> list[dict]:
     """Fetch latest news for many tickers (one credit each; capped to protect the quota)."""
+    from ..utils import track
+
     out: list[dict] = []
     sess = requests.Session()
     sess.headers.update({"User-Agent": "trading-system/news (research)"})
@@ -130,7 +132,7 @@ def collect_newsdata_articles(
     if len(tickers) > max_tickers:
         logger.info(f"NewsData: capping {len(tickers)} tickers → {max_tickers} to protect daily credits")
         tickers = tickers[:max_tickers]
-    for t in tickers:
+    for t in track(tickers, "newsdata news"):
         out.extend(
             fetch_newsdata_ticker(
                 t, api_key, max_items=max_per_ticker,

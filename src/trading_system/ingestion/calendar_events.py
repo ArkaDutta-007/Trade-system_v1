@@ -16,30 +16,37 @@ from ..utils import get_logger
 logger = get_logger(__name__)
 
 
-def build_earnings_calendar(tickers: Iterable[str]) -> pl.DataFrame:
-    """Best-effort earnings calendar from yfinance. Empty for ETFs."""
+def _earnings_for_ticker(t: str) -> list[dict]:
+    """Fetch one ticker's earnings dates (yfinance). Returns rows or []."""
     import yfinance as yf
-
-    rows = []
-    for t in tickers:
+    out: list[dict] = []
+    yt = yf.Ticker(t)
+    df = getattr(yt, "earnings_dates", None)
+    if df is None or len(df) == 0:
+        return out
+    df = df.reset_index()
+    df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
+    for _, r in df.iterrows():
+        d = r.get("earnings_date") or r.get("earnings_date_")
+        if d is None:
+            continue
         try:
-            yt = yf.Ticker(t)
-            df = getattr(yt, "earnings_dates", None)
-            if df is None or len(df) == 0:
-                continue
-            df = df.reset_index()
-            df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
-            for _, r in df.iterrows():
-                d = r.get("earnings_date") or r.get("earnings_date_")
-                if d is None:
-                    continue
-                try:
-                    d = d.date()
-                except Exception:
-                    pass
-                rows.append({"ticker": t.upper(), "event_type": "earnings", "date": d})
-        except Exception as e:
-            logger.info(f"No earnings data for {t}: {e}")
+            d = d.date()
+        except Exception:
+            pass
+        out.append({"ticker": t.upper(), "event_type": "earnings", "date": d})
+    return out
+
+
+def build_earnings_calendar(tickers: Iterable[str], workers: int = 8) -> pl.DataFrame:
+    """Best-effort earnings calendar from yfinance (threaded + progress). Empty for ETFs."""
+    from ..utils import parallel_map
+
+    tickers = list(tickers)
+    results = parallel_map(
+        _earnings_for_ticker, tickers, workers=workers, description="earnings cal"
+    )
+    rows = [r for sub in results if sub for r in sub]
 
     if not rows:
         return pl.DataFrame(schema={"ticker": pl.Utf8, "event_type": pl.Utf8, "date": pl.Date})

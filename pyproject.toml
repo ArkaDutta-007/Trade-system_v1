@@ -38,6 +38,7 @@ dependencies = [
     "fredapi>=0.5",
     "aiohttp>=3.9",
     "beautifulsoup4>=4.12",
+    "lxml>=5.0",          # yfinance earnings_dates / HTML table parsing
     "plotly>=5.20",
 ]
 

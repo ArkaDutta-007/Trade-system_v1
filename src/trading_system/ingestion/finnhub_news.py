@@ -140,10 +140,12 @@ def collect_finnhub_articles(
     cache_hours: float = 6.0,
 ) -> list[dict]:
     """Fetch company news for many tickers (sequential — respects the rate limit)."""
+    from ..utils import track
+
     out: list[dict] = []
     sess = requests.Session()
     sess.headers.update({"User-Agent": "trading-system/news (research)"})
-    for t in tickers:
+    for t in track(list(tickers), "finnhub news"):
         out.extend(
             fetch_finnhub_ticker(
                 t, api_key, days=days, max_items=max_per_ticker,
