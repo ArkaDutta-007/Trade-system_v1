@@ -36,11 +36,33 @@ def _physical_ram_gb() -> float:
         return 0.0
 
 
+def preload_omp_runtimes() -> None:
+    """Import LightGBM/XGBoost *before* torch to avoid a macOS libomp crash.
+
+    On macOS, if torch's bundled ``libomp`` initialises before LightGBM's /
+    XGBoost's OpenMP runtime, the latter's ``pthread_mutex_init`` fails
+    (``OMP: Error #179`` / ``System error #22``) and the process **segfaults** the
+    first time a tree model is fitted after torch has been imported.  Loading the
+    tree libraries' OpenMP runtime first lets the two coexist.
+
+    ``compute.py`` is the system's single torch-import chokepoint
+    (``_detect_gpu``), so calling this immediately before that import protects
+    every command — the tabular forecasters as well as the new sequence models.
+    Best-effort + idempotent: missing packages are simply skipped.
+    """
+    for mod in ("lightgbm", "xgboost"):
+        try:
+            __import__(mod)
+        except Exception:
+            pass
+
+
 def _detect_gpu() -> tuple[bool, str]:
     """Return (has_cuda, torch_device). torch_device ∈ {cuda, mps, cpu}."""
     if os.environ.get("TS_GPU") == "0":
         return False, "cpu"
     try:
+        preload_omp_runtimes()  # MUST precede `import torch` — see docstring
         import torch
         if torch.cuda.is_available():
             return True, "cuda"

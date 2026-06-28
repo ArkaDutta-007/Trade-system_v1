@@ -57,6 +57,15 @@ GROUPS: dict[str, list[str]] = {
     "calendar": CALENDAR,
 }
 
+# Nonlinear-dynamics + RMT groups (cross-domain maths). Derived from the feature
+# registry so the catalog can never drift from what the builders actually emit.
+from .nonlinear import ALL_FEATURES as _NL_FEATURES  # noqa: E402
+from .rmt import RMT_COLUMNS as _RMT_COLUMNS         # noqa: E402
+
+for _f in _NL_FEATURES:
+    GROUPS.setdefault(_f.group, []).append(_f.name)
+GROUPS["rmt"] = list(_RMT_COLUMNS)
+
 # Full reserve, de-duplicated, order-preserving
 FEATURE_RESERVE: list[str] = list(dict.fromkeys(
     c for g in GROUPS.values() for c in g

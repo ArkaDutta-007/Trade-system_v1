@@ -1,23 +1,39 @@
 {
-  "created_at": 1782615141.525475,
-  "created_at_iso": "2026-06-27T19:52:21",
-  "compute": "cpu \u00b7 16 workers \u00b7 52GB RAM \u00b7 GPU=none \u00b7 lgbm=cpu \u00b7 xgb=cpu",
+  "created_at": 1782620940.215859,
+  "created_at_iso": "2026-06-27T21:29:00",
+  "compute": "apple_silicon \u00b7 16 workers \u00b7 52GB RAM \u00b7 GPU=MPS \u00b7 lgbm=cpu \u00b7 xgb=cpu",
   "horizons": {
-    "63": {
+    "21": {
       "best_model": "hist_gbm",
-      "icir": 0.786,
-      "ic_mean": 0.0575,
-      "hit_rate": 0.565,
+      "icir": 2.401,
+      "ic_mean": 0.088,
+      "hit_rate": 0.484,
       "leak_pass": true,
-      "trained_through": "2026-01-26"
+      "trained_through": "2026-05-26"
+    },
+    "63": {
+      "best_model": "ridge",
+      "icir": 1.274,
+      "ic_mean": 0.1362,
+      "hit_rate": 0.564,
+      "leak_pass": false,
+      "trained_through": "2026-03-25"
+    },
+    "126": {
+      "best_model": "lgbm",
+      "icir": 0.167,
+      "ic_mean": 0.0196,
+      "hit_rate": 0.52,
+      "leak_pass": false,
+      "trained_through": "2025-12-22"
     },
     "252": {
       "best_model": "lgbm",
-      "icir": 1.098,
-      "ic_mean": 0.1244,
-      "hit_rate": 0.644,
+      "icir": 1.838,
+      "ic_mean": 0.1253,
+      "hit_rate": 0.672,
       "leak_pass": true,
-      "trained_through": "2025-04-24"
+      "trained_through": "2025-06-24"
     }
   }
 }

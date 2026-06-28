@@ -7,6 +7,11 @@ ML training, SHAP-based interpretability, and strict leakage / data-quality test
 > Not financial advice. This system is intended for research and paper trading.
 > Live execution should only follow months of paper trading and slippage validation.
 
+📖 **[`docs/COMPENDIUM.md`](docs/COMPENDIUM.md)** — the complete reference:
+architecture, data flow, every feature & formula, the cross-domain mathematics
+(chaos/fractal/RMT/LPPLS…), forecasting methodology, and operational gotchas.
+**[`docs/COMMANDS.md`](docs/COMMANDS.md)** — the grouped command directory.
+
 ## Layout
 
 ```
@@ -264,6 +269,64 @@ automatically. Override with `TS_DEVICE` / `TS_N_JOBS` / `TS_GPU`. For GPU runs:
 ([docs/COMMANDS.md](docs/COMMANDS.md)); the Streamlit dashboard's 14 pages are
 grouped into 5 sections, with calibrated-bounds fans, event-annotated price
 charts, and cached heavy compute for lower lag.
+
+## V3.7 — sequence models + cross-domain nonlinear dynamics
+
+**Sequence forecasters** (`models/sequence.py`) — RNN / LSTM / GRU regressors
+that read each ticker's **ordered lookback window** instead of a flattened
+feature row, so they learn temporal structure (path dependence, vol clustering,
+momentum exhaustion) directly. They compete head-to-head with the tree families
+under the *same* purged+embargoed CV, ICIR ranking and label-shuffle gate — best
+family per horizon wins, no special-casing. Opt in:
+
+```bash
+pip install -e '.[deep]'                          # torch (CUDA/MPS auto-detected)
+ts train-forecast --models lgbm,xgb,lstm,gru --lookback 64 --epochs 40
+```
+
+Windows are strictly backward-looking (`build_sequence_tensor`), models train on
+CUDA/MPS/CPU from the compute profile, and pickle to ~10 KB (state-dict) for the
+committed store. *(Installing torch also fixed a latent macOS `libomp`
+double-init crash: `utils/compute.py` now loads LightGBM/XGBoost's OpenMP runtime
+before torch — see `preload_omp_runtimes`.)*
+
+**Nonlinear-dynamics feature layer** (`features/nonlinear.py`) — rigorous maths
+borrowed from other fields, each a causal, leakage-safe rolling feature plus a
+known-answer test (`tests/unit/test_nonlinear.py`):
+
+| Domain | Estimators | Borrowed from |
+| --- | --- | --- |
+| Fractal / long memory | Hurst (DFA + R/S), Higuchi FD, rough-vol H | geophysics, hydrology, fractional Brownian motion |
+| Information / complexity | permutation & sample & spectral entropy, dominant cycle, wavelet HF | dynamical systems, cardiology (HRV), info theory |
+| Chaos / predictability | largest Lyapunov (Rosenstein), RQA determinism, 0–1 chaos test | chaos theory, recurrence plots |
+| Bifurcation / early warning | critical-slowing-down composite (AR1↑+var↑ Kendall-τ) | ecology / climate tipping points |
+| Extreme value | Hill tail index α | econophysics |
+| Catastrophe theory | LPPLS bubble confidence | rupture / earthquake physics |
+| Random matrix theory | Marchenko–Pastur systematic-risk fraction + market-mode β | nuclear-physics spectral theory |
+
+These enter the reserve as new groups (`fractal`, `entropy`, `chaos`, `tail`,
+`earlywarning`, `rmt`) so every forecaster — trees and RNNs alike — can select
+them. The fast tier is on by default in `ts features`; the heavy O(W²)/fit tier
+is `ts features --deep`. The per-ticker work fans out across cores by default
+(`--jobs N` / `--no-parallel` to control). Inspect any name's mathematical
+character with:
+
+```bash
+ts complexity NVDA      # interpreted fingerprint: long memory, chaoticity, tails, bubble signatures
+```
+
+> **Full math + architecture reference:** every estimator's formula, source
+> domain, and trading rationale — plus the data flow, forecasting methodology,
+> and the macOS torch/OpenMP gotchas — is documented in
+> [`docs/COMPENDIUM.md`](docs/COMPENDIUM.md).
+
+**Parallelism & hardware.** Network-bound loops are threaded with live progress
+bars (`ts ingest`, `ts analyze-all`, earnings calendar — `--workers`); the
+CPU-bound nonlinear feature layer uses a spawn process pool (`--jobs`); tree and
+RNN training use all cores / GPU via the detected compute profile
+(`TS_DEVICE` / `TS_N_JOBS`). On Apple Silicon, sequence models pin
+`torch.set_num_threads(1)` to avoid an OpenMP deadlock with LightGBM (GPU/MPS
+math is unaffected).
 
 ## Universes
 

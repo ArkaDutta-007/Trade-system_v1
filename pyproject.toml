@@ -55,6 +55,9 @@ backtest = [
     "vectorbt>=0.26",
     "backtesting>=0.3.3",
 ]
+deep = [
+    "torch>=2.2",   # RNN/LSTM/GRU sequence forecasters (CUDA/MPS auto-detected)
+]
 
 [project.scripts]
 ts = "trading_system.cli:app"

@@ -118,8 +118,15 @@ def quality(config: str = "configs/default.yaml"):
 
 
 @app.command()
-def features(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
-    """Build the feature matrix (technical + extended + macro + events) → gold."""
+def features(
+    config: str = "configs/default.yaml",
+    universe: str = UNIVERSE_OPT,
+    deep: bool = typer.Option(False, help="also compute the heavy nonlinear tier "
+                                          "(sample entropy, Lyapunov, RQA, 0-1 chaos, LPPLS)"),
+    jobs: int = typer.Option(0, help="parallel workers for nonlinear features (0 = auto: cores-1)"),
+    no_parallel: bool = typer.Option(False, "--no-parallel", help="compute nonlinear features serially"),
+):
+    """Build the feature matrix (technical + extended + macro + events + nonlinear) → gold."""
     from trading_system.features.context import build_macro_inputs
     from trading_system.features.reserve import reserve_report
 
@@ -143,6 +150,9 @@ def features(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT)
         earnings_calendar=earnings_cal,
         macro_features=macro_features,
         benchmark=cfg["universe"]["benchmark"],
+        nonlinear_deep=deep,
+        nonlinear_parallel=not no_parallel,
+        nonlinear_jobs=(jobs or None),
     )
     out = cfg.path("data_gold") / "features.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -360,11 +370,20 @@ def train_forecast(
     horizons: str = typer.Option("21,63,126,252", help="comma-sep trading-day horizons"),
     n_splits: int = typer.Option(5, help="purged walk-forward folds"),
     groups: str = typer.Option("", help="feature-reserve groups (comma-sep); empty=all"),
+    models: str = typer.Option(
+        "", help="families: subset of lgbm,xgb,hist_gbm,ridge,lstm,gru,rnn "
+                 "(empty = tabular default; add lstm/gru/rnn for deep sequence models)"),
+    lookback: int = typer.Option(64, help="lookback window for sequence models"),
+    epochs: int = typer.Option(40, help="max epochs for sequence models"),
 ):
     """Train + rigorously evaluate long-horizon forecasters; save best to models_store/.
 
     Purged+embargoed walk-forward CV, ranked by ICIR, gated by a label-shuffle
     leakage test. Also (re)trains the conformal interval bundle on the reserve.
+
+    Sequence models (lstm/gru/rnn) compete head-to-head with the tree families
+    under the same CV — opt in with e.g. ``--models lgbm,xgb,lstm,gru`` (needs
+    ``pip install -e '.[deep]'``; uses CUDA/MPS automatically).
     """
     from rich.table import Table
     from rich.console import Console
@@ -388,7 +407,13 @@ def train_forecast(
         raise typer.Exit(1)
 
     hz = tuple(int(h) for h in horizons.split(",") if h.strip())
-    results = train_all_horizons(feat, feat_cols, horizons=hz, n_splits=n_splits)
+    mdl = [m.strip() for m in models.split(",") if m.strip()] or None
+    if mdl:
+        rprint(f"[cyan]model families:[/cyan] {mdl}")
+    results = train_all_horizons(
+        feat, feat_cols, horizons=hz, n_splits=n_splits,
+        models=mdl, lookback=lookback, seq_epochs=epochs,
+    )
     if not results:
         rprint("[red]No horizons trained.[/red]")
         raise typer.Exit(1)
@@ -469,6 +494,57 @@ def bounds(
             f"{r['lo']*100:+.1f}%", f"{r['median']*100:+.1f}%", f"{r['hi']*100:+.1f}%",
         )
     console.print(t)
+
+
+@app.command()
+def complexity(
+    ticker: str,
+    config: str = "configs/default.yaml",
+    universe: str = UNIVERSE_OPT,
+):
+    """Nonlinear-dynamics fingerprint of a ticker — chaos, fractal, entropy, bubbles.
+
+    Computes every estimator in the nonlinear library on the latest trailing
+    windows and prints an interpreted, domain-grouped read of the price's
+    mathematical character (long memory, complexity, chaoticity, tail risk,
+    early-warning / bubble signatures).
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.features.nonlinear_report import fingerprint, synthesis
+
+    cfg = get_config(config).use_universe(universe)
+    ticker = ticker.upper()
+    bronze = cfg.path("data_bronze") / "ohlcv_daily.parquet"
+    if not bronze.exists():
+        rprint("[red]No OHLCV — run `ts ingest` first.[/red]")
+        raise typer.Exit(1)
+    df = pl.read_parquet(bronze).filter(pl.col("ticker") == ticker).sort("date")
+    if df.height < 120:
+        rprint(f"[red]Need ≥120 days of history for {ticker} (have {df.height}).[/red]")
+        raise typer.Exit(1)
+    close = df["adj_close"].to_numpy()
+    rows = fingerprint(close)
+
+    console = Console()
+    last_d = df["date"].max()
+    t = Table(title=f"{ticker} · nonlinear fingerprint (through {last_d}, {df.height}d history)",
+              show_lines=False)
+    for c, j in [("Metric", "left"), ("Borrowed from", "left"), ("Value", "right"), ("Reading", "left")]:
+        t.add_column(c, justify=j)
+    cur = None
+    for r in rows:
+        if r["domain"] != cur:
+            cur = r["domain"]
+            t.add_row(f"[bold cyan]{cur}[/bold cyan]", "", "", "")
+        v = r["value"]
+        vs = f"{v:+.3f}" if isinstance(v, float) and v == v else "n/a"
+        reading = r["reading"]
+        style = "red" if r["flag"] else ""
+        t.add_row(f"  {r['metric']}", f"[dim]{r['source']}[/dim]", vs,
+                  f"[{style}]{reading}[/{style}]" if style else reading)
+    console.print(t)
+    rprint(f"\n[bold]Synthesis:[/bold] {synthesis(rows)}")
 
 
 @app.command()
@@ -1515,12 +1591,12 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
     "Data & features": [
         ("ingest", "Pull daily OHLCV for the universe (yfinance)"),
         ("quality", "OHLCV data-quality checks"),
-        ("features", "Build the gold feature matrix (technical+macro+events reserve)"),
+        ("features", "Build the gold feature matrix (technical+macro+events+nonlinear; --deep)"),
         ("universe", "Show the active universe"),
     ],
     "Forecasting & models": [
         ("train", "Walk-forward 14-model ensemble (5d target)"),
-        ("train-forecast", "★ Long-horizon best models via purged CV → models_store/"),
+        ("train-forecast", "★ Long-horizon best models (trees+RNN/LSTM/GRU) via purged CV"),
         ("train-intervals", "Conformalized quantile price-bound models (90% coverage)"),
         ("bounds", "Show lower/median/upper price bounds for a ticker"),
         ("backtest", "Vectorized backtest of a strategy with metrics"),
@@ -1529,6 +1605,7 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
         ("analyze", "Single-symbol decision + report (bounds, SHAP, narration)"),
         ("analyze-all", "Run analyze across the whole universe"),
         ("signals", "Cross-sectional signal table"),
+        ("complexity", "Nonlinear fingerprint: chaos/fractal/entropy/bubble signatures"),
         ("explain", "DeepSeek plain-English narration of a report"),
     ],
     "Future-predict sessions": [

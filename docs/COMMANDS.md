@@ -8,7 +8,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | --- | --- |
 | `ts ingest` | Pull daily OHLCV for the universe (yfinance) |
 | `ts quality` | OHLCV data-quality checks |
-| `ts features` | Build the gold feature matrix (technical+macro+events reserve) |
+| `ts features` | Build the gold feature matrix (technical+macro+events+nonlinear; --deep) |
 | `ts universe` | Show the active universe |
 
 ## Forecasting & models
@@ -16,7 +16,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | Command | What it does |
 | --- | --- |
 | `ts train` | Walk-forward 14-model ensemble (5d target) |
-| `ts train-forecast` | ★ Long-horizon best models via purged CV → models_store/ |
+| `ts train-forecast` | ★ Long-horizon best models (trees+RNN/LSTM/GRU) via purged CV |
 | `ts train-intervals` | Conformalized quantile price-bound models (90% coverage) |
 | `ts bounds` | Show lower/median/upper price bounds for a ticker |
 | `ts backtest` | Vectorized backtest of a strategy with metrics |
@@ -28,6 +28,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | `ts analyze` | Single-symbol decision + report (bounds, SHAP, narration) |
 | `ts analyze-all` | Run analyze across the whole universe |
 | `ts signals` | Cross-sectional signal table |
+| `ts complexity` | Nonlinear fingerprint: chaos/fractal/entropy/bubble signatures |
 | `ts explain` | DeepSeek plain-English narration of a report |
 
 ## Future-predict sessions

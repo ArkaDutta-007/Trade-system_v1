@@ -27,11 +27,28 @@ from scipy.stats import spearmanr
 
 from ..utils import get_logger, get_compute_profile
 from .validation import purged_walkforward_splits
+from .sequence import (
+    SEQUENCE_MODELS, build_sequence_model, build_sequence_tensor, torch_available,
+)
 
 logger = get_logger(__name__)
 
 DEFAULT_HORIZONS = (21, 63, 126, 252)
 _CAL_PER_TD = 365 / 252  # trading days -> calendar days for purge sizing
+
+# Tabular families (row-independent). Sequence families live in SEQUENCE_MODELS.
+TABULAR_MODELS: tuple[str, ...] = ("lgbm", "xgb", "hist_gbm", "ridge")
+
+
+def _resolve_model_names(models: list[str] | None) -> tuple[list[str], list[str]]:
+    """Split a requested model list into (tabular, sequence). None → tabular only."""
+    if not models:
+        return list(TABULAR_MODELS), []
+    tab = [m for m in models if m in TABULAR_MODELS]
+    seq = [m for m in models if m in SEQUENCE_MODELS]
+    for u in [m for m in models if m not in TABULAR_MODELS and m not in SEQUENCE_MODELS]:
+        logger.warning(f"unknown model '{u}' ignored")
+    return tab, seq
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
@@ -131,6 +148,8 @@ def train_horizon(
     n_splits: int = 5,
     embargo_days: int = 5,
     models: list[str] | None = None,
+    lookback: int = 64,
+    seq_epochs: int = 40,
 ) -> HorizonResult:
     prof = get_compute_profile()
     tgt = f"fwd_ret_{horizon}d"
@@ -138,7 +157,7 @@ def train_horizon(
     df = features.sort(["ticker", "date"]).with_columns(
         ((px.shift(-horizon).over("ticker") / px) - 1).alias(tgt)
     )
-    X, y, dates, _ = _xy(df, feat_cols, tgt)
+    X, y, dates, sub = _xy(df, feat_cols, tgt)
     if len(X) < 500:
         raise ValueError(f"horizon {horizon}d: too few labeled rows ({len(X)})")
 
@@ -147,21 +166,38 @@ def train_horizon(
         dates, horizon_days=horizon_cal, n_splits=n_splits, embargo_days=embargo_days
     )
 
-    factory = _build_models(prof)
-    if models:
-        factory = {k: v for k, v in factory.items() if k in models}
+    # Resolve requested families. Sequence models need torch + a 3-D tensor.
+    tab_names, seq_names = _resolve_model_names(models)
+    if seq_names and not torch_available():
+        logger.warning(f"  {horizon}d: torch unavailable — skipping deep models {seq_names}")
+        seq_names = []
+    active = tab_names + seq_names
+    if not active:
+        raise ValueError(f"horizon {horizon}d: no runnable models from {models}")
 
-    per_model_folds: dict[str, list[dict]] = {k: [] for k in factory}
+    # Same row order as X (sub is sorted by ticker,date and null-free), so the
+    # purged split indices slice the flat matrix and the sequence tensor alike.
+    Xseq = build_sequence_tensor(sub, feat_cols, lookback) if seq_names else None
+
+    def _new_estimator(name):
+        if name in SEQUENCE_MODELS:
+            return build_sequence_model(name, lookback, prof, epochs=seq_epochs)
+        return _build_models(prof)[name]
+
+    def _mat(name):
+        return Xseq if name in SEQUENCE_MODELS else X
+
+    per_model_folds: dict[str, list[dict]] = {k: [] for k in active}
     for s in splits:
-        Xtr, ytr = X[s.train_idx], y[s.train_idx]
-        Xte, yte = X[s.test_idx], y[s.test_idx]
-        if len(Xtr) < 200 or len(Xte) < 20:
+        ytr, yte = y[s.train_idx], y[s.test_idx]
+        if len(s.train_idx) < 200 or len(s.test_idx) < 20:
             continue
-        for name in list(factory):
+        for name in active:
             try:
-                m = _build_models(prof)[name]  # fresh estimator per fold
-                m.fit(Xtr, ytr)
-                per_model_folds[name].append(_fold_metrics(yte, m.predict(Xte)))
+                mat = _mat(name)
+                m = _new_estimator(name)  # fresh estimator per fold
+                m.fit(mat[s.train_idx], ytr)
+                per_model_folds[name].append(_fold_metrics(yte, m.predict(mat[s.test_idx])))
             except Exception as e:
                 logger.warning(f"  {horizon}d/{name} fold {s.fold} failed: {e}")
 
@@ -173,6 +209,7 @@ def train_horizon(
         reverse=True,
     )
     best_name = ranked[0][0]
+    best_mat = _mat(best_name)
 
     # ── Label-shuffle leakage gate on the best family (last split) ───────────
     leak = {}
@@ -181,9 +218,9 @@ def train_horizon(
         rng = np.random.default_rng(0)
         ysh = y[s.train_idx].copy()
         rng.shuffle(ysh)
-        m = _build_models(prof)[best_name]
-        m.fit(X[s.train_idx], ysh)
-        shuffled_ic = abs(_ic(y[s.test_idx], m.predict(X[s.test_idx])))
+        m = _new_estimator(best_name)
+        m.fit(best_mat[s.train_idx], ysh)
+        shuffled_ic = abs(_ic(y[s.test_idx], m.predict(best_mat[s.test_idx])))
         real_ic = abs(per_model[best_name]["ic_mean"])
         leak = {
             "shuffled_abs_ic": round(shuffled_ic, 4),
@@ -194,8 +231,8 @@ def train_horizon(
         leak = {"error": str(e), "pass": None}
 
     # ── Refit best on all fully-labeled rows ─────────────────────────────────
-    best = _build_models(prof)[best_name]
-    best.fit(X, y)
+    best = _new_estimator(best_name)
+    best.fit(best_mat, y)
     trained_through = max(dates).isoformat() if dates else ""
 
     logger.info(
@@ -217,11 +254,16 @@ def train_all_horizons(
     n_splits: int = 5,
     embargo_days: int = 5,
     models: list[str] | None = None,
+    lookback: int = 64,
+    seq_epochs: int = 40,
 ) -> dict[int, HorizonResult]:
     out: dict[int, HorizonResult] = {}
     for h in horizons:
         try:
-            out[h] = train_horizon(features, feat_cols, h, n_splits, embargo_days, models)
+            out[h] = train_horizon(
+                features, feat_cols, h, n_splits, embargo_days, models,
+                lookback=lookback, seq_epochs=seq_epochs,
+            )
         except Exception as e:
             logger.warning(f"horizon {h}d training failed: {e}")
     return out

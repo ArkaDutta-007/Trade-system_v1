@@ -12,6 +12,8 @@ from .regimes import compute_regime_features
 from .event_features import aggregate_events_to_daily, add_macro_calendar_features
 from .macro import join_macro_features
 from .extended_features import compute_extended_features
+from .nonlinear_panel import compute_nonlinear_features
+from .rmt import compute_rmt_features
 
 
 def add_targets(df: pl.DataFrame, horizons: tuple[int, ...] = (5, 20)) -> pl.DataFrame:
@@ -36,6 +38,11 @@ def build_feature_matrix(
     horizons: tuple[int, ...] = (5, 20),
     add_macro_features: bool = True,
     add_extended_features: bool = True,
+    add_nonlinear_features: bool = True,
+    nonlinear_deep: bool = False,
+    nonlinear_parallel: bool = True,
+    nonlinear_jobs: int | None = None,
+    add_rmt_features: bool = True,
 ) -> pl.DataFrame:
     """End-to-end feature build. Output is one row per (ticker, date).
 
@@ -108,5 +115,16 @@ def build_feature_matrix(
     # Macro *levels* (yields, curve, VIX, HY OAS, fed funds) joined by date.
     if macro_features is not None and not macro_features.is_empty():
         feat = join_macro_features(feat, macro_features)
+
+    # Nonlinear-dynamics fingerprint (chaos/fractal/entropy/early-warning) — causal,
+    # strided, per ticker.  `nonlinear_deep` also computes the heavier O(W²) tier.
+    if add_nonlinear_features:
+        feat = compute_nonlinear_features(
+            feat, deep=nonlinear_deep, parallel=nonlinear_parallel, n_jobs=nonlinear_jobs
+        )
+
+    # RMT cross-sectional denoising (systematic-risk fraction + market-mode beta).
+    if add_rmt_features:
+        feat = compute_rmt_features(feat)
 
     return feat
