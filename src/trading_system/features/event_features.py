@@ -192,16 +192,20 @@ def add_macro_calendar_features(
             fomc_dates = fomc_rows["date"].to_list()
 
     def _nearest_signed_distance(as_of: _date, event_dates: list[_date]) -> float:
-        """Signed distance to nearest event. Negative = past, positive = future."""
+        """Signed distance to nearest event. Negative = past, positive = future.
+
+        Always returns a float so the Polars column stays Float64 (an int here
+        triggers a strict SchemaError when building a Float64 series).
+        """
         if not event_dates:
             return float("nan")
         future = [(d - as_of).days for d in event_dates if d >= as_of]
         past = [(d - as_of).days for d in event_dates if d < as_of]
         if future and past:
-            return min(future) if abs(min(future)) <= abs(max(past)) else max(past)
+            return float(min(future) if abs(min(future)) <= abs(max(past)) else max(past))
         if future:
-            return min(future)
-        return max(past)  # all past
+            return float(min(future))
+        return float(max(past))  # all past
 
     days_to_fomc_map = {d: _nearest_signed_distance(d, fomc_dates) for d in date_list}
 
