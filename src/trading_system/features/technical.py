@@ -72,11 +72,17 @@ def compute_technical_features(ohlcv: pl.DataFrame) -> pl.DataFrame:
         atr_14=pl.col("tr").rolling_mean(window_size=14).over("ticker"),
     )
 
-    # Volume / liquidity
+    # Volume / liquidity. Guard rel_vol against a zero 20-day mean volume
+    # (a fully non-trading window): volume/0 = 0/0 = NaN-float, the same
+    # null-evading hazard as RSI above. Emit a proper null there instead.
     df = df.with_columns(
         dollar_volume=(close * pl.col("volume")),
     ).with_columns(
-        rel_vol_20=(pl.col("volume") / pl.col("volume").rolling_mean(window_size=20).over("ticker")),
+        _avgvol_20=pl.col("volume").rolling_mean(window_size=20).over("ticker"),
+    ).with_columns(
+        rel_vol_20=pl.when(pl.col("_avgvol_20") > 0)
+        .then(pl.col("volume") / pl.col("_avgvol_20"))
+        .otherwise(None),
         avg_dollar_volume_20=pl.col("dollar_volume").rolling_mean(window_size=20).over("ticker"),
     )
 
@@ -89,7 +95,14 @@ def compute_technical_features(ohlcv: pl.DataFrame) -> pl.DataFrame:
         breakdown_20=((close - pl.col("rolling_min_20")) / pl.col("rolling_min_20")),
     )
 
-    # RSI(14)
+    # RSI(14). Guard the zero-loss window: roll_up/roll_down = 0/0 on a perfectly
+    # flat 14-day window yields a NaN-*float* (not a null), which slips past
+    # is_not_null()/drop_nulls and crashes scalers / linear & sequence models
+    # (tree models silently tolerate it). Resolve the degenerate cases explicitly:
+    #   no losses & no gains (flat)  -> 50 (neutral, conventional)
+    #   no losses & some gains       -> 100
+    #   otherwise                    -> standard formula (all-losses already -> 0)
+    # Warm-up rows (roll_* still null) stay null, as before.
     delta = px.diff().over("ticker")
     up = pl.when(delta > 0).then(delta).otherwise(0.0)
     down = pl.when(delta < 0).then(-delta).otherwise(0.0)
@@ -97,8 +110,10 @@ def compute_technical_features(ohlcv: pl.DataFrame) -> pl.DataFrame:
         roll_up=up.rolling_mean(window_size=14).over("ticker"),
         roll_down=down.rolling_mean(window_size=14).over("ticker"),
     ).with_columns(
-        rsi_14=(100 - 100 / (1 + (pl.col("roll_up") / pl.col("roll_down"))))
+        rsi_14=pl.when(pl.col("roll_down") == 0)
+        .then(pl.when(pl.col("roll_up") == 0).then(50.0).otherwise(100.0))
+        .otherwise(100 - 100 / (1 + (pl.col("roll_up") / pl.col("roll_down"))))
     )
 
     return df.drop(["tr", "rolling_max_60", "rolling_max_20", "rolling_min_20",
-                    "dollar_volume", "roll_up", "roll_down"])
+                    "dollar_volume", "_avgvol_20", "roll_up", "roll_down"])
