@@ -59,6 +59,19 @@ def _empty_events() -> pl.DataFrame:
     return pl.DataFrame(schema=EVENT_SCHEMA)
 
 
+def _coerce_dt(value, fallback: datetime) -> datetime:
+    """Coerce a published_at value (datetime or ISO string from JSON cache) → UTC datetime."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return fallback
+    return fallback
+
+
 def _rows_to_events(articles: list[dict], now: datetime) -> pl.DataFrame:
     """Map generic backend article dicts → EVENT_SCHEMA rows."""
     rows = []
@@ -71,7 +84,7 @@ def _rows_to_events(articles: list[dict], now: datetime) -> pl.DataFrame:
                 "event_id": str(uuid.uuid4()),
                 "source": backend,
                 "source_url": art.get("source_url", ""),
-                "published_at": art.get("published_at") or now,
+                "published_at": _coerce_dt(art.get("published_at"), now),
                 "known_at": now,
                 "tickers": [(art.get("ticker") or "UNKNOWN").upper()],
                 "sectors": [],
@@ -219,7 +232,7 @@ def fetch_news(
     for t in tickers:
         arts = sorted(
             per_ticker[t],
-            key=lambda a: a.get("published_at") or now,
+            key=lambda a: _coerce_dt(a.get("published_at"), now),
             reverse=True,
         )
         all_articles.extend(arts)

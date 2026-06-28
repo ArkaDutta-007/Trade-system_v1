@@ -126,6 +126,34 @@ def fetch_ohlcv(
     return out
 
 
+def sanitize_ohlcv(df: pl.DataFrame) -> pl.DataFrame:
+    """Drop incomplete/impossible bars so a few yfinance glitches can't fail QC.
+
+    The most common offender is *today's in-progress bar*: yfinance returns it
+    with a null close and a half-formed range (low > open etc.). We drop rows
+    with a null/≤0 close and any that violate basic OHLC sanity, logging the count.
+    """
+    if df.is_empty():
+        return df
+    needed = {"open", "high", "low", "close"}
+    if not needed.issubset(df.columns):
+        return df
+    n0 = df.height
+    clean = df.filter(
+        pl.col("close").is_not_null()
+        & (pl.col("close") > 0) & (pl.col("open") > 0)
+        & (pl.col("high") > 0) & (pl.col("low") > 0)
+        & (pl.col("high") >= pl.col("low"))
+        & (pl.col("high") >= pl.col("open")) & (pl.col("high") >= pl.col("close"))
+        & (pl.col("low") <= pl.col("open")) & (pl.col("low") <= pl.col("close"))
+    )
+    dropped = n0 - clean.height
+    if dropped:
+        logger.warning(f"sanitize_ohlcv: dropped {dropped} incomplete/invalid bars "
+                       f"(e.g. today's in-progress bar with null close)")
+    return clean
+
+
 def ingest_universe(cfg: Config, workers: int | None = None) -> Path:
     """Ingest configured universe and write to bronze parquet. Returns path."""
     tickers = cfg["universe"]["tickers"]
@@ -134,6 +162,7 @@ def ingest_universe(cfg: Config, workers: int | None = None) -> Path:
     df = fetch_ohlcv(tickers, start=start, end=end, workers=workers)
     if df.is_empty():
         raise RuntimeError("No OHLCV data fetched.")
+    df = sanitize_ohlcv(df)
     bronze = cfg.path("data_bronze")
     out = bronze / "ohlcv_daily.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
