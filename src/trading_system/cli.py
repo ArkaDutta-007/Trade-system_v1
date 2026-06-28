@@ -42,10 +42,14 @@ UNIVERSE_OPT = typer.Option(
 
 
 @app.command()
-def ingest(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
-    """Ingest the configured universe to bronze parquet."""
+def ingest(
+    config: str = "configs/default.yaml",
+    universe: str = UNIVERSE_OPT,
+    workers: int = typer.Option(8, help="concurrent fetch workers (TS_INGEST_WORKERS)"),
+):
+    """Ingest the configured universe to bronze parquet (threaded, with progress)."""
     cfg = get_config(config).use_universe(universe)
-    out = ingest_universe(cfg)
+    out = ingest_universe(cfg, workers=workers)
     rprint(f"[green]Wrote {out}[/green]")
 
     # Fetch news and append to silver/events.parquet
@@ -54,7 +58,17 @@ def ingest(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     events_path = silver / "events.parquet"
     try:
         tickers = cfg["universe"]["tickers"]
-        new_events = fetch_news(tickers)
+        news_cfg = cfg.get("news", {}) or {}
+        rprint(f"[dim]fetching news ({len(tickers)} tickers, backends: "
+               f"{news_cfg.get('backends', ['finnhub','newsdata','google_news','newsapi'])})…[/dim]")
+        new_events = fetch_news(
+            tickers,
+            backends=news_cfg.get("backends"),
+            cache_dir=silver / "news_cache",
+            cache_hours=float(news_cfg.get("cache_hours", 6.0)),
+            dedup_cosine=float(news_cfg.get("dedup_cosine", 0.90)),
+            max_per_ticker=int(news_cfg.get("max_per_ticker", 25)),
+        )
         if not new_events.is_empty():
             if events_path.exists():
                 existing = pl.read_parquet(events_path)

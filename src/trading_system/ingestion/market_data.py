@@ -1,6 +1,8 @@
 """Daily OHLCV ingestion via yfinance. Writes raw + bronze parquet."""
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
@@ -41,8 +43,16 @@ def fetch_ohlcv(
     start: str | date,
     end: str | date | None = None,
     auto_adjust: bool = False,
+    workers: int | None = None,
+    progress: bool = True,
 ) -> pl.DataFrame:
-    """Fetch daily OHLCV for tickers. Returns a long-form Polars frame."""
+    """Fetch daily OHLCV for tickers. Returns a long-form Polars frame.
+
+    Fetches are network-bound, so tickers are pulled **concurrently** with a
+    thread pool and a live progress bar (count · rate · ETA · last ticker · fails).
+    ``workers`` defaults to ``TS_INGEST_WORKERS`` env or 8 (kept modest so
+    yfinance doesn't rate-limit). Set ``progress=False`` for quiet/non-TTY use.
+    """
     import yfinance as yf
 
     if end is None:
@@ -53,35 +63,75 @@ def fetch_ohlcv(
         end = end.isoformat()
 
     tickers = list(tickers)
-    logger.info(f"Fetching OHLCV: {len(tickers)} tickers from {start} to {end}")
+    workers = workers or int(os.environ.get("TS_INGEST_WORKERS", 8))
+    workers = max(1, min(workers, len(tickers) or 1))
+    logger.info(f"Fetching OHLCV: {len(tickers)} tickers {start}→{end} ({workers} workers)")
+
+    def _fetch_one(ticker: str) -> pl.DataFrame:
+        t = yf.Ticker(ticker)
+        df_pd = t.history(start=start, end=end, auto_adjust=auto_adjust, actions=False)
+        return _to_polars(df_pd, ticker)
 
     frames: list[pl.DataFrame] = []
-    # Batch to avoid yfinance hangs and keep memory bounded
-    for ticker in tickers:
-        try:
-            t = yf.Ticker(ticker)
-            df_pd = t.history(start=start, end=end, auto_adjust=auto_adjust, actions=False)
-            df = _to_polars(df_pd, ticker)
-            if len(df):
-                frames.append(df)
-        except Exception as e:
-            logger.warning(f"Failed to fetch {ticker}: {e}")
+    fails: list[str] = []
 
+    def _run(update=None):
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(_fetch_one, t): t for t in tickers}
+            for fut in as_completed(futs):
+                tk = futs[fut]
+                try:
+                    df = fut.result()
+                    if len(df):
+                        frames.append(df)
+                    else:
+                        fails.append(tk)
+                except Exception as e:
+                    fails.append(tk)
+                    logger.debug(f"Failed to fetch {tk}: {e}")
+                if update:
+                    update(tk, len(fails))
+
+    if progress:
+        try:
+            from rich.progress import (
+                Progress, BarColumn, TextColumn, TimeRemainingColumn,
+                MofNCompleteColumn, SpinnerColumn,
+            )
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]ingest"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TextColumn("· {task.fields[last]}"),
+                TimeRemainingColumn(),
+                transient=False,
+            ) as prog:
+                task = prog.add_task("ingest", total=len(tickers), last="…")
+                _run(lambda tk, nf: prog.update(
+                    task, advance=1, last=f"{tk}" + (f" [red]{nf} fail[/red]" if nf else "")))
+        except Exception:
+            _run()  # rich unavailable / non-tty → just run quietly
+    else:
+        _run()
+
+    if fails:
+        logger.warning(f"OHLCV: {len(fails)} tickers returned no data: {', '.join(fails[:15])}"
+                       + (" …" if len(fails) > 15 else ""))
     if not frames:
         return pl.DataFrame()
     out = pl.concat(frames, how="diagonal_relaxed").sort(["ticker", "date"])
-    # Compute adjusted_factor and total_return relative columns
     if "adj_close" not in out.columns and "close" in out.columns:
         out = out.with_columns(pl.col("close").alias("adj_close"))
     return out
 
 
-def ingest_universe(cfg: Config) -> Path:
+def ingest_universe(cfg: Config, workers: int | None = None) -> Path:
     """Ingest configured universe and write to bronze parquet. Returns path."""
     tickers = cfg["universe"]["tickers"]
     start = cfg["data"]["start_date"]
     end = cfg["data"].get("end_date")
-    df = fetch_ohlcv(tickers, start=start, end=end)
+    df = fetch_ohlcv(tickers, start=start, end=end, workers=workers)
     if df.is_empty():
         raise RuntimeError("No OHLCV data fetched.")
     bronze = cfg.path("data_bronze")
