@@ -89,6 +89,12 @@ def compute_shap_waterfall(
                 tree_model = m
                 break
 
+        # Bare tree model in the registry (not wrapped in an ensemble) — use directly
+        if tree_model is None and not hasattr(ensemble, "_models"):
+            cls = type(ensemble).__name__.lower()
+            if any(k in cls for k in ("lgbm", "xgb", "boosting", "forest", "tree", "gbm")):
+                tree_model = ensemble
+
         if tree_model is not None:
             explainer = shap.TreeExplainer(tree_model)
             shap_values = explainer.shap_values(X)

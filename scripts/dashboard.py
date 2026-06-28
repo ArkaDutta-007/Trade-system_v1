@@ -98,6 +98,43 @@ def _load_decisions():
                 pass
     return latest
 
+@st.cache_data(show_spinner=False, ttl=900)
+def _load_events_for(ticker: str):
+    """Return a list of {date, summary, sentiment, source} events for a ticker."""
+    ev_path = cfg.path("data_silver") / "events.parquet"
+    if not ev_path.exists():
+        return []
+    try:
+        ev = pl.read_parquet(ev_path)
+        sub = (
+            ev.explode("tickers")
+            .filter(pl.col("tickers") == ticker.upper())
+            .with_columns(d=pl.col("known_at").dt.date())
+            .select(["d", "summary", "sentiment", "source"])
+            .sort("d", descending=True)
+        )
+        return sub.to_dicts()
+    except Exception:
+        return []
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _compute_bounds_cached(ticker: str):
+    """Calibrated price bounds for a ticker (quantile bundle → MC fallback)."""
+    try:
+        from trading_system.decision.bounds import compute_bounds
+        ohlcv = _load_ohlcv()
+        features = _load_features()
+        last_date = features["date"].max()
+        row = features.filter((pl.col("ticker") == ticker.upper()) & (pl.col("date") == last_date))
+        if row.is_empty():
+            return None
+        last_price = float(row["adj_close"][0]) if "adj_close" in row.columns else 0.0
+        dec = _load_decisions().get(ticker.upper(), {})
+        score = float(dec.get("forecast_5d") or 0.0)
+        return compute_bounds(cfg, ticker, features, ohlcv, last_price, score)
+    except Exception:
+        return None
+
 @st.cache_data(show_spinner=False, ttl=600)
 def _last_close_prices():
     """Return dict[ticker → last adj_close] from feature matrix."""
@@ -127,26 +164,17 @@ with st.sidebar:
     st.caption(f"Universe: {cfg['universe']['name']} · {len(cfg['universe']['tickers'])} tickers")
     st.divider()
 
-    page = st.radio(
-        "Navigation",
-        [
-            "🚦 Trading Desk",
-            "🧭 Playbook & Tax",
-            "🎯 Trade Signals",
-            "📈 Future Predictions",
-            "🔍 Stock Screener",
-            "📋 Decision Reports",
-            "🔭 Stock Analysis",
-            "💼 Paper Simulation",
-            "⚡ Live Prices",
-            "🤖 Agent Analysis",
-            "🌐 Universe Overview",
-            "📊 Strategy Backtest",
-            "🧠 Model Comparison",
-            "⚙️ Strategy Catalog",
-        ],
-        label_visibility="collapsed",
-    )
+    # Grouped, two-level navigation — 14 pages collapsed into 5 intuitive sections
+    NAV_GROUPS = {
+        "🚦 Desk": ["🚦 Trading Desk", "🧭 Playbook & Tax", "⚡ Live Prices"],
+        "🔭 Research": ["🔭 Stock Analysis", "🔍 Stock Screener",
+                        "🌐 Universe Overview", "🎯 Trade Signals"],
+        "🔮 Forecasts": ["📈 Future Predictions", "📋 Decision Reports", "🤖 Agent Analysis"],
+        "🧠 Models": ["🧠 Model Comparison", "📊 Strategy Backtest", "⚙️ Strategy Catalog"],
+        "💼 Portfolio": ["💼 Paper Simulation"],
+    }
+    section = st.selectbox("Section", list(NAV_GROUPS), key="nav_section")
+    page = st.radio("Page", NAV_GROUPS[section], label_visibility="collapsed", key="nav_page")
     st.divider()
 
     # Backtest params — only shown when on the backtest page
@@ -885,6 +913,33 @@ elif page == "🔭 Stock Analysis":
                 marker_color=vol_colors, name="Volume", opacity=0.6,
             ), row=2, col=1)
 
+        # ── Event markers (news overlaid on price) ──────────────────────────
+        ev_rows = _load_events_for(sel)
+        if ev_rows:
+            ev_df = pd.DataFrame(ev_rows)
+            ev_df["d"] = pd.to_datetime(ev_df["d"])
+            ev_df = ev_df[ev_df["d"] >= cutoff]
+            if not ev_df.empty:
+                # snap each event to that day's low for marker placement
+                low_by_date = chart_df.set_index("date")["low" if "low" in chart_df else "adj_close"]
+                def _yfor(d):
+                    try:
+                        return float(low_by_date.asof(d)) * 0.985
+                    except Exception:
+                        return float(chart_df["adj_close"].iloc[-1])
+                ev_df["y"] = ev_df["d"].map(_yfor)
+                ev_df["color"] = ev_df["sentiment"].map(
+                    lambda s: "#4ade80" if (s or 0) > 0.05 else ("#f87171" if (s or 0) < -0.05 else "#facc15")
+                )
+                fig.add_trace(go.Scatter(
+                    x=ev_df["d"], y=ev_df["y"], mode="markers",
+                    marker=dict(symbol="triangle-up", size=11, color=ev_df["color"],
+                                line=dict(width=0.5, color="#0e1117")),
+                    name="News",
+                    text=ev_df["summary"].str.slice(0, 110),
+                    hovertemplate="%{x|%b %d}<br>%{text}<extra></extra>",
+                ), row=1, col=1)
+
         last_price = float(chart_df["adj_close"].iloc[-1])
         fig.update_layout(
             title=f"{sel} — {period_days}d Price",
@@ -930,99 +985,71 @@ elif page == "🔭 Stock Analysis":
             mc1, _, _, _ = st.columns(4)
             mc1.metric("Current Price", f"${last_price:.2f}")
 
-        # ── Price Forecast Fan ───────────────────────────────────────────────
+        # ── Calibrated Price Bounds (conformal quantiles → MC fallback) ──────
         st.divider()
-        st.subheader("📅 Price Forecast — All Horizons (min / avg / max)")
-        st.caption(
-            "Avg = model point forecast.  "
-            "Min/Max = ±2 σ band derived from realised volatility at each horizon."
-        )
+        st.subheader("📅 Price Bounds — lower / median / upper")
 
-        # Get ticker vol from features
         feat_row = features.filter(
             (pl.col("ticker") == sel) & (pl.col("date") == features["date"].max())
         )
-        vol_daily = None
-        if not feat_row.is_empty() and "vol_20d" in feat_row.columns:
-            v = feat_row["vol_20d"][0]
-            if v and float(v) > 0:
-                vol_daily = float(v) / math.sqrt(252)  # daily vol
+        bounds = _compute_bounds_cached(sel)
+        if bounds and bounds.get("horizons"):
+            method = bounds.get("method", "")
+            cap = f" · target coverage {bounds['target_coverage']:.0%}" if bounds.get("target_coverage") else ""
+            iv = f" · 1m IV {bounds['implied_vol_1m']:.0%}" if bounds.get("implied_vol_1m") else ""
+            st.caption(f"Method: `{method}`{cap}{iv} — calibrated, asymmetric (not ±2σ).")
 
-        # Horizon → trading days
-        horizons_td = {"5d": 5, "20d": 20, "1m": 21, "3m": 63, "6m": 126, "12m": 252}
-        f5_raw  = (decision.get("forecast_5d")  or 0) if decision else 0
-        f20_raw = (decision.get("forecast_20d") or 0) if decision else 0
+            order = ["5d", "1m", "3m", "6m", "12m"]
+            hz = bounds["horizons"]
+            labels = [o for o in order if o in hz]
+            rows = []
+            for label in labels:
+                h = hz[label]
+                p, r = h["price"], h["return"]
+                rows.append({
+                    "Horizon": label,
+                    "Low": f"${p['lo']:.2f}",
+                    "Median": f"${p['median']:.2f}",
+                    "High": f"${p['hi']:.2f}",
+                    "Low %": f"{r['lo']*100:+.1f}%",
+                    "Med %": f"{r['median']*100:+.1f}%",
+                    "High %": f"{r['hi']*100:+.1f}%",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # Simple linear interpolation for intermediate horizons from f5 / f20
-        def _horizon_forecast(td: int) -> float:
-            if td <= 5:
-                return f5_raw * (td / 5)
-            if td <= 20:
-                return f5_raw + (f20_raw - f5_raw) * ((td - 5) / 15)
-            # Extrapolate: annualise f20 and scale
-            annual_rate = f20_raw * (252 / 20)
-            return annual_rate * (td / 252)
-
-        forecast_rows = []
-        for label, td in horizons_td.items():
-            fc = _horizon_forecast(td)
-            price_avg = last_price * (1 + fc)
-            if vol_daily:
-                sigma = vol_daily * math.sqrt(td)
-                price_min = last_price * (1 + fc - 2 * sigma)
-                price_max = last_price * (1 + fc + 2 * sigma)
-            else:
-                price_min = price_max = price_avg
-            forecast_rows.append({
-                "Horizon": label,
-                "Trading Days": td,
-                "Min Price": f"${price_min:.2f}",
-                "Avg Price": f"${price_avg:.2f}",
-                "Max Price": f"${price_max:.2f}",
-                "Forecast Return": f"{fc*100:+.2f}%",
-            })
-
-        fc_df = pd.DataFrame(forecast_rows)
-        st.dataframe(
-            fc_df[["Horizon", "Min Price", "Avg Price", "Max Price", "Forecast Return"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        # Plotly fan chart
-        if vol_daily and last_price:
-            fan_labels = list(horizons_td.keys())
-            fan_tds    = list(horizons_td.values())
-            avgs  = [last_price * (1 + _horizon_forecast(t)) for t in fan_tds]
-            mins_ = [last_price * (1 + _horizon_forecast(t) - 2 * vol_daily * math.sqrt(t)) for t in fan_tds]
-            maxs_ = [last_price * (1 + _horizon_forecast(t) + 2 * vol_daily * math.sqrt(t)) for t in fan_tds]
+            los = [hz[l]["price"]["lo"] for l in labels]
+            meds = [hz[l]["price"]["median"] for l in labels]
+            his = [hz[l]["price"]["hi"] for l in labels]
+            q25 = [hz[l]["price"].get("q25", hz[l]["price"]["median"]) for l in labels]
+            q75 = [hz[l]["price"].get("q75", hz[l]["price"]["median"]) for l in labels]
 
             fan_fig = go.Figure()
+            # outer band (lo..hi)
             fan_fig.add_trace(go.Scatter(
-                x=fan_labels + fan_labels[::-1],
-                y=maxs_ + mins_[::-1],
-                fill="toself", fillcolor="rgba(96,165,250,0.15)",
-                line=dict(color="rgba(0,0,0,0)"),
-                name="±2σ band",
+                x=labels + labels[::-1], y=his + los[::-1],
+                fill="toself", fillcolor="rgba(96,165,250,0.12)",
+                line=dict(color="rgba(0,0,0,0)"), name="5–95% band",
+            ))
+            # inner band (q25..q75)
+            fan_fig.add_trace(go.Scatter(
+                x=labels + labels[::-1], y=q75 + q25[::-1],
+                fill="toself", fillcolor="rgba(96,165,250,0.25)",
+                line=dict(color="rgba(0,0,0,0)"), name="25–75% band",
             ))
             fan_fig.add_trace(go.Scatter(
-                x=fan_labels, y=avgs,
-                mode="lines+markers",
-                line=dict(color="#60a5fa", width=2),
-                marker=dict(size=7),
-                name="Avg forecast",
+                x=labels, y=meds, mode="lines+markers",
+                line=dict(color="#60a5fa", width=2), marker=dict(size=7), name="Median",
             ))
             fan_fig.add_hline(y=last_price, line_dash="dash", line_color="#9ca3af",
                               annotation_text="Current price")
             fan_fig.update_layout(
-                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                font=dict(color="white"),
-                margin=dict(l=10, r=10, t=30, b=10),
-                height=300,
-                legend=dict(orientation="h"),
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color="white"),
+                margin=dict(l=10, r=10, t=30, b=10), height=320, legend=dict(orientation="h"),
             )
             fan_fig.update_yaxes(showgrid=True, gridcolor="#1f2937")
             st.plotly_chart(fan_fig, use_container_width=True)
+        else:
+            st.info("No bounds yet. Train them with `ts train-intervals` (or they fall back to a Monte-Carlo fan).")
 
         # ── Technical Indicators ─────────────────────────────────────────────
         st.divider()

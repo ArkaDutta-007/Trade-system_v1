@@ -80,7 +80,35 @@ api_keys:
   fred: ${FRED_API_KEY}
   deepseek: ${DEEPSEEK_API_KEY}
   newsapi: ${NEWSAPI_KEY}
+  finnhub: ${FINNHUB_API_KEY}
+  newsdata: ${NEWSDATA_API_KEY}
   sec_user_agent: "research-bot research@example.com"
+
+# News ingestion: backend order + dedup/caching
+news:
+  backends: [finnhub, newsdata, google_news, newsapi]   # tried in order; first non-empty wins per ticker
+  cache_hours: 6            # disk-cache fetched articles this long
+  dedup_cosine: 0.90        # drop near-duplicate headlines above this similarity
+  max_per_ticker: 25
+
+# Macro features joined into the model matrix (FRED levels, not just calendar flags)
+macro:
+  enabled: true
+  series:                   # FRED id -> feature name
+    DGS10: macro_ust_10y
+    T10Y2Y: macro_yield_curve
+    VIXCLS: macro_vix
+    BAMLH0A0HYM2: macro_hy_oas
+    DFF: macro_fed_funds
+  cache_ttl_hours: 12
+
+# Probabilistic price bounds (lower / median / upper) per horizon
+bounds:
+  horizons_days: [5, 21, 63, 126, 252]   # ~1w, 1m, 3m, 6m, 12m
+  quantiles: [0.05, 0.25, 0.5, 0.75, 0.95]
+  conformal_alpha: 0.10     # target 90% coverage for the outer band
+  use_implied_vol: true     # widen bands with option-chain IV when available
+  mc_paths: 2000            # Monte-Carlo paths for the fan fallback
 
 # V2: LLM routing — DeepSeek cloud primary, Ollama local fallback
 llm:

@@ -278,6 +278,159 @@ def train(config: str = "configs/default.yaml"):
             rprint(f"[yellow]SHAP summary skipped: {e}[/yellow]")
 
 
+@app.command("train-intervals")
+def train_intervals(config: str = "configs/default.yaml"):
+    """Train conformalized quantile models for multi-horizon price bounds."""
+    from trading_system.models.intervals import train_interval_models
+
+    cfg = get_config(config)
+    feat = pl.read_parquet(cfg.path("data_gold") / "features.parquet")
+    feature_columns = [c for c in [
+        "mom_5d", "mom_20d", "mom_60d", "mom_120d", "mom_12m1m",
+        "vol_20d", "vol_60d", "rsi_14", "rel_vol_20",
+        "sma_gap_50", "sma_gap_200", "breakout_20", "dd_from_high_60",
+        "excess_ret_1d",
+        # macro levels now available to the bound models too
+        "macro_ust_10y", "macro_yield_curve", "macro_vix", "macro_hy_oas",
+        "macro_vix_z_252", "macro_hy_oas_z_252",
+    ] if c in feat.columns]
+
+    bcfg = cfg.get("bounds", {}) or {}
+    bundle = train_interval_models(
+        feat, feature_columns,
+        horizons=tuple(bcfg.get("horizons_days", (5, 21, 63, 126, 252))),
+        quantiles=tuple(bcfg.get("quantiles", (0.05, 0.25, 0.5, 0.75, 0.95))),
+        alpha=float(bcfg.get("conformal_alpha", 0.10)),
+    )
+    out = bundle.save(cfg.path("reports") / "models" / "intervals")
+    rprint(f"[green]Interval bundle saved -> {out}[/green]")
+    rprint("[bold]Out-of-sample coverage (target "
+           f"{1 - bundle.alpha:.0%}):[/bold]")
+    for h in bundle.horizons:
+        cov = bundle.coverage.get(h)
+        if cov is None:
+            continue
+        color = "green" if abs(cov - (1 - bundle.alpha)) < 0.05 else "yellow"
+        rprint(f"  {h:>3}d: [{color}]{cov:.1%}[/{color}]  (conformal Q={bundle.conformal_q.get(h, 0):.4f})")
+
+
+@app.command("train-forecast")
+def train_forecast(
+    config: str = "configs/default.yaml",
+    horizons: str = typer.Option("21,63,126,252", help="comma-sep trading-day horizons"),
+    n_splits: int = typer.Option(5, help="purged walk-forward folds"),
+    groups: str = typer.Option("", help="feature-reserve groups (comma-sep); empty=all"),
+):
+    """Train + rigorously evaluate long-horizon forecasters; save best to models_store/.
+
+    Purged+embargoed walk-forward CV, ranked by ICIR, gated by a label-shuffle
+    leakage test. Also (re)trains the conformal interval bundle on the reserve.
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.utils import get_compute_profile
+    from trading_system.features.reserve import resolve_reserve
+    from trading_system.models.forecast_train import train_all_horizons
+    from trading_system.models.intervals import train_interval_models
+    from trading_system.models.store import default_store, save_forecast_results, copy_interval_bundle
+
+    cfg = get_config(config)
+    prof = get_compute_profile()
+    rprint(f"[cyan]compute:[/cyan] {prof.summary()}")
+
+    feat = pl.read_parquet(cfg.path("data_gold") / "features.parquet")
+    grp = [g.strip() for g in groups.split(",") if g.strip()] or None
+    feat_cols = resolve_reserve(feat, groups=grp)
+    rprint(f"[cyan]feature reserve:[/cyan] {len(feat_cols)} features"
+           + (f" (groups: {grp})" if grp else " (all groups)"))
+    if len(feat_cols) < 5:
+        rprint("[red]Too few features resolved — run `ts features` first.[/red]")
+        raise typer.Exit(1)
+
+    hz = tuple(int(h) for h in horizons.split(",") if h.strip())
+    results = train_all_horizons(feat, feat_cols, horizons=hz, n_splits=n_splits)
+    if not results:
+        rprint("[red]No horizons trained.[/red]")
+        raise typer.Exit(1)
+
+    # ── Summary table ────────────────────────────────────────────────────────
+    console = Console()
+    t = Table(title="Forecast models — purged walk-forward (ranked by ICIR)", show_lines=True)
+    for c in ["Horizon", "Best", "ICIR", "IC", "Hit", "MAE", "Folds", "Leak gate"]:
+        t.add_column(c, justify="right")
+    for h, res in results.items():
+        b = res.per_model.get(res.best_model_name, {})
+        lk = res.leakage_gate.get("pass")
+        lk_s = "[green]PASS[/green]" if lk else ("[red]FAIL[/red]" if lk is False else "—")
+        icir = b.get("icir", 0)
+        t.add_row(
+            f"{h}d", res.best_model_name,
+            f"[{'green' if icir>0.3 else 'yellow' if icir>0 else 'red'}]{icir:.2f}[/]",
+            f"{b.get('ic_mean',0):+.3f}", f"{b.get('hit_rate',0):.1%}",
+            f"{b.get('mae',0):.4f}", str(b.get("n_folds",0)), lk_s,
+        )
+    console.print(t)
+
+    store = default_store(cfg.project_root)
+    save_forecast_results(results, store, compute_summary=prof.summary())
+    rprint(f"[green]Best models saved → {store}/forecast/[/green]")
+
+    # ── Conformal interval bundle on the same reserve ────────────────────────
+    try:
+        bcfg = cfg.get("bounds", {}) or {}
+        bundle = train_interval_models(
+            feat, feat_cols,
+            horizons=tuple(bcfg.get("horizons_days", (5, 21, 63, 126, 252))),
+            quantiles=tuple(bcfg.get("quantiles", (0.05, 0.25, 0.5, 0.75, 0.95))),
+            alpha=float(bcfg.get("conformal_alpha", 0.10)),
+        )
+        bundle.save(cfg.path("reports") / "models" / "intervals")
+        copy_interval_bundle(cfg.path("reports") / "models", store)
+        rprint(f"[green]Interval bundle trained + copied to store "
+               f"(coverage { {h: round(c,2) for h,c in bundle.coverage.items()} }).[/green]")
+    except Exception as e:
+        rprint(f"[yellow]Interval bundle step skipped: {e}[/yellow]")
+
+
+@app.command()
+def bounds(
+    ticker: str,
+    config: str = "configs/default.yaml",
+):
+    """Show lower/median/upper price bounds for a ticker across horizons."""
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.decision.analyze import _load_or_build_features
+    from trading_system.decision.bounds import compute_bounds
+
+    cfg = get_config(config)
+    ticker = ticker.upper()
+    ohlcv, features = _load_or_build_features(cfg)
+    last_date = features["date"].max()
+    row = features.filter((pl.col("ticker") == ticker) & (pl.col("date") == last_date))
+    if row.is_empty():
+        rprint(f"[red]No feature row for {ticker}.[/red]")
+        raise typer.Exit(1)
+    last_price = float(row["adj_close"][0]) if "adj_close" in row.columns else 0.0
+    score = 0.0
+    b = compute_bounds(cfg, ticker, features, ohlcv, last_price, score)
+    if not b:
+        rprint(f"[red]Could not compute bounds for {ticker}.[/red]")
+        raise typer.Exit(1)
+
+    console = Console()
+    t = Table(title=f"{ticker} price bounds — {b.get('method')} (last ${last_price:.2f})")
+    for col in ["Horizon", "Low", "Median", "High", "Low %", "Med %", "High %"]:
+        t.add_column(col, justify="right")
+    for label, h in b["horizons"].items():
+        p, r = h["price"], h["return"]
+        t.add_row(
+            label, f"${p['lo']:.2f}", f"${p['median']:.2f}", f"${p['hi']:.2f}",
+            f"{r['lo']*100:+.1f}%", f"{r['median']*100:+.1f}%", f"{r['hi']*100:+.1f}%",
+        )
+    console.print(t)
+
+
 @app.command()
 def daily(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
     """Run the full daily pipeline."""
@@ -1309,6 +1462,101 @@ def tax_cmd(config: str = "configs/default.yaml"):
     rprint(f"  beyond shield:    ~{s.all_in_rate:.0%} all-in haircut on net gains")
     for n in pb.tax.get("notes", []):
         rprint(f"  [dim]· {n}[/dim]")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Command directory — single source of truth for grouping + docs
+# ─────────────────────────────────────────────────────────────────────────────
+COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
+    "Data & features": [
+        ("ingest", "Pull daily OHLCV for the universe (yfinance)"),
+        ("quality", "OHLCV data-quality checks"),
+        ("features", "Build the gold feature matrix (technical+macro+events reserve)"),
+        ("universe", "Show the active universe"),
+    ],
+    "Forecasting & models": [
+        ("train", "Walk-forward 14-model ensemble (5d target)"),
+        ("train-forecast", "★ Long-horizon best models via purged CV → models_store/"),
+        ("train-intervals", "Conformalized quantile price-bound models (90% coverage)"),
+        ("bounds", "Show lower/median/upper price bounds for a ticker"),
+        ("backtest", "Vectorized backtest of a strategy with metrics"),
+    ],
+    "Decisions": [
+        ("analyze", "Single-symbol decision + report (bounds, SHAP, narration)"),
+        ("analyze-all", "Run analyze across the whole universe"),
+        ("signals", "Cross-sectional signal table"),
+        ("explain", "DeepSeek plain-English narration of a report"),
+    ],
+    "Future-predict sessions": [
+        ("future-predict", "Open a dated forecast session with allocation"),
+        ("future-status", "Show a session's equity + hit-rate"),
+        ("future-update", "MTM + redeploy dry powder for live sessions"),
+    ],
+    "Playbook & NRA tax": [
+        ("flags", "Live O/F/I/S/C flag board + composite"),
+        ("brief", "One-page morning briefing"),
+        ("playbook", "Which §4 cycle rules fire today"),
+        ("check", "Pre-trade compliance (never-buy, caps, freeze, tax)"),
+        ("log-trade", "Record a fill in the blotter"),
+        ("tax", "2026 NRA tax-shield status"),
+    ],
+    "Paper trading": [
+        ("paper-trade", "Run the ML/ensemble paper portfolio"),
+        ("paper-status", "Show paper-portfolio holdings + equity"),
+        ("daily", "Full daily pipeline (ingest→features→signals→rebalance)"),
+    ],
+    "Agent (LLM)": [
+        ("agent-analyze", "Multi-step ReAct analysis of a ticker"),
+        ("agent-portfolio", "Agent review of the whole portfolio"),
+        ("agent-briefing", "Agent-written morning brief"),
+    ],
+    "App": [
+        ("dashboard", "Launch the Streamlit desk"),
+        ("commands", "This command directory"),
+    ],
+}
+
+
+def _render_command_directory() -> str:
+    """Markdown for docs/COMMANDS.md (also used by `ts commands --md`)."""
+    lines = ["# Command directory", "", "All commands are invoked as `ts <command>`. "
+             "Run `ts <command> --help` for options.", ""]
+    for group, cmds in COMMAND_GROUPS.items():
+        lines.append(f"## {group}")
+        lines.append("")
+        lines.append("| Command | What it does |")
+        lines.append("| --- | --- |")
+        for name, desc in cmds:
+            lines.append(f"| `ts {name}` | {desc} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@app.command()
+def commands(
+    md: bool = typer.Option(False, "--md", help="print raw markdown instead of a table"),
+    write: bool = typer.Option(False, "--write", help="(re)write docs/COMMANDS.md"),
+):
+    """Show the grouped command directory (and optionally regenerate the docs)."""
+    if write:
+        out = get_config().project_root / "docs" / "COMMANDS.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_render_command_directory())
+        rprint(f"[green]Wrote {out}[/green]")
+        return
+    if md:
+        print(_render_command_directory())
+        return
+    from rich.table import Table
+    from rich.console import Console
+    console = Console()
+    for group, cmds in COMMAND_GROUPS.items():
+        t = Table(title=group, show_header=True, title_justify="left", expand=True)
+        t.add_column("Command", style="cyan", no_wrap=True)
+        t.add_column("What it does")
+        for name, desc in cmds:
+            t.add_row(f"ts {name}", desc)
+        console.print(t)
 
 
 if __name__ == "__main__":

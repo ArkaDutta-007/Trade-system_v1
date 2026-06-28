@@ -1,0 +1,75 @@
+{
+  "horizon": 63,
+  "best_model": "hist_gbm",
+  "per_model": {
+    "lgbm": {
+      "ic_mean": 0.05467738724746658,
+      "ic_std": 0.0742167921491789,
+      "icir": 0.7367252836468965,
+      "hit_rate": 0.5663780931954309,
+      "mae": 0.1715186547425756,
+      "r2": -0.3060339813939589,
+      "n_folds": 4
+    },
+    "xgb": {
+      "ic_mean": 0.05780875444961846,
+      "ic_std": 0.08280976542256248,
+      "icir": 0.6980910301415706,
+      "hit_rate": 0.5697847906852529,
+      "mae": 0.1711266356330778,
+      "r2": -0.31029601633800996,
+      "n_folds": 4
+    },
+    "hist_gbm": {
+      "ic_mean": 0.0575177530654708,
+      "ic_std": 0.07313460145954499,
+      "icir": 0.7864642989445594,
+      "hit_rate": 0.5650819202397781,
+      "mae": 0.17171303651207703,
+      "r2": -0.30366242554878004,
+      "n_folds": 4
+    },
+    "ridge": {
+      "ic_mean": 0.057966279706372595,
+      "ic_std": 0.10134286396006384,
+      "icir": 0.5719818588234822,
+      "hit_rate": 0.6053670511912752,
+      "mae": 0.1604882506150613,
+      "r2": -0.11889444335831506,
+      "n_folds": 4
+    }
+  },
+  "leakage_gate": {
+    "shuffled_abs_ic": 0.0234,
+    "real_abs_ic": 0.0575,
+    "pass": true
+  },
+  "feature_columns": [
+    "mom_5d",
+    "mom_10d",
+    "mom_20d",
+    "mom_60d",
+    "mom_120d",
+    "mom_12m1m",
+    "sma_gap_10",
+    "sma_gap_20",
+    "sma_gap_50",
+    "sma_gap_200",
+    "breakout_20",
+    "breakdown_20",
+    "vol_10d",
+    "vol_20d",
+    "vol_60d",
+    "atr_14",
+    "dd_from_high_60",
+    "rel_vol_20",
+    "avg_dollar_volume_20",
+    "rsi_14",
+    "bull_regime",
+    "high_vol_regime",
+    "mom_20d_rank",
+    "excess_ret_1d"
+  ],
+  "n_rows": 216350,
+  "trained_through": "2026-01-26"
+}

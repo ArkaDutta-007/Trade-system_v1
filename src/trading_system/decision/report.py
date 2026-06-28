@@ -105,6 +105,49 @@ def _render_model(m: dict) -> str:
     return "\n".join(out)
 
 
+def _render_bounds(b: dict) -> str:
+    if not b or not b.get("horizons"):
+        return "_no probabilistic bounds (train interval models with `ts train-intervals`)_"
+    method = b.get("method", "")
+    cov = b.get("target_coverage")
+    head = f"_Method: {method}"
+    if cov:
+        head += f" · target coverage {cov:.0%}"
+    if b.get("implied_vol_1m"):
+        head += f" · 1m implied vol {b['implied_vol_1m']:.0%}"
+    head += "_\n"
+    lines = [head, "| Horizon | Low | Median | High | Low ret | Med ret | High ret |",
+             "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    order = ["5d", "1m", "3m", "6m", "12m"]
+    hz = b["horizons"]
+    for label in [o for o in order if o in hz] + [k for k in hz if k not in order]:
+        h = hz[label]
+        p = h.get("price", {})
+        r = h.get("return", {})
+        lines.append(
+            f"| {label} | {p.get('lo','?')} | {p.get('median','?')} | {p.get('hi','?')} | "
+            f"{_fmt_pct(r.get('lo'))} | {_fmt_pct(r.get('median'))} | {_fmt_pct(r.get('hi'))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_shap_waterfall(w: dict) -> str:
+    if not w or not w.get("feature_names"):
+        return "_no per-ticker SHAP attribution available_"
+    base = w.get("base_value", 0.0)
+    pred = w.get("prediction", 0.0)
+    lines = [
+        f"Base value (avg prediction): **{_fmt_num(base, 5)}** → this ticker: **{_fmt_num(pred, 5)}**",
+        "",
+        "| Feature | Value | SHAP contribution |",
+        "| --- | ---: | ---: |",
+    ]
+    for name, val, sv in zip(w["feature_names"], w["feature_values"], w["shap_values"]):
+        arrow = "▲" if sv >= 0 else "▼"
+        lines.append(f"| `{name}` | {_fmt_num(val, 3)} | {arrow} {sv:+.5f} |")
+    return "\n".join(lines)
+
+
 def render_markdown(result) -> str:
     g = result.groundings
     return f"""# Decision: {result.ticker} — {result.stance}
@@ -138,6 +181,14 @@ def render_markdown(result) -> str:
 ## Model groundings
 
 {_render_model(g.get('model', {}))}
+
+## Price bounds (lower / median / upper)
+
+{_render_bounds(g.get('bounds', {}))}
+
+## Why this call — per-ticker SHAP attribution
+
+{_render_shap_waterfall(g.get('shap_waterfall', {}))}
 
 ---
 _Generated {datetime.utcnow().isoformat()}Z. Not financial advice; research only._

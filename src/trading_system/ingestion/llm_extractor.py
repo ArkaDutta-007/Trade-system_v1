@@ -102,6 +102,10 @@ class LLMRouter:
     deepseek_model: str = DEEPSEEK_DEFAULT_MODEL
     ollama: OllamaClient = field(default_factory=OllamaClient)
     _active_backend: str = field(default="unknown", init=False, repr=False)
+    # rolling token accounting so we can see disk-cache effectiveness
+    last_usage: dict = field(default_factory=dict, init=False, repr=False)
+    cache_hit_tokens: int = field(default=0, init=False, repr=False)
+    cache_miss_tokens: int = field(default=0, init=False, repr=False)
 
     @property
     def backend(self) -> str:
@@ -111,6 +115,32 @@ class LLMRouter:
         if self.ollama.is_available():
             return "ollama"
         return "none"
+
+    @property
+    def hit_rate(self) -> float:
+        """Cumulative DeepSeek disk-cache hit rate over this router's lifetime."""
+        total = self.cache_hit_tokens + self.cache_miss_tokens
+        return self.cache_hit_tokens / total if total else 0.0
+
+    def complete_many(
+        self,
+        message_sets: list[list[dict[str, str]]],
+        max_workers: int = 8,
+        **kwargs,
+    ) -> list[str | None]:
+        """Run many independent completions concurrently (latency-bound work).
+
+        Order of results matches the input order.  Used for per-ticker batched
+        calls (apprehension, narration) so a 100-name universe doesn't pay 100×
+        serial round-trips.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        if not message_sets:
+            return []
+        workers = max(1, min(max_workers, len(message_sets)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(lambda m: self.complete(m, **kwargs), message_sets))
 
     def complete(
         self,
@@ -155,7 +185,21 @@ class LLMRouter:
                 )
                 resp.raise_for_status()
                 self._active_backend = "deepseek"
-                return resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                usage = data.get("usage", {}) or {}
+                # DeepSeek reports disk-cache hits/misses so we can verify the
+                # stable-prefix prompt design is actually paying off (hits = 1/10 cost)
+                hit = int(usage.get("prompt_cache_hit_tokens", 0) or 0)
+                miss = int(usage.get("prompt_cache_miss_tokens", 0) or 0)
+                self.last_usage = usage
+                self.cache_hit_tokens += hit
+                self.cache_miss_tokens += miss
+                if hit or miss:
+                    logger.debug(
+                        f"deepseek tokens: cache_hit={hit} miss={miss} "
+                        f"(cumulative hit-rate {self.hit_rate:.0%})"
+                    )
+                return data["choices"][0]["message"]["content"]
             except Exception as e:
                 logger.warning(f"DeepSeek API failed ({e}), falling back to Ollama…")
 
@@ -415,94 +459,72 @@ def compute_apprehension_scores(
         return _EMPTY
 
     tickers = window["ticker"].unique().to_list()
-    rows = []
+
+    def _rule_based(sub: "pl.DataFrame") -> dict:
+        mean_sent = float(sub["sentiment"].mean() or 0.0)
+        mean_mag = float(sub["magnitude"].mean() or 0.0)
+        total_flags = sum(len(flags or []) for flags in sub["risk_flags"].to_list())
+        risk_density = min(1.0, total_flags / max(len(sub), 1))
+        raw = max(0.0, -mean_sent) * 0.45 + mean_mag * 0.25 + risk_density * 0.30
+        return {
+            "apprehension_score": min(1.0, raw),
+            "outlook": "deteriorating" if mean_sent < -0.2 else ("improving" if mean_sent > 0.2 else "stable"),
+            "apprehension_drivers": [],
+        }
+
+    # Build one batched message set per ticker (system prompt is a stable prefix
+    # → DeepSeek disk-cache hits across the universe → ~1/10 input cost).
+    use_llm = bool(api_key) or (router is not None and router.backend != "none")
+    _router = router
+    if use_llm and _router is None:
+        _router = LLMRouter(deepseek_api_key=api_key, deepseek_model=model)
+
+    rows: list[dict] = []
+    llm_tickers: list[str] = []
+    llm_messages: list[list[dict]] = []
+    subs: dict[str, "pl.DataFrame"] = {}
 
     for ticker in tickers:
         sub = window.filter(pl.col("ticker") == ticker).sort("date", descending=True)
         if sub.is_empty():
             continue
-
+        subs[ticker] = sub
+        if not use_llm:
+            rows.append({"date": today, "ticker": ticker, **_rule_based(sub)})
+            continue
         items = sub.to_dicts()[:20]
-        n = len(items)
         parts = []
         for idx, item in enumerate(items, start=1):
             headline = item.get("summary") or ""
             content = (item.get("content") or "")[:400]
-            if content:
-                parts.append(f"{idx}. {headline}\n   Snippet: {content}")
-            else:
-                parts.append(f"{idx}. {headline}")
-        headlines_str = "\n".join(parts)
-
-        # Rule-based fallback (no LLM key)
-        if not api_key and router is None:
-            mean_sent = float(sub["sentiment"].mean() or 0.0)
-            mean_mag = float(sub["magnitude"].mean() or 0.0)
-            total_flags = sum(len(flags or []) for flags in sub["risk_flags"].to_list())
-            risk_density = min(1.0, total_flags / max(len(sub), 1))
-            raw = max(0.0, -mean_sent) * 0.45 + mean_mag * 0.25 + risk_density * 0.30
-            rows.append({
-                "date": today,
-                "ticker": ticker,
-                "apprehension_score": min(1.0, raw),
-                "outlook": "deteriorating" if mean_sent < -0.2 else ("improving" if mean_sent > 0.2 else "stable"),
-                "apprehension_drivers": [],
-            })
-            continue
-
-        messages = [
+            parts.append(f"{idx}. {headline}" + (f"\n   Snippet: {content}" if content else ""))
+        llm_tickers.append(ticker)
+        llm_messages.append([
             {"role": "system", "content": _APPREHENSION_SYSTEM},
             {"role": "user", "content": _APPREHENSION_USER_TMPL.format(
-                ticker=ticker, days=days, n=n, headlines=headlines_str
+                ticker=ticker, days=days, n=len(items), headlines="\n".join(parts)
             )},
-        ]
+        ])
 
-        try:
-            if router is not None:
-                content = router.complete(messages, temperature=0.1, max_tokens=200, require_json=True)
-            else:
-                payload = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.1,
-                    "max_tokens": 200,
-                    "response_format": {"type": "json_object"},
-                }
-                resp = requests.post(
-                    DEEPSEEK_BASE_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=20,
-                )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
-
-            result = json.loads(content) if content else {}
-            rows.append({
-                "date": today,
-                "ticker": ticker,
-                "apprehension_score": float(result.get("apprehension_score", 0.5)),
-                "outlook": str(result.get("outlook", "stable")),
-                "apprehension_drivers": result.get("drivers") or [],
-            })
-        except Exception as e:
-            logger.debug(f"Apprehension call failed for {ticker}: {e}")
-            # Fallback: rule-based
-            mean_sent = float(sub["sentiment"].mean() or 0.0)
-            mean_mag = float(sub["magnitude"].mean() or 0.0)
-            total_flags = sum(len(flags or []) for flags in sub["risk_flags"].to_list())
-            risk_density = min(1.0, total_flags / max(len(sub), 1))
-            raw = max(0.0, -mean_sent) * 0.45 + mean_mag * 0.25 + risk_density * 0.30
-            rows.append({
-                "date": today,
-                "ticker": ticker,
-                "apprehension_score": min(1.0, raw),
-                "outlook": "stable",
-                "apprehension_drivers": [],
-            })
+    # One concurrent burst instead of N serial round-trips
+    if llm_messages:
+        contents = _router.complete_many(
+            llm_messages, max_workers=8, temperature=0.1, max_tokens=200, require_json=True
+        )
+        for ticker, content in zip(llm_tickers, contents):
+            try:
+                result = json.loads(content) if content else {}
+                rows.append({
+                    "date": today, "ticker": ticker,
+                    "apprehension_score": float(result.get("apprehension_score", 0.5)),
+                    "outlook": str(result.get("outlook", "stable")),
+                    "apprehension_drivers": result.get("drivers") or [],
+                })
+            except Exception as e:
+                logger.debug(f"Apprehension parse failed for {ticker}: {e}")
+                rows.append({"date": today, "ticker": ticker, **_rule_based(subs[ticker])})
+        if _router is not None and (_router.cache_hit_tokens + _router.cache_miss_tokens):
+            logger.info(f"apprehension LLM cache hit-rate: {_router.hit_rate:.0%}")
 
     if not rows:
         return _EMPTY

@@ -1,0 +1,23 @@
+{
+  "created_at": 1782615141.525475,
+  "created_at_iso": "2026-06-27T19:52:21",
+  "compute": "cpu \u00b7 16 workers \u00b7 52GB RAM \u00b7 GPU=none \u00b7 lgbm=cpu \u00b7 xgb=cpu",
+  "horizons": {
+    "63": {
+      "best_model": "hist_gbm",
+      "icir": 0.786,
+      "ic_mean": 0.0575,
+      "hit_rate": 0.565,
+      "leak_pass": true,
+      "trained_through": "2026-01-26"
+    },
+    "252": {
+      "best_model": "lgbm",
+      "icir": 1.098,
+      "ic_mean": 0.1244,
+      "hit_rate": 0.644,
+      "leak_pass": true,
+      "trained_through": "2025-04-24"
+    }
+  }
+}

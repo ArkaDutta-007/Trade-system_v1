@@ -45,7 +45,15 @@ def run_daily_pipeline(cfg: Config | None = None) -> Path:
     events_path = silver / "events.parquet"
     try:
         tickers = cfg["universe"]["tickers"]
-        new_events = fetch_news(tickers)
+        news_cfg = cfg.get("news", {}) or {}
+        new_events = fetch_news(
+            tickers,
+            backends=news_cfg.get("backends"),
+            cache_dir=silver / "news_cache",
+            cache_hours=float(news_cfg.get("cache_hours", 6.0)),
+            dedup_cosine=float(news_cfg.get("dedup_cosine", 0.90)),
+            max_per_ticker=int(news_cfg.get("max_per_ticker", 25)),
+        )
         if not new_events.is_empty():
             if events_path.exists():
                 existing = pl.read_parquet(events_path)
@@ -93,13 +101,20 @@ def run_daily_pipeline(cfg: Config | None = None) -> Path:
         emit_alert("ERROR", "OHLCV quality checks failed", {"failed": failed})
         raise RuntimeError(f"Data quality failed: {failed}")
 
-    # 3. Features
+    # 3. Features (now includes macro levels + FOMC/earnings calendar proximity)
     _events_for_feat = pl.read_parquet(events_path) if events_path.exists() else None
     _apprehension_for_feat = pl.read_parquet(apprehension_path) if apprehension_path.exists() else None
+    from ..features.context import build_macro_inputs
+    macro_features, economic_calendar, earnings_calendar = build_macro_inputs(
+        cfg, tickers=list(cfg["universe"]["tickers"]), with_earnings=True
+    )
     features = build_feature_matrix(
         ohlcv,
         events=_events_for_feat,
         apprehension=_apprehension_for_feat,
+        economic_calendar=economic_calendar,
+        earnings_calendar=earnings_calendar,
+        macro_features=macro_features,
         benchmark=cfg["universe"]["benchmark"],
     )
     gold = cfg.path("data_gold")

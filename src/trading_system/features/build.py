@@ -10,6 +10,8 @@ import polars as pl
 from .technical import compute_technical_features
 from .regimes import compute_regime_features
 from .event_features import aggregate_events_to_daily, add_macro_calendar_features
+from .macro import join_macro_features
+from .extended_features import compute_extended_features
 
 
 def add_targets(df: pl.DataFrame, horizons: tuple[int, ...] = (5, 20)) -> pl.DataFrame:
@@ -29,9 +31,11 @@ def build_feature_matrix(
     apprehension: pl.DataFrame | None = None,
     economic_calendar: pl.DataFrame | None = None,
     earnings_calendar: pl.DataFrame | None = None,
+    macro_features: pl.DataFrame | None = None,
     benchmark: str = "SPY",
     horizons: tuple[int, ...] = (5, 20),
     add_macro_features: bool = True,
+    add_extended_features: bool = True,
 ) -> pl.DataFrame:
     """End-to-end feature build. Output is one row per (ticker, date).
 
@@ -61,6 +65,8 @@ def build_feature_matrix(
         V2: If True and calendars are provided, adds macro proximity features.
     """
     feat = compute_technical_features(ohlcv)
+    if add_extended_features:
+        feat = compute_extended_features(feat, benchmark=benchmark)
     feat = compute_regime_features(feat, benchmark=benchmark)
     feat = add_targets(feat, horizons=horizons)
 
@@ -98,5 +104,9 @@ def build_feature_matrix(
             pl.col("macro_event_imminent").fill_null(False),
             pl.col("hist_earnings_sentiment_mean").fill_nan(0.0),
         )
+
+    # Macro *levels* (yields, curve, VIX, HY OAS, fed funds) joined by date.
+    if macro_features is not None and not macro_features.is_empty():
+        feat = join_macro_features(feat, macro_features)
 
     return feat

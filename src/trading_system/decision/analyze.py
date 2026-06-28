@@ -67,10 +67,14 @@ def _load_or_build_features(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame]:
     else:
         events = _load_events(cfg)
         apprehension = _load_apprehension(cfg)
+        from ..features.context import build_macro_inputs
+        macro_features, econ_cal, _ = build_macro_inputs(cfg, tickers=None, with_earnings=False)
         features = build_feature_matrix(
             ohlcv,
             events=events,
             apprehension=apprehension,
+            economic_calendar=econ_cal,
+            macro_features=macro_features,
             benchmark=cfg["universe"]["benchmark"],
         )
     return ohlcv, features
@@ -302,7 +306,15 @@ def analyze_symbol(
         if extra.is_empty():
             raise ValueError(f"No data found for {ticker}.")
         ohlcv = pl.concat([ohlcv, extra], how="diagonal_relaxed").unique(subset=["date", "ticker"])
-        features = build_feature_matrix(ohlcv, benchmark=cfg["universe"]["benchmark"])
+        from ..features.context import build_macro_inputs
+        _mf, _ec, _earn = build_macro_inputs(cfg, tickers=[ticker], with_earnings=True)
+        features = build_feature_matrix(
+            ohlcv,
+            economic_calendar=_ec,
+            earnings_calendar=_earn,
+            macro_features=_mf,
+            benchmark=cfg["universe"]["benchmark"],
+        )
 
     last_date = features["date"].max()
     row_df = features.filter((pl.col("ticker") == ticker) & (pl.col("date") == last_date))
@@ -397,17 +409,52 @@ def analyze_symbol(
     )
     stance_reasons = stance_reasons + playbook_reasons
 
+    # ---- Probabilistic price bounds (lower / median / upper per horizon) ----
+    bounds = None
+    try:
+        from .bounds import compute_bounds
+        bounds = compute_bounds(
+            cfg, ticker, features, ohlcv,
+            float(last_price) if last_price else 0.0, float(forecast_5d),
+        )
+    except Exception as e:
+        logger.warning(f"bounds computation failed for {ticker} (non-fatal): {e}")
+
+    # ---- Per-ticker SHAP waterfall (backtrack what drives this call) ----
+    shap_waterfall = None
+    try:
+        if (cfg.path("reports") / "models").exists():
+            from ..monitoring.shap_viz import compute_shap_waterfall
+            shap_waterfall = compute_shap_waterfall(
+                cfg.path("reports") / "models", features, ticker, top_n=10
+            )
+    except Exception as e:
+        logger.debug(f"shap waterfall failed for {ticker}: {e}")
+
     # ---- Groundings ----
     events = _load_events(cfg)
     apprehension_df = _load_apprehension(cfg)
+
+    # RAG: relevance-ranked, point-in-time news context for this ticker
+    relevant_news = []
+    try:
+        if events is not None and not events.is_empty():
+            from ..ingestion.rag import retrieve_ticker_news
+            relevant_news = retrieve_ticker_news(events, ticker, k=5)
+    except Exception as e:
+        logger.debug(f"news retrieval failed for {ticker}: {e}")
+
     groundings = {
         "technical": technical_grounding(features, ticker),
         "regime": regime_grounding(features, ticker),
         "cross_section": cross_section_grounding(features, ticker),
         "events": event_grounding(events, ticker),
+        "relevant_news": relevant_news,
         "apprehension": _apprehension_grounding(apprehension_df, ticker),
         "model": model_grounding(score if score_source != "rules" else None, feature_columns, shap_summary),
         "playbook": playbook_grounding,
+        "bounds": bounds or {},
+        "shap_waterfall": shap_waterfall or {},
     }
 
     rationale = stance_reasons + (rule_reasons if score_source == "rules" else [])
@@ -443,7 +490,8 @@ def analyze_symbol(
         if api_key:
             logger.info(f"Requesting DeepSeek narration for {ticker}…")
             try:
-                narration = explain_report(md_path, api_key=api_key, model=DEEPSEEK_DEFAULT_MODEL)
+                from .explain import explain_decision
+                narration = explain_decision(asdict(result), api_key=api_key, model=DEEPSEEK_DEFAULT_MODEL)
                 # Append narration section to the markdown file
                 separator = "\n\n---\n\n## 🤖 AI Analysis (DeepSeek)\n\n"
                 with open(md_path, "a") as f:
