@@ -372,7 +372,9 @@ def train_forecast(
     groups: str = typer.Option("", help="feature-reserve groups (comma-sep); empty=all"),
     models: str = typer.Option(
         "", help="families: subset of lgbm,xgb,hist_gbm,ridge,lstm,gru,rnn "
-                 "(empty = tabular default; add lstm/gru/rnn for deep sequence models)"),
+                 "(empty = tabular default; this REPLACES the default, not adds)"),
+    all_models: bool = typer.Option(
+        False, "--all", help="train EVERY family incl. deep sequence models (needs torch/.[deep])"),
     lookback: int = typer.Option(64, help="lookback window for sequence models"),
     epochs: int = typer.Option(40, help="max epochs for sequence models"),
 ):
@@ -381,9 +383,11 @@ def train_forecast(
     Purged+embargoed walk-forward CV, ranked by ICIR, gated by a label-shuffle
     leakage test. Also (re)trains the conformal interval bundle on the reserve.
 
-    Sequence models (lstm/gru/rnn) compete head-to-head with the tree families
-    under the same CV — opt in with e.g. ``--models lgbm,xgb,lstm,gru`` (needs
-    ``pip install -e '.[deep]'``; uses CUDA/MPS automatically).
+    By default trains the 4 tabular families (lgbm, xgb, hist_gbm, ridge).
+    Sequence models (lstm/gru/rnn) compete head-to-head under the same CV — add
+    them with ``--all`` (every family) or an explicit ``--models`` list (which
+    REPLACES the default). Deep models need ``pip install -e '.[deep]'`` and use
+    CUDA/MPS automatically.
     """
     from rich.table import Table
     from rich.console import Console
@@ -407,7 +411,15 @@ def train_forecast(
         raise typer.Exit(1)
 
     hz = tuple(int(h) for h in horizons.split(",") if h.strip())
-    mdl = [m.strip() for m in models.split(",") if m.strip()] or None
+    if all_models:
+        from trading_system.models.forecast_train import TABULAR_MODELS
+        from trading_system.models.sequence import SEQUENCE_MODELS, torch_available
+        mdl = list(TABULAR_MODELS) + list(SEQUENCE_MODELS)
+        if not torch_available():
+            rprint("[yellow]--all: torch not installed — sequence models will be skipped "
+                   "(pip install -e '.[deep]'). Training tabular families only.[/yellow]")
+    else:
+        mdl = [m.strip() for m in models.split(",") if m.strip()] or None
     if mdl:
         rprint(f"[cyan]model families:[/cyan] {mdl}")
     results = train_all_horizons(
