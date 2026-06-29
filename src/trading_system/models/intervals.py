@@ -27,6 +27,7 @@ import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+import warnings
 from typing import Any
 
 import numpy as np
@@ -35,6 +36,9 @@ import polars as pl
 from ..utils import get_logger
 
 logger = get_logger(__name__)
+
+# Benign LightGBM/sklearn notice when fitting quantile models on numpy arrays.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 DEFAULT_HORIZONS = (5, 21, 63, 126, 252)
 DEFAULT_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)

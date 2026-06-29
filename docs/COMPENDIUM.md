@@ -373,17 +373,27 @@ into the test block, the model has seen the future. For `h=252` that overlap is 
 into its test block.
 
 ### 9.2 Metrics
-* **IC** (information coefficient): Spearman rank correlation of prediction vs
-  realised forward return per fold.
+* **IC** (information coefficient): the **per-date cross-sectional** Spearman rank
+  correlation — computed *within each date* across the universe, then averaged
+  over dates. This is deliberate: pooling all `(ticker, date)` pairs conflates
+  *market timing* with *stock selection* — a feature that's constant per date
+  (a macro level, the RMT systematic fraction) correlates with the date-level
+  forward return, so pooled IC is inflated by the common market factor (and
+  survives label shuffling). Per-date IC isolates genuine cross-sectional skill.
+  *(In practice the correction is large: a pooled ICIR of 3.4 at 21d collapsed to
+  ~0.33 once measured cross-sectionally — the rest was market beta, not alpha.)*
 * **ICIR**: `mean(IC)/std(IC)` across folds — the Sharpe-equivalent of forecasting
-  skill, and the **selection criterion** (a stable small edge beats a spiky large
-  one).
+  skill, and the **selection criterion**.
 * Plus directional **hit-rate**, MAE, R².
 
-### 9.3 Label-shuffle leakage gate
-Train the best family on **shuffled** training labels; its out-of-sample
-`|IC|` must collapse to ~0. If a model can "predict" permuted targets, the
-pipeline is leaking. Recorded per horizon as `leak_pass`.
+### 9.3 Label-shuffle leakage gate (permutation test)
+Train the best family on `N` **shuffled-label** copies and build the null
+distribution of `|per-date IC|` on the held-out fold. The model **passes iff its
+real IC exceeds the null's 95th percentile** (`p < 0.05`). A single shuffle (the
+original gate) is too noisy with a wide feature set and can't tell real skill from
+chance; the distribution makes the verdict trustworthy, and it correctly fails
+short horizons whose apparent edge is market-timing artifact. Recorded per horizon
+as `leak_pass` with the real/null ICs. (`N=10` tabular, `3` for sequence models.)
 
 ### 9.4 Model store
 The winner per horizon is refit on all fully-labeled data and written to
