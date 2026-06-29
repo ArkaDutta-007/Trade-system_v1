@@ -104,6 +104,28 @@ class ComputeProfile:
 
 
 @functools.lru_cache(maxsize=1)
+def _lgbm_gpu_supported() -> bool:
+    """True only if the installed LightGBM build can actually train on GPU.
+
+    The PyPI ``lightgbm`` wheel is CPU-only; ``device_type='gpu'`` then raises at
+    fit time. XGBoost (``device='cuda'``) and torch ship CUDA in their PyPI
+    wheels, so only LightGBM needs this probe. We do a 1-round GPU train on a
+    tiny array and see if it errors.
+    """
+    try:
+        import lightgbm as lgb
+        import numpy as np
+        lgb.train(
+            {"objective": "regression", "device_type": "gpu", "verbose": -1, "min_data": 1},
+            lgb.Dataset(np.random.rand(40, 3), label=np.random.rand(40)),
+            num_boost_round=1,
+        )
+        return True
+    except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
 def get_compute_profile() -> ComputeProfile:
     """Detect once, cache for the process. Honors TS_* env overrides."""
     cores = os.cpu_count() or 4
@@ -117,8 +139,18 @@ def get_compute_profile() -> ComputeProfile:
     platform = "apple_silicon" if is_apple else ("linux_gpu" if has_cuda else "cpu")
 
     forced = os.environ.get("TS_DEVICE")
-    lgbm_device = "gpu" if (forced == "gpu" or (forced is None and has_cuda)) else "cpu"
-    xgb_device = "cuda" if (forced == "gpu" or (forced is None and has_cuda)) else "cpu"
+    want_gpu = forced == "gpu" or (forced is None and has_cuda)
+    # XGBoost + torch CUDA work from PyPI wheels; LightGBM GPU needs a special
+    # build, so only flip lgbm to GPU when the build genuinely supports it —
+    # otherwise it would fail every fold and silently drop the lgbm family.
+    xgb_device = "cuda" if want_gpu else "cpu"
+    if want_gpu and _lgbm_gpu_supported():
+        lgbm_device = "gpu"
+    else:
+        lgbm_device = "cpu"
+        if want_gpu:
+            logger.info("LightGBM build has no GPU support — running lgbm on CPU "
+                        "(xgb/torch still use GPU). Install a CUDA LightGBM to enable.")
 
     prof = ComputeProfile(
         n_jobs=n_jobs, ram_gb=ram, has_cuda=has_cuda, torch_device=torch_dev,

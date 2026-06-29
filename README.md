@@ -146,6 +146,41 @@ DEEPSEEK_API_KEY=...    # event apprehension + decision narration (optional)
 
 Hardware overrides (optional): `TS_DEVICE=cpu|gpu`, `TS_N_JOBS=<int>`, `TS_GPU=0|1`.
 
+## Training on a GPU server (RTX / CUDA)
+
+`data/` and `.env` are gitignored, so a fresh clone has **no data and no keys** —
+rebuild both on the box. The committed `models_store/` comes down and is
+overwritten by your retrain.
+
+```bash
+# 1. clone + env
+git clone https://github.com/ArkaDutta-007/Trade-system_v1.git && cd Trade-system_v1
+python -m venv venv && source venv/bin/activate
+pip install -e ".[dev,deep]"          # torch wheel is CUDA-enabled on Linux
+
+# 2. verify the GPU is seen
+python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+# 3. recreate .env with your keys (scp it from the laptop, or:)
+cp .env.example .env && $EDITOR .env   # fill FRED / NEWSDATA / DEEPSEEK keys
+
+# 4. build data → features (one-off; ~minutes)
+ts ingest                              # OHLCV (+ news/apprehension if keys set)
+ts features                            # full reserve; add --deep for the heavy nonlinear tier
+
+# 5. train everything on the GPU (RNN/LSTM/GRU on CUDA, xgb on CUDA, lgbm on cores)
+#    compute log should read  GPU=CUDA · xgb=cuda
+ts train-forecast --all                # honest per-date IC + permutation gate
+
+# 6. upload the trained models back to main
+git add models_store/ && git commit -m "train-forecast --all on CUDA server"
+git push origin main
+```
+
+LightGBM GPU needs a special build; if absent the profile keeps `lgbm` on CPU
+(xgb/torch still use the GPU) instead of failing — so step 5 never silently
+drops a family. Pull the new models on the laptop with `git pull`.
+
 ## Quick start
 
 ```bash
