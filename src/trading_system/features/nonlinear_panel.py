@@ -77,10 +77,17 @@ def _ticker_sources(close: np.ndarray) -> dict[str, np.ndarray]:
 
 def _worker(payload):
     start, close, names = payload
-    src = _ticker_sources(close)
     specs = {f.name: f for f in ALL_FEATURES}
-    out = {nm: _strided_rolling(src[specs[nm].source], specs[nm].window,
-                                specs[nm].stride, specs[nm].func) for nm in names}
+    # Degenerate windows (constant series, zero variance) legitimately yield NaN
+    # inside the estimators (handled downstream as nulls); silence the expected
+    # divide-by-zero / invalid-value RuntimeWarnings they emit.
+    import warnings
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"), \
+            warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        src = _ticker_sources(close)
+        out = {nm: _strided_rolling(src[specs[nm].source], specs[nm].window,
+                                    specs[nm].stride, specs[nm].func) for nm in names}
     return start, out
 
 

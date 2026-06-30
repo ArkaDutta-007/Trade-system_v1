@@ -177,9 +177,11 @@ git add models_store/ && git commit -m "train-forecast --all on CUDA server"
 git push origin main
 ```
 
-LightGBM GPU needs a special build; if absent the profile keeps `lgbm` on CPU
-(xgb/torch still use the GPU) instead of failing — so step 5 never silently
-drops a family. Pull the new models on the laptop with `git pull`.
+**LightGBM stays on CPU by default** even on a GPU box — its OpenCL backend
+rarely beats CPU below ~1M rows and floods stdout with kernel-compile warnings.
+**XGBoost (CUDA) and the RNN/LSTM/GRU models (CUDA) do use the GPU** — those are
+the real wins. Opt LightGBM into GPU with `TS_LGBM_GPU=1` (needs a GPU LightGBM
+build). Pull the new models on the laptop with `git pull`.
 
 ## Quick start
 

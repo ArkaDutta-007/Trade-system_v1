@@ -140,17 +140,17 @@ def get_compute_profile() -> ComputeProfile:
 
     forced = os.environ.get("TS_DEVICE")
     want_gpu = forced == "gpu" or (forced is None and has_cuda)
-    # XGBoost + torch CUDA work from PyPI wheels; LightGBM GPU needs a special
-    # build, so only flip lgbm to GPU when the build genuinely supports it —
-    # otherwise it would fail every fold and silently drop the lgbm family.
     xgb_device = "cuda" if want_gpu else "cpu"
-    if want_gpu and _lgbm_gpu_supported():
+    # LightGBM's OpenCL GPU backend rarely beats CPU below ~1M rows (kernel-compile
+    # + host↔device transfer overhead) and spams "1 warning generated." per fit, so
+    # keep lgbm on CPU by default even on a GPU box. Opt in with TS_LGBM_GPU=1 (and a
+    # GPU-enabled LightGBM build). xgb + torch still use the GPU regardless.
+    if os.environ.get("TS_LGBM_GPU") == "1" and _lgbm_gpu_supported():
         lgbm_device = "gpu"
     else:
         lgbm_device = "cpu"
-        if want_gpu:
-            logger.info("LightGBM build has no GPU support — running lgbm on CPU "
-                        "(xgb/torch still use GPU). Install a CUDA LightGBM to enable.")
+        if os.environ.get("TS_LGBM_GPU") == "1":
+            logger.info("TS_LGBM_GPU=1 but LightGBM build has no GPU support — using CPU.")
 
     prof = ComputeProfile(
         n_jobs=n_jobs, ram_gb=ram, has_cuda=has_cuda, torch_device=torch_dev,
