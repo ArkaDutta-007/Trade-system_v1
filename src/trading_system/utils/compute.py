@@ -23,6 +23,10 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
+# Reduce CUDA fragmentation OOMs on smaller cards. Must be set before torch is
+# first imported anywhere; this module is the project's torch-import chokepoint.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 
 def _physical_ram_gb() -> float:
     try:

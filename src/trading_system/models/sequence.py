@@ -262,21 +262,35 @@ class TorchSequenceRegressor:
         net = _make_net(self.kind, F, self.hidden_size, self.num_layers,
                         self.dropout, self.bidirectional).to(device)
 
-        # random early-stopping holdout (regularisation only — not reported)
+        # random early-stopping holdout (regularisation only — not reported).
+        # Cap it: early stopping doesn't need tens of thousands of rows, and a
+        # full val forward pass on a small GPU OOMs (a (37k,64,78) tensor is ~7GB).
         rng = np.random.default_rng(self.seed)
         idx = rng.permutation(n)
-        n_val = max(1, int(n * self.val_frac)) if n > 20 else 0
+        n_val = min(max(1, int(n * self.val_frac)), 8192) if n > 20 else 0
         val_idx, tr_idx = idx[:n_val], idx[n_val:]
 
         to_t = lambda a: torch.from_numpy(np.ascontiguousarray(a))
         tr_ds = TensorDataset(to_t(Xs[tr_idx]), to_t(ys[tr_idx]))
         loader = DataLoader(tr_ds, batch_size=self.batch_size, shuffle=True, drop_last=False)
-        if n_val:
-            Xv = to_t(Xs[val_idx]).to(device)
-            yv = to_t(ys[val_idx]).to(device)
+        # Keep val tensors on CPU and evaluate in batches so GPU memory is bounded
+        # by one batch, not the whole holdout.
+        Xv_cpu = to_t(Xs[val_idx]) if n_val else None
+        yv_cpu = to_t(ys[val_idx]) if n_val else None
 
         opt = torch.optim.AdamW(net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         loss_fn = torch.nn.SmoothL1Loss(beta=self.huber_beta)
+
+        def _val_loss() -> float:
+            net.eval()
+            tot, cnt = 0.0, 0
+            with torch.no_grad():
+                for i in range(0, n_val, self.batch_size):
+                    xb = Xv_cpu[i:i + self.batch_size].to(device)
+                    yb = yv_cpu[i:i + self.batch_size].to(device)
+                    tot += float(loss_fn(net(xb), yb).item()) * len(xb)
+                    cnt += len(xb)
+            return tot / max(cnt, 1)
 
         best_val, best_state, bad = np.inf, None, 0
         for ep in range(self.epochs):
@@ -291,9 +305,7 @@ class TorchSequenceRegressor:
                 opt.step()
 
             if n_val:
-                net.eval()
-                with torch.no_grad():
-                    vloss = float(loss_fn(net(Xv), yv).item())
+                vloss = _val_loss()
                 if vloss < best_val - 1e-6:
                     best_val, bad = vloss, 0
                     best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
