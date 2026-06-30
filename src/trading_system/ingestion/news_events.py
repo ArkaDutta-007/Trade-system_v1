@@ -156,6 +156,14 @@ def _backend_newsapi(tickers: list[str], days: int, api_key: str | None) -> list
                         "pageSize": 25, "apiKey": api_key},
                 timeout=20,
             )
+            # An auth/quota error won't fix itself mid-loop — bail once instead of
+            # 401-ing for every remaining ticker (a common invalid-key flood).
+            if r.status_code in (401, 403, 426, 429):
+                logger.warning(
+                    f"NewsAPI disabled for this run: {r.status_code} "
+                    f"({'unauthorized — check NEWSAPI_KEY' if r.status_code in (401, 403) else 'quota/plan limit'})"
+                )
+                break
             r.raise_for_status()
             for art in r.json().get("articles", []):
                 published = art.get("publishedAt")
@@ -172,7 +180,7 @@ def _backend_newsapi(tickers: list[str], days: int, api_key: str | None) -> list
                     "backend": "newsapi",
                 })
         except Exception as e:
-            logger.warning(f"NewsAPI fetch failed for {t}: {e}")
+            logger.debug(f"NewsAPI fetch failed for {t}: {e}")
     return rows
 
 
