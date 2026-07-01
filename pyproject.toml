@@ -58,6 +58,10 @@ backtest = [
 deep = [
     "torch>=2.2",   # RNN/LSTM/GRU sequence forecasters (CUDA/MPS auto-detected)
 ]
+text = [
+    "torch>=2.2",
+    "transformers>=4.40",   # FinBERT news-text sentiment features
+]
 
 [project.scripts]
 ts = "trading_system.cli:app"

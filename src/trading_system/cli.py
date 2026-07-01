@@ -125,6 +125,7 @@ def features(
                                           "(sample entropy, Lyapunov, RQA, 0-1 chaos, LPPLS)"),
     jobs: int = typer.Option(0, help="parallel workers for nonlinear features (0 = auto: cores-1)"),
     no_parallel: bool = typer.Option(False, "--no-parallel", help="compute nonlinear features serially"),
+    text: bool = typer.Option(False, "--text", help="add FinBERT news-sentiment features (needs .[text] + events)"),
 ):
     """Build the feature matrix (technical + extended + macro + events + nonlinear) → gold."""
     from trading_system.features.context import build_macro_inputs
@@ -153,6 +154,8 @@ def features(
         nonlinear_deep=deep,
         nonlinear_parallel=not no_parallel,
         nonlinear_jobs=(jobs or None),
+        add_text_features=text,
+        text_cache_dir=(silver / "finbert_cache") if text else None,
     )
     out = cfg.path("data_gold") / "features.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)

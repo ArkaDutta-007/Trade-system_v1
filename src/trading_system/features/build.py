@@ -43,6 +43,8 @@ def build_feature_matrix(
     nonlinear_parallel: bool = True,
     nonlinear_jobs: int | None = None,
     add_rmt_features: bool = True,
+    add_text_features: bool = False,
+    text_cache_dir=None,
 ) -> pl.DataFrame:
     """End-to-end feature build. Output is one row per (ticker, date).
 
@@ -126,5 +128,10 @@ def build_feature_matrix(
     # RMT cross-sectional denoising (systematic-risk fraction + market-mode beta).
     if add_rmt_features:
         feat = compute_rmt_features(feat)
+
+    # FinBERT news-text sentiment (optional; needs transformers + events).
+    if add_text_features and events is not None and not events.is_empty():
+        from .text_features import compute_text_features
+        feat = compute_text_features(feat, events, cache_dir=text_cache_dir)
 
     return feat

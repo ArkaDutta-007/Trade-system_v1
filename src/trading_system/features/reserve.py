@@ -45,6 +45,8 @@ EVENTS = [
     "apprehension_score",
 ]
 CALENDAR = ["days_to_fomc", "days_to_earnings", "macro_event_imminent"]
+# FinBERT news-text sentiment (optional tier — needs transformers + events)
+TEXT = ["finbert_sent", "finbert_sent_mom", "finbert_news_30d"]
 
 GROUPS: dict[str, list[str]] = {
     "trend": TREND,
@@ -55,6 +57,7 @@ GROUPS: dict[str, list[str]] = {
     "macro": MACRO,
     "events": EVENTS,
     "calendar": CALENDAR,
+    "text": TEXT,
 }
 
 # Nonlinear-dynamics + RMT groups (cross-domain maths). Derived from the feature
