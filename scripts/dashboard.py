@@ -30,6 +30,11 @@ from trading_system.config import get_config
 from trading_system.features import build_feature_matrix
 from trading_system.strategies import STRATEGY_REGISTRY
 
+# Top-level plotly/matplotlib imports (moved inside page handlers for speed; caught gracefully)
+import plotly.graph_objects as go  # noqa: E402
+from plotly.subplots import make_subplots  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Trade System",
@@ -48,7 +53,6 @@ st.markdown("""
         text-align: center;
     }
     .stMetric > div { font-size: 0.95rem; }
-    [data-testid="stSidebarNav"] { font-size: 0.9rem; }
     .signal-table td, .signal-table th {
         padding: 6px 12px;
         font-size: 0.9rem;
@@ -60,11 +64,20 @@ st.markdown("""
 # ─────────────────────────────────────────────────────────────────────────────
 # Config & data
 # ─────────────────────────────────────────────────────────────────────────────
-cfg = get_config()
-bronze = cfg.path("data_bronze") / "ohlcv_daily.parquet"
-if not bronze.exists():
-    st.error("No OHLCV data found. Run `ts ingest` first.")
+try:
+    cfg = get_config()
+except Exception as _cfg_err:
+    st.error(f"Failed to load config: {_cfg_err}")
+    st.info("Make sure `configs/default.yaml` exists and is valid YAML.")
     st.stop()
+
+try:
+    bronze = cfg.path("data_bronze") / "ohlcv_daily.parquet"
+    if not bronze.exists():
+        st.error("No OHLCV data found. Run `ts ingest` first.")
+        st.stop()
+except Exception as _bronze_err:
+    st.warning(f"Could not check OHLCV path: {_bronze_err}. Some pages may fail.")
 
 # ── Lazy-load helpers (only called for pages that need them) ──────────────────
 
@@ -173,7 +186,7 @@ with st.sidebar:
         "🧠 Models": ["🧠 Model Comparison", "📊 Strategy Backtest", "⚙️ Strategy Catalog"],
         "💼 Portfolio": ["💼 Paper Simulation"],
     }
-    section = st.selectbox("Section", list(NAV_GROUPS), key="nav_section")
+    section = st.selectbox("Section", list(NAV_GROUPS), key="nav_section_main")
     page = st.radio("Page", NAV_GROUPS[section], label_visibility="collapsed", key="nav_page")
     st.divider()
 
@@ -181,29 +194,24 @@ with st.sidebar:
     strategy_names = sorted(STRATEGY_REGISTRY.keys())
     if page == "📊 Strategy Backtest":
         chosen_strategy = st.selectbox("Strategy", strategy_names,
-                                       index=strategy_names.index("momentum_rotation"))
+                                       index=strategy_names.index("momentum_rotation"),
+                                       key="bt_strategy")
         st.subheader("Backtest params")
-        top_k = st.slider("Top K positions", 1, 20, 6)
-        rebal = st.slider("Rebalance (days)", 1, 63, 10)
-        commission = st.slider("Commission (bps)", 0.0, 10.0, float(cfg["backtest"]["commission_bps"]))
-        slippage = st.slider("Slippage (bps)", 0.0, 10.0, float(cfg["backtest"]["slippage_bps"]))
-    else:
-        # Provide defaults so other pages don't error if they reference these
-        chosen_strategy = "momentum_rotation"
-        top_k = 6
-        rebal = 10
-        commission = float(cfg["backtest"]["commission_bps"])
-        slippage = float(cfg["backtest"]["slippage_bps"])
+        top_k = st.slider("Top K positions", 1, 20, 6, key="bt_top_k")
+        rebal = st.slider("Rebalance (days)", 1, 63, 10, key="bt_rebal")
+        commission = st.slider("Commission (bps)", 0.0, 10.0, float(cfg["backtest"]["commission_bps"]), key="bt_commission")
+        slippage = st.slider("Slippage (bps)", 0.0, 10.0, float(cfg["backtest"]["slippage_bps"]), key="bt_slippage")
+    # else: backtest defaults only needed in the backtest page block below
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Trading Desk + Playbook  (V3 — live flags + playbook engine)
 # ─────────────────────────────────────────────────────────────────────────────
 if page == "🚦 Trading Desk":
-    import desk
+    from scripts import desk
     desk.render_trading_desk(cfg)
 
 elif page == "🧭 Playbook":
-    import desk
+    from scripts import desk
     desk.render_playbook(cfg)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,7 +387,7 @@ elif page == "📈 Future Predictions":
         )
     else:
         dates_available = [fp.parent.name for fp in fp_files]
-        sel_date = st.selectbox("Prediction batch", dates_available)
+        sel_date = st.selectbox("Prediction batch", dates_available, key="fp_date")
         fp_data = json.loads((fp_dir / sel_date / "forecast.json").read_text())
 
         # ── Metadata row ────────────────────────────────────────────────────
@@ -495,6 +503,13 @@ elif page == "📊 Strategy Backtest":
     features = _load_features()
     st.header("📊 Strategy Backtest")
 
+    # Sidebar widgets define these; provide safe defaults for first-run edge case
+    chosen_strategy = locals().get("chosen_strategy", "momentum_rotation")
+    top_k = locals().get("top_k", 6)
+    rebal = locals().get("rebal", 10)
+    commission = locals().get("commission", float(cfg["backtest"]["commission_bps"]))
+    slippage = locals().get("slippage", float(cfg["backtest"]["slippage_bps"]))
+
     @st.cache_data(show_spinner="Running backtest…", ttl=300)
     def _run_backtest(strat_name: str, _top_k: int, _rebal: int, _comm: float, _slip: float):
         cls = STRATEGY_REGISTRY[strat_name]
@@ -570,6 +585,7 @@ elif page == "📊 Strategy Backtest":
     compare_strats = st.multiselect(
         "Select strategies to compare",
         strategy_names,
+        key="bt_compare_strats",
         default=["momentum_rotation", "dual_momentum_absolute", "fractal_momentum",
                  "min_vol_portfolio", "adaptive_regime_blend"][:min(5, len(strategy_names))],
     )
@@ -612,13 +628,13 @@ elif page == "🔍 Stock Screener":
     col_filter, col_result = st.columns([1, 3])
     with col_filter:
         st.subheader("Filters")
-        min_mom = st.slider("Min 20d Momentum %", -30, 50, 0) / 100
-        max_vol = st.slider("Max Realized Vol % (ann)", 10, 100, 60) / 100
-        max_dd = st.slider("Max Drawdown from 60d High %", -50, 0, -5) / 100
-        rsi_range = st.slider("RSI(14) range", 0, 100, (20, 80))
-        min_adv = st.number_input("Min Avg $ Volume ($M)", 0, 50000, 100) * 1e6
-        sort_by = st.selectbox("Sort by", ["mom_20d", "mom_60d", "vol_20d", "rsi_14", "dd_from_high_60"])
-        asc = st.checkbox("Ascending", value=False)
+        min_mom = st.slider("Min 20d Momentum %", -30, 50, 0, key="ss_min_mom") / 100
+        max_vol = st.slider("Max Realized Vol % (ann)", 10, 100, 60, key="ss_max_vol") / 100
+        max_dd = st.slider("Max Drawdown from 60d High %", -50, 0, -5, key="ss_max_dd") / 100
+        rsi_range = st.slider("RSI(14) range", 0, 100, (20, 80), key="ss_rsi_range")
+        min_adv = st.number_input("Min Avg $ Volume ($M)", 0, 50000, 100, key="ss_min_adv") * 1e6
+        sort_by = st.selectbox("Sort by", ["mom_20d", "mom_60d", "vol_20d", "rsi_14", "dd_from_high_60"], key="ss_sort_by")
+        asc = st.checkbox("Ascending", value=False, key="ss_asc")
 
     with col_result:
         filtered = latest
@@ -654,7 +670,7 @@ elif page == "🔍 Stock Screener":
     # Quick chart for selected ticker
     st.divider()
     st.subheader("Price Chart")
-    ticker_sel = st.selectbox("Ticker", sorted(ohlcv["ticker"].unique().to_list()))
+    ticker_sel = st.selectbox("Ticker", sorted(ohlcv["ticker"].unique().to_list()), key="ss_ticker")
     if ticker_sel:
         px_df = ohlcv.filter(pl.col("ticker") == ticker_sel).sort("date").select(
             ["date", "adj_close", "volume"]
@@ -689,7 +705,7 @@ elif page == "📋 Decision Reports":
         st.info("No decision reports yet. Run `ts analyze MSFT` to generate one.")
     else:
         report_names = [f.name for f in md_files]
-        selected = st.selectbox("Select report", report_names)
+        selected = st.selectbox("Select report", report_names, key="dr_report")
         sel_path = reports_dir / selected
 
         tab_report, tab_signals, tab_agent = st.tabs(
@@ -817,7 +833,6 @@ elif page == "🌐 Universe Overview":
 
             # Histogram of momentum distribution
             if "mom_20d" in latest.columns:
-                import matplotlib.pyplot as plt
                 fig, ax = plt.subplots(figsize=(8, 3))
                 mom = latest["mom_20d"].drop_nulls().to_numpy()
                 ax.hist(mom, bins=30, color="#4c72b0", edgecolor="white", alpha=0.85)
@@ -864,8 +879,7 @@ elif page == "🔭 Stock Analysis":
     if tk_ohlcv.is_empty():
         st.warning(f"No price data for {sel}. Run `ts ingest`.")
     else:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+        # plotly already imported at module top
 
         tk_pd = tk_ohlcv.to_pandas()
         tk_pd["date"] = pd.to_datetime(tk_pd["date"])
@@ -1152,7 +1166,9 @@ elif page == "🔭 Stock Analysis":
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "💼 Paper Simulation":
     ohlcv = _load_ohlcv()
-    features = _load_features()
+    # Build last-close dict from OHLCV instead of full features
+    _paper_last_px_pl = ohlcv.group_by("ticker").agg(pl.last("adj_close")).to_dict(as_series=False)
+    _paper_last_close = dict(zip(_paper_last_px_pl["ticker"], _paper_last_px_pl["adj_close"]))
     st.header("💼 Paper Simulation")
     st.caption(
         "Forward paper trading simulation · started fresh with $10,000 · "
@@ -1298,12 +1314,8 @@ elif page == "💼 Paper Simulation":
                         st.session_state[price_key] = {}
 
                 live_prices = st.session_state.get(price_key, {})
-                # Fall back to last feature date prices when live unavailable
-                latest_prices_fb = {
-                    r["ticker"]: float(r["adj_close"])
-                    for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
-                    if r.get("adj_close")
-                }
+                # Fall back to last OHLCV close when live unavailable
+                latest_prices_fb = _paper_last_close
 
                 if holdings:
                     hold_rows = []
@@ -1322,6 +1334,8 @@ elif page == "💼 Paper Simulation":
                     st.dataframe(pd.DataFrame(hold_rows), use_container_width=True)
                     if live_prices:
                         st.caption(f"Total live value: **${total_live_value:,.0f}**  (🟢 = live price  🔴 = last close)")
+                    else:
+                        st.caption(f"Total estimated value: **${total_live_value:,.0f}**  (⚪ = reference close, not live)")
                 else:
                     st.info("No open positions.")
 
@@ -1374,7 +1388,7 @@ elif page == "🧠 Model Comparison":
             c1, c2, c3 = st.columns(3)
             c1.metric("Best Model", best_row["model"])
             c2.metric("Best IC (mean)", f"{best_row['ic_mean']:.4f}")
-            c3.metric("Best R²", f"{best_row['r2_mean']:.4f}")
+            c3.metric("Best R²", f"{best_row.get('r2_mean', 0):.4f}")
 
             st.divider()
 
@@ -1394,7 +1408,6 @@ elif page == "🧠 Model Comparison":
             ic_df = pd.DataFrame(agg_rows).sort_values("ic_mean", ascending=True)
             ic_series = ic_df.set_index("model")["ic_mean"]
             colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in ic_series]
-            import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(10, max(4, len(ic_series) * 0.35)))
             ax.barh(ic_series.index, ic_series.values, color=colors)
             ax.axvline(0, color="white", lw=0.8, linestyle="--")
@@ -1501,13 +1514,11 @@ elif page == "⚙️ Strategy Catalog":
                 cls = STRATEGY_REGISTRY.get(name)
                 if cls is None:
                     continue
-                desc = getattr(getattr(cls, "meta", None), "description", "") or ""
-                # Try to get description from default instance
+                # Get description from default instance, fallback to class-level meta
                 try:
-                    inst = cls()
-                    desc = inst.meta.description
+                    desc = cls().meta.description
                 except Exception:
-                    pass
+                    desc = getattr(getattr(cls, "meta", None), "description", "") or ""
                 st.markdown(f"**`{name}`** — {desc}")
 
     st.divider()
@@ -1526,7 +1537,7 @@ elif page == "⚙️ Strategy Catalog":
 # Page: Live Prices (V2)
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "⚡ Live Prices":
-    features = _load_features()
+    ohlcv_for_live = _load_ohlcv()
     st.header("⚡ Live Prices")
     st.caption("Quasi-realtime price overlay · 5-min refresh via yfinance · paper simulation P&L")
 
@@ -1614,7 +1625,6 @@ elif page == "⚡ Live Prices":
 
             # Donut chart of position weights
             try:
-                import plotly.graph_objects as go
                 weights = {t: qty * prices.get(t, 0.0) for t, qty in holdings.items() if prices.get(t)}
                 if weights:
                     fig = go.Figure(data=[go.Pie(
@@ -1641,12 +1651,9 @@ elif page == "⚡ Live Prices":
     if prices:
         st.divider()
         st.subheader("Universe Live Prices")
-        # Compute change vs last close from features
-        last_close = {
-            r["ticker"]: float(r["adj_close"])
-            for r in features.filter(pl.col("date") == features["date"].max()).to_dicts()
-            if r.get("adj_close")
-        }
+        # Compute change vs last close from OHLCV (avoid _load_features overhead)
+        _lc_pl = ohlcv_for_live.group_by("ticker").agg(pl.last("adj_close")).to_dict(as_series=False)
+        last_close = dict(zip(_lc_pl["ticker"], _lc_pl["adj_close"]))
         price_rows = []
         for t, px in sorted(prices.items()):
             lc = last_close.get(t)
@@ -1679,8 +1686,8 @@ elif page == "🤖 Agent Analysis":
         agent_ticker = st.selectbox("Ticker", tickers_available, key="agent_ticker")
         run_btn = st.button("▶ Run Agent Analysis", key="run_agent")
     with col_cfg:
-        verbose = st.checkbox("Show full thought chain", value=True)
-        save_result = st.checkbox("Save result to reports/agent/", value=True)
+        verbose = st.checkbox("Show full thought chain", value=True, key="aa_verbose")
+        save_result = st.checkbox("Save result to reports/agent/", value=True, key="aa_save")
 
     if run_btn:
         with st.spinner(f"Running ReAct agent for {agent_ticker}…"):
