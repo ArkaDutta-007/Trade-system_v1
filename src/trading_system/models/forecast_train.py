@@ -26,7 +26,7 @@ import polars as pl
 from scipy.stats import spearmanr
 
 from ..utils import get_logger, get_compute_profile
-from .validation import purged_walkforward_splits
+from .validation import purged_walkforward_splits, combinatorial_purged_splits, deflated_icir
 from .sequence import (
     SEQUENCE_MODELS, build_sequence_model, build_sequence_tensor, torch_available,
 )
@@ -177,8 +177,10 @@ class HorizonResult:
     best_model_name: str
     best_model: object = None           # refit-on-all estimator
     leakage_gate: dict = field(default_factory=dict)
+    deflation: dict = field(default_factory=dict)   # multiple-testing haircut
     n_rows: int = 0
     trained_through: str = ""
+    cv_mode: str = "walkforward"
 
 
 # ── Core ──────────────────────────────────────────────────────────────────────
@@ -203,6 +205,7 @@ def train_horizon(
     neutralize: bool = False,
     priority_tickers: set[str] | None = None,
     universe_weight: float = 0.5,
+    cv_mode: str = "walkforward",
 ) -> HorizonResult:
     prof = get_compute_profile()
     tgt = f"fwd_ret_{horizon}d"
@@ -227,9 +230,15 @@ def train_horizon(
         priority_mask = np.array([t.upper() in pset for t in sub["ticker"].to_list()])
 
     horizon_cal = int(round(horizon * _CAL_PER_TD))
-    splits = purged_walkforward_splits(
-        dates, horizon_days=horizon_cal, n_splits=n_splits, embargo_days=embargo_days
-    )
+    if cv_mode == "cpcv":
+        splits = combinatorial_purged_splits(
+            dates, horizon_days=horizon_cal, n_groups=max(4, n_splits + 1),
+            n_test_groups=2, embargo_days=embargo_days,
+        )
+    else:
+        splits = purged_walkforward_splits(
+            dates, horizon_days=horizon_cal, n_splits=n_splits, embargo_days=embargo_days
+        )
 
     # Resolve requested families. Sequence models need torch + a 3-D tensor.
     tab_names, seq_names = _resolve_model_names(models)
@@ -280,6 +289,12 @@ def train_horizon(
     best_name = ranked[0][0]
     best_mat = _mat(best_name)
 
+    # Multiple-testing haircut: we picked the best of len(active) families, so the
+    # winner's ICIR is upward-biased. Deflate against the best-of-N null.
+    _bm = per_model[best_name]
+    deflation = deflated_icir(_bm["icir"], n_folds=max(_bm.get("n_folds", 1), 1),
+                              n_trials=len(active))
+
     # ── Leakage gate: real cross-sectional IC vs a label-shuffle NULL ─────────
     # Train the best family on N shuffled-label copies and build the null
     # distribution of |per-date IC| on the held-out test fold. A clean model's
@@ -323,14 +338,16 @@ def train_horizon(
     _b = per_model[best_name]
     logger.info(
         f"horizon {horizon}d: best={best_name} "
-        f"ICIR={_b['icir']:.2f} IC={_b['ic_mean']:+.3f} "
-        f"univ_ICIR={_b['univ_icir']:.2f} hit={_b['hit_rate']:.1%} "
-        f"{'[neutral] ' if neutralize else ''}leak_pass={leak.get('pass')}"
+        f"ICIR={_b['icir']:.2f} (deflated {deflation['deflated_icir']:+.2f}) "
+        f"IC={_b['ic_mean']:+.3f} univ_ICIR={_b['univ_icir']:.2f} hit={_b['hit_rate']:.1%} "
+        f"{'[neutral] ' if neutralize else ''}[{cv_mode}] "
+        f"leak_pass={leak.get('pass')} deflation_pass={deflation['pass']}"
     )
     return HorizonResult(
         horizon=horizon, feature_columns=feat_cols, per_model=per_model,
         best_model_name=best_name, best_model=best, leakage_gate=leak,
-        n_rows=len(X), trained_through=trained_through,
+        deflation=deflation, n_rows=len(X), trained_through=trained_through,
+        cv_mode=cv_mode,
     )
 
 
@@ -346,6 +363,7 @@ def train_all_horizons(
     neutralize: bool = False,
     priority_tickers: set[str] | None = None,
     universe_weight: float = 0.5,
+    cv_mode: str = "walkforward",
 ) -> dict[int, HorizonResult]:
     out: dict[int, HorizonResult] = {}
     for h in horizons:
@@ -354,7 +372,7 @@ def train_all_horizons(
                 features, feat_cols, h, n_splits, embargo_days, models,
                 lookback=lookback, seq_epochs=seq_epochs,
                 neutralize=neutralize, priority_tickers=priority_tickers,
-                universe_weight=universe_weight,
+                universe_weight=universe_weight, cv_mode=cv_mode,
             )
         except Exception as e:
             logger.warning(f"horizon {h}d training failed: {e}")

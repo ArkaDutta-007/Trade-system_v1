@@ -76,6 +76,8 @@ def save_forecast_results(results: dict, store_dir: Path, compute_summary: str =
             "best_model": res.best_model_name,
             "per_model": res.per_model,
             "leakage_gate": res.leakage_gate,
+            "deflation": getattr(res, "deflation", {}),
+            "cv_mode": getattr(res, "cv_mode", "walkforward"),
             "feature_columns": res.feature_columns,
             "n_rows": res.n_rows,
             "trained_through": res.trained_through,
@@ -89,6 +91,7 @@ def save_forecast_results(results: dict, store_dir: Path, compute_summary: str =
             "ic_mean": round(best.get("ic_mean", 0.0), 4),
             "hit_rate": round(best.get("hit_rate", 0.0), 3),
             "leak_pass": res.leakage_gate.get("pass"),
+            "deflation_pass": getattr(res, "deflation", {}).get("pass"),
             "trained_through": res.trained_through,
         }
     (store_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))

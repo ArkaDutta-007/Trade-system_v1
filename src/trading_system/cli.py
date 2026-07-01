@@ -383,6 +383,8 @@ def train_forecast(
         0.5, help="model-selection blend: 0=general perf only, 1=your-universe only"),
     priority_universe: str = typer.Option(
         "core", help="universe whose ICIR is weighted in selection (alias or path)"),
+    cv: str = typer.Option(
+        "walkforward", help="cross-validation: walkforward | cpcv (combinatorial purged)"),
 ):
     """Train + rigorously evaluate long-horizon forecasters; save best to models_store/.
 
@@ -443,11 +445,13 @@ def train_forecast(
     if neutralize:
         rprint("[cyan]target:[/cyan] market-neutral (per-date demeaned) — pure cross-sectional selection")
 
+    if cv == "cpcv":
+        rprint("[cyan]CV:[/cyan] combinatorial purged (many paths → robust ICIR distribution)")
     results = train_all_horizons(
         feat, feat_cols, horizons=hz, n_splits=n_splits,
         models=mdl, lookback=lookback, seq_epochs=epochs,
         neutralize=neutralize, priority_tickers=(priority or None),
-        universe_weight=universe_weight,
+        universe_weight=universe_weight, cv_mode=cv,
     )
     if not results:
         rprint("[red]No horizons trained.[/red]")
@@ -456,19 +460,20 @@ def train_forecast(
     # ── Summary table ────────────────────────────────────────────────────────
     console = Console()
     t = Table(title="Forecast models — purged walk-forward (blended ICIR selection)", show_lines=True)
-    for c in ["Horizon", "Best", "ICIR", "univ ICIR", "IC", "Hit", "Folds", "Leak gate"]:
+    for c in ["Horizon", "Best", "ICIR", "univ", "Deflated", "IC", "Hit", "Leak", "Deflate"]:
         t.add_column(c, justify="right")
     for h, res in results.items():
         b = res.per_model.get(res.best_model_name, {})
         lk = res.leakage_gate.get("pass")
         lk_s = "[green]PASS[/green]" if lk else ("[red]FAIL[/red]" if lk is False else "—")
+        df = res.deflation
+        df_s = "[green]PASS[/green]" if df.get("pass") else ("[red]FAIL[/red]" if df.get("pass") is False else "—")
         icir = b.get("icir", 0)
         t.add_row(
             f"{h}d", res.best_model_name,
             f"[{'green' if icir>0.3 else 'yellow' if icir>0 else 'red'}]{icir:.2f}[/]",
-            f"{b.get('univ_icir',0):.2f}",
-            f"{b.get('ic_mean',0):+.3f}", f"{b.get('hit_rate',0):.1%}",
-            str(b.get("n_folds",0)), lk_s,
+            f"{b.get('univ_icir',0):.2f}", f"{df.get('deflated_icir',0):+.2f}",
+            f"{b.get('ic_mean',0):+.3f}", f"{b.get('hit_rate',0):.1%}", lk_s, df_s,
         )
     console.print(t)
 
