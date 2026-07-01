@@ -36,10 +36,29 @@ _PAGEVIEWS = (
 )
 _SEARCH = "https://en.wikipedia.org/w/api.php"
 _MIN_START = date(2015, 7, 1)          # Wikimedia pageviews coverage floor
-_UA = {"User-Agent": "trading-system/research (attention backfill)"}
+# Wikimedia's UA policy wants an identifiable client with a contact URL.
+_UA = {"User-Agent": "trading-system-research/1.0 "
+                     "(https://github.com/ArkaDutta-007/Trade-system_v1)"}
 _THROTTLE_S = 0.2
 _throttle_lock = threading.Lock()
 _last_call = 0.0
+
+_NAME_SUFFIXES = (" INC", " CORP", " CO", " LTD", " PLC", " CORPORATION", " COMPANY",
+                  " INCORPORATED", " HOLDINGS", " GROUP", " CLASS A", " CLASS C",
+                  " /DE/", " THE", " N V", " S A")
+
+
+def _clean_company_name(name: str) -> str:
+    """SEC titles are ALL-CAPS with legal suffixes ('APPLE INC') — normalise to a
+    natural article query ('Apple') so Wikipedia search resolves the right page."""
+    n = name.strip().strip('"')
+    changed = True
+    while changed:                     # peel nested suffixes ("... HOLDINGS INC")
+        changed = False
+        for suf in _NAME_SUFFIXES:
+            if n.upper().endswith(suf):
+                n = n[: -len(suf)].strip().rstrip(",").strip(); changed = True
+    return n.title() if n.isupper() else n
 
 
 def _throttle() -> None:
@@ -52,20 +71,30 @@ def _throttle() -> None:
         time.sleep(wait)
 
 
-def resolve_wiki_title(name: str, sess: requests.Session) -> str | None:
-    """Best-matching English-Wikipedia article title for a company name."""
-    try:
-        _throttle()
-        r = sess.get(_SEARCH, params={
-            "action": "query", "list": "search", "srsearch": name,
-            "srlimit": 1, "format": "json",
-        }, timeout=30)
-        r.raise_for_status()
-        hits = r.json().get("query", {}).get("search", [])
-        return hits[0]["title"] if hits else None
-    except Exception as e:
-        logger.debug(f"wiki title resolve failed for {name!r}: {e}")
-        return None
+def resolve_wiki_title(name: str, sess: requests.Session, retries: int = 4) -> str | None:
+    """Best-matching English-Wikipedia article title for a company name.
+
+    Retries on rate-limit/5xx — without this a single 429 (easy to hit at any
+    concurrency) permanently loses the ticker, which is why an early run resolved
+    only a handful of names.
+    """
+    q = _clean_company_name(name)
+    for attempt in range(retries):
+        try:
+            _throttle()
+            r = sess.get(_SEARCH, params={
+                "action": "query", "list": "search", "srsearch": q,
+                "srlimit": 1, "format": "json",
+            }, timeout=30)
+            if r.status_code in (429, 403, 502, 503):
+                time.sleep(1.5 * (attempt + 1)); continue
+            r.raise_for_status()
+            hits = r.json().get("query", {}).get("search", [])
+            return hits[0]["title"] if hits else None
+        except Exception as e:
+            if attempt == retries - 1:
+                logger.debug(f"wiki title resolve failed for {name!r}: {e}")
+    return None
 
 
 def _fetch_range(title: str, start: date, end: date, sess: requests.Session,
@@ -180,9 +209,10 @@ def collect_wiki_history(
     def _one(t: str):
         sess = requests.Session(); sess.headers.update(_UA)
         title = title_cache.get(t)
-        if title is None:
-            title = resolve_wiki_title(names.get(t, t), sess) or ""
-            title_cache[t] = title            # cache even "" (unresolved) to skip next time
+        if not title:                          # None or "" (a prior failure) → (re)try
+            title = resolve_wiki_title(names.get(t, t), sess)
+            if title:
+                title_cache[t] = title          # cache ONLY successes, so failures retry next run
         recs = fetch_wiki_ticker(t, title or None, start, end,
                                  cache_dir=cache_dir, session=sess)
         return [{"ticker": t, **r} for r in recs]
