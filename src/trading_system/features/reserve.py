@@ -49,6 +49,12 @@ CALENDAR = ["days_to_fomc", "days_to_earnings", "macro_event_imminent"]
 NEWS = ["news_tone", "news_tone_mom", "news_buzz"]
 # FinBERT news-text sentiment (optional tier — needs transformers + events)
 TEXT = ["finbert_sent", "finbert_sent_mom", "finbert_news_30d"]
+# SEC EDGAR filing intensity + recency (deep history — covers the whole panel)
+SEC = ["sec_filings_30d", "sec_8k_30d", "sec_form4_90d", "sec_days_since_filing"]
+# Wikipedia pageview attention (retail-attention proxy, 2015+)
+WIKI = ["wiki_attention_z", "wiki_attention_mom"]
+# Missingness indicators for the structurally-sparse signals above (news/SEC/wiki)
+PRESENCE = ["news_present", "sec_present", "wiki_present"]
 
 GROUPS: dict[str, list[str]] = {
     "trend": TREND,
@@ -61,6 +67,9 @@ GROUPS: dict[str, list[str]] = {
     "calendar": CALENDAR,
     "news": NEWS,
     "text": TEXT,
+    "sec": SEC,
+    "wiki": WIKI,
+    "presence": PRESENCE,
 }
 
 # Nonlinear-dynamics + RMT groups (cross-domain maths). Derived from the feature

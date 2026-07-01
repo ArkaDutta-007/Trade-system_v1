@@ -126,6 +126,80 @@ def build_sequence_tensor(
     return out
 
 
+# ── Lazy windows (memory-safe for full-panel training) ────────────────────────
+
+class SequenceWindows:
+    """A ``(n, lookback, n_features)`` window view that never materialises densely.
+
+    The dense tensor from :func:`build_sequence_tensor` is ``n·L·F`` floats — ~24 GB
+    for a 1.25M-row panel at ``L=64``, and the trainer then makes several full-size
+    copies per fold (fancy-index slice, standardisation, torch tensor), which OOMs
+    even a 64 GB box.  This instead keeps the flat ``(n, F)`` matrix (~0.4 GB) plus a
+    ``(n, L)`` int index of each window's rows (~0.3 GB), and materialises only the
+    **current batch** (a few MB) on demand.  Fancy-index slicing returns a cheap
+    sub-view, so the purged-CV fold splits work exactly as on a dense array.
+    """
+
+    __slots__ = ("flat", "gather_idx", "lookback")
+
+    def __init__(self, flat: np.ndarray, gather_idx: np.ndarray, lookback: int):
+        self.flat = flat                # (N, F) float32 — shared across sub-views
+        self.gather_idx = gather_idx    # (n, L) int — flat row indices per window
+        self.lookback = lookback
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return (self.gather_idx.shape[0], self.lookback, self.flat.shape[1])
+
+    def __len__(self) -> int:
+        return self.gather_idx.shape[0]
+
+    def __getitem__(self, sel) -> "SequenceWindows":
+        return SequenceWindows(self.flat, self.gather_idx[sel], self.lookback)
+
+    def materialize(self, rows=None) -> np.ndarray:
+        """Dense ``(m, L, F)`` for the given window positions (all if ``rows`` is None)."""
+        gi = self.gather_idx if rows is None else self.gather_idx[rows]
+        return self.flat[gi]
+
+
+def build_sequence_windows(
+    sub: "pl.DataFrame", feat_cols: list[str], lookback: int, group_col: str = "ticker",
+) -> SequenceWindows:
+    """Lazy equivalent of :func:`build_sequence_tensor` — same causal windows, ~60× less RAM.
+
+    ``sub`` must be sorted by ``[group_col, date]`` and null-free in ``feat_cols`` (the
+    trainer's ``_xy`` order), so the flat matrix and window index share row order with
+    the design matrix ``X`` and the purge indices slice all three consistently.
+    """
+    tickers = sub[group_col].to_numpy()
+    F = sub.select(feat_cols).to_numpy().astype(np.float32)
+    F = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
+    n = F.shape[0]
+    gather = np.empty((n, lookback), dtype=np.int64)
+    off = np.arange(lookback) - (lookback - 1)          # (L,): -(L-1)..0, terminal at 0
+    start = 0
+    for i in range(1, n + 1):
+        if i == n or tickers[i] != tickers[start]:
+            base = start + np.arange(i - start)          # global terminal index per row
+            idx = base[:, None] + off[None, :]           # (T, L)
+            np.clip(idx, start, i - 1, out=idx)          # edge-pad within this ticker block
+            gather[start:i] = idx
+            start = i
+    return SequenceWindows(F, gather, lookback)
+
+
+def _as_batches(X):
+    """Normalise a dense ``(n,L,F)`` array or a :class:`SequenceWindows` to a common
+    interface: ``(n, L, F, get_batch(rows)->ndarray, terminal_features)``."""
+    if isinstance(X, SequenceWindows):
+        n, L, F = X.shape
+        return n, L, F, X.materialize, X.flat[X.gather_idx[:, -1]]
+    X = np.asarray(X, dtype=np.float32)
+    n, L, F = X.shape
+    return n, L, F, (lambda rows: X[rows]), X[:, -1, :]
+
+
 # ── torch module ──────────────────────────────────────────────────────────────
 
 def _make_net(kind, n_features, hidden, layers, dropout, bidirectional):
@@ -232,51 +306,47 @@ class TorchSequenceRegressor:
         return torch.device("cpu")
 
     # -- fit --------------------------------------------------------------------
-    def fit(self, X: np.ndarray, y: np.ndarray):
+    def fit(self, X, y: np.ndarray):
+        """Fit on a dense ``(n,L,F)`` array or a :class:`SequenceWindows`.
+
+        Windows are standardised and moved to the device **one batch at a time**, so
+        peak memory is O(batch), not O(n·L·F) — a full-panel train never allocates
+        the multi-GB dense tensor or its per-fold copies.
+        """
         if not torch_available():
             raise ImportError(
                 "Sequence models need torch. Install with: pip install -e '.[deep]'"
             )
         import torch
-        from torch.utils.data import DataLoader, TensorDataset
 
         _limit_torch_threads(torch)
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
 
-        X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.float32).reshape(-1)
-        n, L, F = X.shape
+        n, L, F, get_batch, term = _as_batches(X)
         self._n_features = F
 
-        # standardise features (over all timesteps) and target
-        flat = X.reshape(-1, F)
-        self.mu_ = np.nanmean(flat, axis=0).astype(np.float32)
-        self.sd_ = (np.nanstd(flat, axis=0) + 1e-8).astype(np.float32)
+        # standardise on the terminal (current) row of each window, and the target
+        self.mu_ = term.mean(axis=0).astype(np.float32)
+        self.sd_ = (term.std(axis=0) + 1e-8).astype(np.float32)
         self.y_mu_ = float(np.mean(y))
         self.y_sd_ = float(np.std(y) + 1e-8)
-        Xs = (X - self.mu_) / self.sd_
-        ys = (y - self.y_mu_) / self.y_sd_
+        ys = ((y - self.y_mu_) / self.y_sd_).astype(np.float32)
 
         device = self._resolve_device()
         net = _make_net(self.kind, F, self.hidden_size, self.num_layers,
                         self.dropout, self.bidirectional).to(device)
 
-        # random early-stopping holdout (regularisation only — not reported).
-        # Cap it: early stopping doesn't need tens of thousands of rows, and a
-        # full val forward pass on a small GPU OOMs (a (37k,64,78) tensor is ~7GB).
+        # random early-stopping holdout (regularisation only — not reported), capped
         rng = np.random.default_rng(self.seed)
         idx = rng.permutation(n)
         n_val = min(max(1, int(n * self.val_frac)), 8192) if n > 20 else 0
-        val_idx, tr_idx = idx[:n_val], idx[n_val:]
+        val_pos, tr_pos = idx[:n_val], idx[n_val:]
 
-        to_t = lambda a: torch.from_numpy(np.ascontiguousarray(a))
-        tr_ds = TensorDataset(to_t(Xs[tr_idx]), to_t(ys[tr_idx]))
-        loader = DataLoader(tr_ds, batch_size=self.batch_size, shuffle=True, drop_last=False)
-        # Keep val tensors on CPU and evaluate in batches so GPU memory is bounded
-        # by one batch, not the whole holdout.
-        Xv_cpu = to_t(Xs[val_idx]) if n_val else None
-        yv_cpu = to_t(ys[val_idx]) if n_val else None
+        def _to_x(pos) -> "torch.Tensor":
+            xb = (get_batch(pos) - self.mu_) / self.sd_          # (B, L, F) on host
+            return torch.from_numpy(np.ascontiguousarray(xb, dtype=np.float32)).to(device)
 
         opt = torch.optim.AdamW(net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         loss_fn = torch.nn.SmoothL1Loss(beta=self.huber_beta)
@@ -286,19 +356,21 @@ class TorchSequenceRegressor:
             tot, cnt = 0.0, 0
             with torch.no_grad():
                 for i in range(0, n_val, self.batch_size):
-                    xb = Xv_cpu[i:i + self.batch_size].to(device)
-                    yb = yv_cpu[i:i + self.batch_size].to(device)
-                    tot += float(loss_fn(net(xb), yb).item()) * len(xb)
-                    cnt += len(xb)
+                    p = val_pos[i:i + self.batch_size]
+                    yb = torch.from_numpy(ys[p]).to(device)
+                    tot += float(loss_fn(net(_to_x(p)), yb).item()) * len(p)
+                    cnt += len(p)
             return tot / max(cnt, 1)
 
         best_val, best_state, bad = np.inf, None, 0
         for ep in range(self.epochs):
             net.train()
-            for xb, yb in loader:
-                xb, yb = xb.to(device), yb.to(device)
+            order = rng.permutation(len(tr_pos))
+            for i in range(0, len(tr_pos), self.batch_size):
+                p = tr_pos[order[i:i + self.batch_size]]
+                yb = torch.from_numpy(ys[p]).to(device)
                 opt.zero_grad()
-                loss = loss_fn(net(xb), yb)
+                loss = loss_fn(net(_to_x(p)), yb)
                 loss.backward()
                 if self.grad_clip:
                     torch.nn.utils.clip_grad_norm_(net.parameters(), self.grad_clip)
@@ -323,22 +395,23 @@ class TorchSequenceRegressor:
         return self
 
     # -- predict ----------------------------------------------------------------
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def predict(self, X) -> np.ndarray:
         if self.net_ is None:
             raise RuntimeError("model is not fitted")
         _preload_omp()
         import torch
         _limit_torch_threads(torch)
 
-        X = np.asarray(X, dtype=np.float32)
-        Xs = (X - self.mu_) / self.sd_
+        n, L, F, get_batch, _ = _as_batches(X)
         device = self._resolve_device()
         net = self.net_.to(device)
         net.eval()
         preds = []
         with torch.no_grad():
-            for i in range(0, len(Xs), 4096):
-                xb = torch.from_numpy(np.ascontiguousarray(Xs[i:i + 4096])).to(device)
+            for i in range(0, n, 4096):
+                pos = np.arange(i, min(i + 4096, n))
+                xb = (get_batch(pos) - self.mu_) / self.sd_
+                xb = torch.from_numpy(np.ascontiguousarray(xb, dtype=np.float32)).to(device)
                 preds.append(net(xb).cpu().numpy())
         out = np.concatenate(preds) if preds else np.zeros(0, dtype=np.float32)
         return out * self.y_sd_ + self.y_mu_

@@ -64,14 +64,9 @@ def build_longterm_picks(
             f"No {horizon}d model in models_store/ — run `ts train-forecast` first."
         )
     model, meta = loaded
-    feat_cols = [c for c in meta["feature_columns"] if c in features.columns]
-
-    today = features.filter(pl.col("date") == last_date).drop_nulls(subset=feat_cols)
-    if today.is_empty():
-        raise ValueError("no complete feature rows for the latest date")
-    X = today.select(feat_cols).to_numpy().astype(np.float64)
-    scores = np.asarray(model.predict(X)).ravel()
-    tickers = today["ticker"].to_list()
+    # Handles both tabular (flat row) and sequence (trailing lookback window) models.
+    from ..models.forecast_train import forecast_scores_latest
+    tickers, scores, today = forecast_scores_latest(model, meta, features)
 
     # price + a couple of timing features for the latest row
     def _col(name):

@@ -605,12 +605,22 @@ ts dashboard         # Streamlit desk (5 grouped sections)
 These are load-bearing — violating them silently inflates measured skill:
 * **News for training vs live.** Recent-fetch backends only cover ~a week, so they
   are **not** trained features — they power the live decision layer (analyze / RAG
-  / apprehension). The *trained* news signal comes from **GDELT** (`ts backfill-news`),
-  which gives full daily tone/attention back to 2017, causal by construction.
-* **Null-when-absent, never 0.** "No coverage" ≠ "neutral 0". Event/apprehension/
-  text/news features are left **null** where absent, so `resolve_reserve`'s ≥60%
-  coverage gate honestly drops a sparse column instead of the model learning a
-  near-constant **recency artifact**.
+  / apprehension). The *trained* deep-history signals come from `ts backfill-history`:
+  **GDELT** tone/attention (2017+), **SEC EDGAR** filing intensity (all-forms / 8-K /
+  Form-4 counts + recency — covers the *whole* panel), and **Wikipedia** pageviews
+  (retail-attention proxy, 2015+). All causal by construction (each value known by
+  that day's close) and cached per ticker.
+* **Impute-and-indicator for sparse signals.** A signal that only exists from a
+  source's coverage floor (GDELT 2017+, Wiki 2015+) or for covered names is
+  *structurally* sparse — leaving it null both trips `resolve_reserve`'s ≥60%
+  coverage gate (so the signal never trains) **and** would delete every uncovered
+  row via the trainer's `drop_nulls`. `densify_sparse_signals` resolves this the
+  standard way: add a per-source **presence flag** (`news_present` / `sec_present`
+  / `wiki_present`) and neutral-fill the columns. The filled columns are dense
+  (pass the gate, never poison rows); the flag lets the model separate *"neutral
+  reading"* from *"no coverage"*. Fills are constants → not forward-looking. (Truly
+  dense-when-present event/apprehension features stay **null-when-absent** so a
+  sparse recent-only column is still honestly dropped rather than faked to 0.)
 * **Earnings look-ahead cap.** `days_to_earnings` only counts a future date within
   a ~90-day announcement window (dates months out weren't knowable).
 * **Survivorship bias.** The universe is *today's* constituents; delisted names are

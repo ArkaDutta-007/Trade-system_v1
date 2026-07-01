@@ -28,7 +28,7 @@ from scipy.stats import spearmanr
 from ..utils import get_logger, get_compute_profile
 from .validation import purged_walkforward_splits, combinatorial_purged_splits, deflated_icir
 from .sequence import (
-    SEQUENCE_MODELS, build_sequence_model, build_sequence_tensor, torch_available,
+    SEQUENCE_MODELS, build_sequence_model, build_sequence_windows, torch_available,
 )
 
 logger = get_logger(__name__)
@@ -38,6 +38,19 @@ _CAL_PER_TD = 365 / 252  # trading days -> calendar days for purge sizing
 
 # Tabular families (row-independent). Sequence families live in SEQUENCE_MODELS.
 TABULAR_MODELS: tuple[str, ...] = ("lgbm", "xgb", "hist_gbm", "ridge")
+
+
+def _free_torch() -> None:
+    """Release GPU/host caches between sequence-model fits so many folds don't
+    accumulate allocator reserves (esp. on a small-VRAM box)."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _resolve_model_names(models: list[str] | None) -> tuple[list[str], list[str]]:
@@ -181,6 +194,7 @@ class HorizonResult:
     n_rows: int = 0
     trained_through: str = ""
     cv_mode: str = "walkforward"
+    lookback: int = 64
 
 
 # ── Core ──────────────────────────────────────────────────────────────────────
@@ -250,8 +264,9 @@ def train_horizon(
         raise ValueError(f"horizon {horizon}d: no runnable models from {models}")
 
     # Same row order as X (sub is sorted by ticker,date and null-free), so the
-    # purged split indices slice the flat matrix and the sequence tensor alike.
-    Xseq = build_sequence_tensor(sub, feat_cols, lookback) if seq_names else None
+    # purged split indices slice the flat matrix and the sequence windows alike.
+    # Lazy windows keep peak RAM at O(batch), not O(n·L·F) — see SequenceWindows.
+    Xseq = build_sequence_windows(sub, feat_cols, lookback) if seq_names else None
 
     def _new_estimator(name):
         if name in SEQUENCE_MODELS:
@@ -276,6 +291,9 @@ def train_horizon(
                 m.fit(mat[s.train_idx], ytr)
                 per_model_folds[name].append(
                     _fold_metrics(yte, m.predict(mat[s.test_idx]), dte, priority_mask=pmask))
+                if name in SEQUENCE_MODELS:
+                    del m
+                    _free_torch()
             except Exception as e:
                 logger.warning(f"  {horizon}d/{name} fold {s.fold} failed: {e}")
 
@@ -347,8 +365,43 @@ def train_horizon(
         horizon=horizon, feature_columns=feat_cols, per_model=per_model,
         best_model_name=best_name, best_model=best, leakage_gate=leak,
         deflation=deflation, n_rows=len(X), trained_through=trained_through,
-        cv_mode=cv_mode,
+        cv_mode=cv_mode, lookback=lookback,
     )
+
+
+def forecast_scores_latest(model, meta: dict, features: pl.DataFrame):
+    """Score the latest date's rows with a stored forecaster — tabular *or* sequence.
+
+    A tabular model takes the flat feature row; a sequence model needs the trailing
+    ``lookback`` window per ticker. This centralises that branch so the decision
+    layer (``ts picks``) works whichever family won selection.
+
+    Returns ``(tickers, scores, today_df)`` for the most recent date.
+    """
+    feat_cols = [c for c in meta.get("feature_columns", []) if c in features.columns]
+    if not feat_cols:
+        raise ValueError("model feature_columns not present in the feature matrix")
+    last_date = features["date"].max()
+    best = meta.get("best_model", "")
+
+    if best in SEQUENCE_MODELS:
+        lookback = int(meta.get("lookback", 64))
+        sub = (features.sort(["ticker", "date"])
+               .drop_nulls(subset=feat_cols).with_row_index("_pos"))
+        today = sub.filter(pl.col("date") == last_date)
+        if today.is_empty():
+            raise ValueError("no complete feature rows for the latest date")
+        windows = build_sequence_windows(sub, feat_cols, lookback)
+        pos = today["_pos"].to_numpy()
+        scores = np.asarray(model.predict(windows[pos])).ravel()
+        return today["ticker"].to_list(), scores, today.drop("_pos")
+
+    today = features.filter(pl.col("date") == last_date).drop_nulls(subset=feat_cols)
+    if today.is_empty():
+        raise ValueError("no complete feature rows for the latest date")
+    X = today.select(feat_cols).to_numpy().astype(np.float64)
+    scores = np.asarray(model.predict(X)).ravel()
+    return today["ticker"].to_list(), scores, today
 
 
 def train_all_horizons(

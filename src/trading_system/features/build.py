@@ -46,6 +46,8 @@ def build_feature_matrix(
     add_text_features: bool = False,
     text_cache_dir=None,
     gdelt: pl.DataFrame | None = None,
+    sec: pl.DataFrame | None = None,
+    wiki: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """End-to-end feature build. Output is one row per (ticker, date).
 
@@ -129,9 +131,25 @@ def build_feature_matrix(
         from .gdelt_features import compute_gdelt_features
         feat = compute_gdelt_features(feat, gdelt)
 
+    # SEC filing intensity/recency — deep history, covers the whole panel.
+    if sec is not None and not sec.is_empty():
+        from .sec_features import compute_sec_features
+        feat = compute_sec_features(feat, sec)
+
+    # Wikipedia pageview attention — retail-attention proxy, 2015+.
+    if wiki is not None and not wiki.is_empty():
+        from .wiki_features import compute_wiki_features
+        feat = compute_wiki_features(feat, wiki)
+
     # FinBERT news-text sentiment (optional; needs transformers + events).
     if add_text_features and events is not None and not events.is_empty():
         from .text_features import compute_text_features
         feat = compute_text_features(feat, events, cache_dir=text_cache_dir)
+
+    # Densify the structurally-sparse signals (news/SEC/wiki): add per-source
+    # presence flags and neutral-fill, so they pass the reserve coverage gate and
+    # never force row drops in training. Keep this LAST so it sees every source.
+    from .sparse_signals import densify_sparse_signals
+    feat = densify_sparse_signals(feat)
 
     return feat

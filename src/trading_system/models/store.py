@@ -79,6 +79,7 @@ def save_forecast_results(results: dict, store_dir: Path, compute_summary: str =
             "deflation": getattr(res, "deflation", {}),
             "cv_mode": getattr(res, "cv_mode", "walkforward"),
             "feature_columns": res.feature_columns,
+            "lookback": getattr(res, "lookback", 64),   # needed to window a sequence model at inference
             "n_rows": res.n_rows,
             "trained_through": res.trained_through,
         }

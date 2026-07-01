@@ -154,7 +154,7 @@ overwritten by your retrain.
 # 1. clone + env
 git clone https://github.com/ArkaDutta-007/Trade-system_v1.git && cd Trade-system_v1
 python -m venv venv && source venv/bin/activate
-pip install -e ".[dev,deep]"          # torch wheel is CUDA-enabled on Linux
+pip install -e ".[dev,deep,text]"      # torch wheel is CUDA-enabled on Linux; text=FinBERT (optional)
 
 # 2. verify the GPU is seen
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
@@ -162,24 +162,42 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.ge
 # 3. recreate .env with your keys (scp it from the laptop, or:)
 cp .env.example .env && $EDITOR .env   # fill FRED / NEWSDATA / DEEPSEEK keys
 
-# 4. build data → features (one-off; ~minutes)
-ts ingest                              # OHLCV (+ news/apprehension if keys set)
-ts features                            # full reserve; add --deep for the heavy nonlinear tier
+# 4. build data → features (one-off; the backfill is cached + incremental)
+ts ingest -u liquid                    # OHLCV (+ recent news/apprehension if keys set)
+ts backfill-history -u liquid          # ALL deep-history signals: GDELT + SEC + Wikipedia
+ts features -u liquid                  # full reserve incl. news_*/sec_*/wiki_* (add --deep for heavy maths)
+ts quality                             # sanity gate
 
-# 5. train everything on the GPU (RNN/LSTM/GRU on CUDA, xgb on CUDA, lgbm on cores)
+# 5. train everything on the GPU (RNN/LSTM/GRU + xgb on CUDA, lgbm on cores)
 #    compute log should read  GPU=CUDA · xgb=cuda
-ts train-forecast --all                # honest per-date IC + permutation gate
+ts train-forecast --all --neutralize --cv cpcv \
+    --universe-weight 0.5 --priority-universe core     # honest per-date IC + permutation gate
 
 # 6. upload the trained models back to main
 git add models_store/ && git commit -m "train-forecast --all on CUDA server"
 git push origin main
 ```
 
+Then fetch on the laptop: `git pull` brings the trained `models_store/`; the
+gitignored **data** comes over `scp` (so `ts picks` scores the *same* features):
+
+```bash
+scp you@gpu:~/Trade-system_v1/data/gold/features.parquet       data/gold/
+scp you@gpu:~/Trade-system_v1/data/bronze/ohlcv_daily.parquet  data/bronze/
+scp -r you@gpu:~/Trade-system_v1/data/silver                    data/
+ts picks --horizon 252 --top 20 -u liquid --write && ts dashboard
+```
+
+**Memory:** `--all` on the full liquid panel used to OOM-kill (the dense sequence
+window tensor + per-fold copies exceeded ~64 GB). It's now O(batch) — see
+`SequenceWindows` — so `--all --cv cpcv` fits. If you're very tight on RAM,
+`--lookback 32` halves the window index too.
+
 **LightGBM stays on CPU by default** even on a GPU box — its OpenCL backend
 rarely beats CPU below ~1M rows and floods stdout with kernel-compile warnings.
 **XGBoost (CUDA) and the RNN/LSTM/GRU models (CUDA) do use the GPU** — those are
 the real wins. Opt LightGBM into GPU with `TS_LGBM_GPU=1` (needs a GPU LightGBM
-build). Pull the new models on the laptop with `git pull`.
+build).
 
 ## Quick start
 
@@ -412,6 +430,46 @@ ts train-forecast --all --neutralize --cv cpcv \
     --universe-weight 0.5 --priority-universe core        # honest, universe-aware
 ts picks --horizon 252 --top 20 --write                   # the long-term plan
 ```
+
+## V3.9 — all deep-history signals, and memory-safe sequence training
+
+**More historical signal beyond GDELT** — one command backfills every
+point-in-time source with real depth, each cached per ticker and updated
+incrementally:
+
+```bash
+ts backfill-history -u liquid        # GDELT + SEC + Wikipedia, then:
+ts features -u liquid                # folds news_* / sec_* / wiki_* into the matrix
+```
+
+* **SEC EDGAR filings** (`sec` group) — the submissions API gives *every* filing
+  a company has ever made, so unlike GDELT (2017+) it covers the whole panel.
+  Point-in-time trailing counts known by each day's close: `sec_filings_30d`
+  (disclosure intensity), `sec_8k_30d` (material events), `sec_form4_90d`
+  (insider activity), `sec_days_since_filing` (recency).
+* **Wikipedia pageviews** (`wiki` group) — daily article traffic as an
+  independent **retail-attention** proxy (2015+): `wiki_attention_z` (abnormal
+  attention vs a trailing 60d) and `wiki_attention_mom`.
+
+**News actually reaches the model now.** Structurally-sparse signals (GDELT 2017+,
+Wiki 2015+, ETFs that never file) were being **dropped by the reserve's coverage
+gate** and, worse, would have **deleted every uncovered row** from training via
+`drop_nulls`. The new *impute-and-indicator* step
+([`densify_sparse_signals`](src/trading_system/features/sparse_signals.py)) adds a
+per-source **presence flag** (`news_present` / `sec_present` / `wiki_present`) and
+neutral-fills the columns — so they're dense (pass the gate, never poison rows)
+while the flag lets the model distinguish *"neutral reading"* from *"no coverage"*.
+Fills are constants known at all times → nothing forward-looking.
+
+**Sequence models no longer OOM.** The dense `(n·lookback·features)` window tensor
+was ~24 GB for the 1.25M-row panel — and the trainer copied it several times per
+fold, killing even a 64 GB box on `--all`.
+[`SequenceWindows`](src/trading_system/models/sequence.py) keeps the flat matrix
+plus a compact window index (~0.7 GB total) and materialises **only the current
+batch**, so peak RAM is O(batch); GPU/host caches are released between folds. Same
+maths, ~60× less memory — `--all --cv cpcv` now trains within budget. Inference
+(`ts picks`) was also fixed to window a sequence model correctly instead of feeding
+it a flat row.
 
 ## Universes
 

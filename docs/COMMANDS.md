@@ -7,6 +7,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | Command | What it does |
 | --- | --- |
 | `ts ingest` | Pull daily OHLCV for the universe (yfinance) |
+| `ts backfill-history` | ★ Backfill ALL deep-history signals (GDELT + SEC + Wikipedia) |
 | `ts backfill-news` | GDELT daily news tone+volume history → trained feature |
 | `ts quality` | OHLCV data-quality checks |
 | `ts features` | Build the gold feature matrix (technical+macro+news+nonlinear; --deep/--text) |

@@ -9,7 +9,7 @@ import pytest
 
 from trading_system.models.forecast_train import _resolve_model_names, TABULAR_MODELS
 from trading_system.models.sequence import (
-    SEQUENCE_MODELS, build_sequence_tensor,
+    SEQUENCE_MODELS, build_sequence_tensor, build_sequence_windows, SequenceWindows,
 )
 
 
@@ -73,6 +73,32 @@ def test_sequence_windows_do_not_use_future_rows():
     assert np.all(window_max <= row_vals + 1e-6)  # strictly backward-looking
 
 
+# ── lazy windows must equal the dense tensor (memory-safe training path) ──────
+
+def test_lazy_windows_match_dense_tensor():
+    df = _panel(n_tickers=5, n_days=60, seed=3)
+    feat = ["f0", "f1"]
+    L = 10
+    dense = build_sequence_tensor(df, feat, lookback=L)
+    lazy = build_sequence_windows(df, feat, lookback=L)
+    assert isinstance(lazy, SequenceWindows)
+    assert lazy.shape == dense.shape
+    # full materialisation matches
+    assert np.allclose(lazy.materialize(), dense, atol=1e-6)
+    # fancy-index slicing (as the CV folds do) returns a consistent sub-view
+    sel = np.array([0, 5, 17, 42, 41])
+    assert np.allclose(lazy[sel].materialize(), dense[sel], atol=1e-6)
+
+
+def test_lazy_windows_terminal_row_is_self():
+    df = _panel(n_tickers=3, n_days=40, seed=4)
+    feat = ["f0", "f1"]
+    lazy = build_sequence_windows(df, feat, lookback=8)
+    rowfeat = df.select(feat).to_numpy().astype("float32")
+    term = lazy.flat[lazy.gather_idx[:, -1]]
+    assert np.allclose(term, rowfeat, atol=1e-6)
+
+
 # ── torch estimator (skipped if torch missing) ────────────────────────────────
 
 @pytest.mark.parametrize("kind", list(SEQUENCE_MODELS))
@@ -95,6 +121,26 @@ def test_estimator_fit_predict_and_pickle(kind):
     # pickle round-trip → identical predictions (state_dict serialised)
     m2 = pickle.loads(pickle.dumps(m))
     assert np.allclose(p[:32], m2.predict(X[:32]), atol=1e-5)
+
+
+def test_fit_predict_lazy_matches_dense():
+    """Training on lazy windows must be numerically identical to the dense tensor
+    (same seed, same standardisation, same batches) — the memory fix changes only
+    *where* windows are materialised, not the maths."""
+    pytest.importorskip("torch")
+    from trading_system.models.sequence import TorchSequenceRegressor
+
+    df = _panel(n_tickers=6, n_days=100, seed=7)
+    feat = ["f0", "f1"]
+    dense = build_sequence_tensor(df, feat, lookback=8)
+    lazy = build_sequence_windows(df, feat, lookback=8)
+    y = np.tanh(dense[:, -1, 0])
+
+    kw = dict(kind="gru", hidden_size=12, num_layers=1, epochs=5,
+              batch_size=64, device="cpu", seed=0)
+    p_dense = TorchSequenceRegressor(**kw).fit(dense, y).predict(dense)
+    p_lazy = TorchSequenceRegressor(**kw).fit(lazy, y).predict(lazy)
+    assert np.allclose(p_dense, p_lazy, atol=1e-4)
 
 
 def test_parallel_nonlinear_coexists_with_torch():
