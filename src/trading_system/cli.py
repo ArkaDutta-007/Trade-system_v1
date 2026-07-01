@@ -181,11 +181,13 @@ def backfill_news(
     start: str = typer.Option("2017-01-01", help="history start (GDELT floor is 2017)"),
     workers: int = typer.Option(4, help="concurrent GDELT fetchers (rate-limited; keep low)"),
 ):
-    """Backfill GDELT daily news tone + volume history → silver/gdelt_history.parquet.
+    """Backfill / update GDELT daily news tone + volume → silver/gdelt_history.parquet.
 
-    One call per ticker returns the full daily series, so news becomes a real,
-    point-in-time trained feature across the whole panel (not just the last week).
-    Cached per ticker; re-runs are free. Then `ts features` picks it up.
+    Persistent per-ticker store, updated **incrementally**: the first run pulls the
+    full history (2017→now); every later run fetches only the recent tail (new days
+    + GDELT's late-indexed articles) and fills an older gap if you extend --start.
+    Re-run it daily/weekly to keep news current; `ts features` reads it as the
+    `news_*` trained features.
     """
     from trading_system.ingestion.gdelt_news import collect_gdelt_history
 

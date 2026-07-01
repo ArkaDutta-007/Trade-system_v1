@@ -99,27 +99,10 @@ def _gdelt_timeline(query: str, start: date, end: date, mode: str,
     return []
 
 
-def fetch_gdelt_ticker(
-    ticker: str, name: str | None, start: date, end: date,
-    cache_dir: Path | None = None, session: requests.Session | None = None,
-    cache_days: float = 24 * 30,
-) -> list[dict]:
-    """Fetch one ticker's daily [{date, tone, vol}] history (cached per ticker)."""
-    ticker = ticker.upper()
-    cache_file = None
-    if cache_dir is not None:
-        cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"gdelt_{ticker}.json"
-        if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) / 3600 <= cache_days:
-            try:
-                return json.loads(cache_file.read_text())
-            except Exception:
-                pass
-    if not name:
+def _fetch_range(query: str, start: date, end: date, sess: requests.Session) -> list[dict]:
+    """Fetch one date range's daily [{date, tone, vol}] from GDELT (2 calls)."""
+    if start >= end:
         return []
-    sess = session or requests.Session()
-    sess.headers.update(_UA)
-    query = f'"{_clean_name(name)}" sourcelang:english'
     tone = _gdelt_timeline(query, start, end, "timelinetone", sess)
     vol = _gdelt_timeline(query, start, end, "timelinevolraw", sess)
     vol_by_day = {d["date"][:8]: d.get("value", 0) for d in vol}
@@ -131,12 +114,69 @@ def fetch_gdelt_ticker(
             "tone": round(float(d.get("value", 0.0)), 4),
             "vol": int(vol_by_day.get(day, 0)),
         })
-    if cache_file is not None:
+    return rows
+
+
+def fetch_gdelt_ticker(
+    ticker: str, name: str | None, start: date, end: date,
+    cache_dir: Path | None = None, session: requests.Session | None = None,
+    overlap_days: int = 14,
+) -> list[dict]:
+    """Incrementally fetch/refresh one ticker's daily tone+volume history.
+
+    The per-ticker JSON is the **persistent store**. Each run fetches only what's
+    missing and merges it in — never the whole 2017→now range again:
+      * **new days**: re-fetch the recent tail (last stored day − ``overlap_days``
+        → now), which also captures GDELT's late-indexed articles for recent days;
+      * **front gap**: if ``start`` is earlier than what's stored, fetch just the
+        missing older slice and prepend.
+    Newly-fetched days overwrite the stored ones for the same date.
+    """
+    ticker = ticker.upper()
+    cache_file = None
+    cached_by_date: dict[str, dict] = {}
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"gdelt_{ticker}.json"
+        if cache_file.exists():
+            try:
+                cached_by_date = {r["date"]: r for r in json.loads(cache_file.read_text())}
+            except Exception:
+                cached_by_date = {}
+    if not name:
+        return sorted(cached_by_date.values(), key=lambda r: r["date"])
+
+    sess = session or requests.Session()
+    sess.headers.update(_UA)
+    query = f'"{_clean_name(name)}" sourcelang:english'
+
+    # Decide the minimal sub-ranges to fetch this run.
+    ranges: list[tuple[date, date]] = []
+    if not cached_by_date:
+        ranges.append((start, end))
+    else:
+        have = sorted(cached_by_date)
+        cmin, cmax = date.fromisoformat(have[0]), date.fromisoformat(have[-1])
+        if start < cmin:                                   # extend older history
+            ranges.append((start, cmin))
+        from datetime import timedelta
+        tail = max(start, cmax - timedelta(days=overlap_days))  # new days + late-indexed
+        if end > tail:
+            ranges.append((tail, end))
+
+    fetched = 0
+    for s, e in ranges:
+        for r in _fetch_range(query, s, e, sess):
+            cached_by_date[r["date"]] = r      # new overwrites old for the same date
+            fetched += 1
+
+    merged = sorted(cached_by_date.values(), key=lambda r: r["date"])
+    if cache_file is not None and (fetched or not cache_file.exists()):
         try:
-            cache_file.write_text(json.dumps(rows))
+            cache_file.write_text(json.dumps(merged))
         except Exception:
             pass
-    return rows
+    return merged
 
 
 def collect_gdelt_history(
