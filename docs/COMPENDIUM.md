@@ -401,6 +401,29 @@ The winner per horizon is refit on all fully-labeled data and written to
 index. Tracked in git (unlike `reports/`). Validated example: 252d → LightGBM
 ICIR 1.10 / IC +0.124 / 64% hit / gate PASS.
 
+### 9.5 Signal & honest-validation levers (V3.8)
+* **Market-neutral target** (`--neutralize`): subtract each date's cross-sectional
+  mean forward return so the model learns pure stock selection, not market timing.
+* **Universe-weighted selection** (`--universe-weight w --priority-universe`):
+  rank by `(1−w)·broad_ICIR + w·priority_ICIR` — train on breadth (`-u liquid`,
+  374 names), select on relevance to the names you trade.
+* **CPCV** (`--cv cpcv`, `models/validation.combinatorial_purged_splits`): C(n,k)
+  purged+embargoed combinatorial paths → an ICIR *distribution*, not one fragile
+  walk-forward estimate. Long-horizon paths that purge to empty are dropped.
+* **Deflated ICIR** (`deflated_icir` / `expected_max_sharpe`): the winner's ICIR
+  is haircut against the best-of-N null (we trial many families), so selection
+  stays honest as the model zoo grows. Reported as the `Deflate` gate.
+* **FinBERT text features** (`features/text_features.py`, `ts features --text`):
+  causal, cached news sentiment from a finance transformer — the one orthogonal
+  input (text, not prices). New `text` reserve group.
+
+### 9.6 Long-term decision artifact (`ts picks`)
+`decision/longterm.py` packages the committed forecaster + conformal bounds into a
+ranked plan: **entry** (last close), **add-on-dip** (1m lower band), **median &
+stretch targets** (calibrated median / upper band), **invalidation stop**
+(conformal lower band), reward:risk, and a trend-timing hint — with the model's
+leakage-gate verdict attached so low-confidence horizons are flagged.
+
 ---
 
 ## 10. Probabilistic price bounds

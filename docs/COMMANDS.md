@@ -25,6 +25,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 
 | Command | What it does |
 | --- | --- |
+| `ts picks` | ★ Long-term buy plan: what/when/entry/target/stop, ranked |
 | `ts analyze` | Single-symbol decision + report (bounds, SHAP, narration) |
 | `ts analyze-all` | Run analyze across the whole universe |
 | `ts signals` | Cross-sectional signal table |

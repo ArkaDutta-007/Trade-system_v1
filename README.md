@@ -363,6 +363,45 @@ RNN training use all cores / GPU via the detected compute profile
 `torch.set_num_threads(1)` to avoid an OpenMP deadlock with LightGBM (GPU/MPS
 math is unaffected).
 
+## V3.8 — signal, honest validation, and a long-term decision artifact
+
+Driven by the honest finding that the bottleneck is *signal*, not model capacity
+(short horizons were market beta; sequence nets lost to trees) — so these add
+*information* and *fix the label*, rather than stacking architectures.
+
+**Market-neutral target** (`ts train-forecast --neutralize`) — demeans each
+date's forward return so models learn **pure cross-sectional stock-selection**
+instead of fighting the market factor. (In smoke tests it lifted 63d ICIR
+0.31 → 0.86.)
+
+**Universe-weighted selection** (`--universe-weight w --priority-universe core`)
+— train on breadth, but rank models by `(1−w)·broad_ICIR + w·your-universe_ICIR`,
+so a broadly-trained model is judged partly on the names *you* trade. Paired with
+the new **374-name liquid universe** (`-u liquid`) — more names per date = a
+stronger, more reliable cross-sectional IC.
+
+**Honest validation** — **CPCV** (`--cv cpcv`, combinatorial purged CV: many
+purged+embargoed paths, not one fragile walk-forward) plus a **deflated-ICIR**
+multiple-testing haircut (the winner must beat the best-of-N null), surfaced as a
+`Deflate` gate alongside the leakage gate.
+
+**FinBERT news features** (`ts features --text`, needs `pip install -e '.[text]'`)
+— the one orthogonal signal: news scored by a finance transformer (cached,
+causal, point-in-time), applied to *text* not prices. New `text` reserve group.
+
+**Long-term decision artifact** (`ts picks`) — packages the committed
+long-horizon forecaster + calibrated bounds into a ranked, actionable plan:
+**what** to buy, **entry** / add-on-dip / **median & stretch targets** /
+**invalidation stop**, reward:risk, and a trend-timing hint — with the model's
+leakage-gate verdict attached.
+
+```bash
+ts ingest -u liquid && ts features -u liquid              # breadth (+ --text for FinBERT)
+ts train-forecast --all --neutralize --cv cpcv \
+    --universe-weight 0.5 --priority-universe core        # honest, universe-aware
+ts picks --horizon 252 --top 20 --write                   # the long-term plan
+```
+
 ## Universes
 
 Two maintained lists, switchable per command with `--universe` (`-u`):
