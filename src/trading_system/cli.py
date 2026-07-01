@@ -543,6 +543,60 @@ def bounds(
 
 
 @app.command()
+def picks(
+    config: str = "configs/default.yaml",
+    horizon: int = typer.Option(252, help="forecast horizon in trading days (5/21/63/126/252)"),
+    top: int = typer.Option(20, help="how many top-ranked names to plan"),
+    min_score: float = typer.Option(0.0, help="minimum forecast score to include"),
+    write: bool = typer.Option(False, "--write", help="also write reports/picks/*.md + .json"),
+    universe: str = UNIVERSE_OPT,
+):
+    """Long-term buy plan: what to buy, at what entry / target / stop, ranked.
+
+    Ranks the universe by the committed models_store/ forecaster at ``horizon``
+    and attaches each name's calibrated price band (entry, add-on-dip, median &
+    stretch targets, conformal stop, reward/risk, timing).
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.decision.longterm import build_longterm_picks, write_picks
+
+    cfg = get_config(config).use_universe(universe)
+    try:
+        plan = build_longterm_picks(cfg, horizon=horizon, top_n=top, min_score=min_score)
+    except FileNotFoundError as e:
+        rprint(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    lk = plan["model_leak_pass"]
+    lk_s = "[green]leak-gate PASS[/green]" if lk else ("[red]leak-gate FAIL — treat as low-confidence[/red]" if lk is False else "leak-gate —")
+    rprint(f"[bold]Long-term picks · {plan['horizon_label']} · model={plan['model']}[/bold] "
+           f"· as of {plan['as_of']} · {lk_s}")
+    if not plan["picks"]:
+        rprint("[yellow]No names cleared the score threshold.[/yellow]")
+        raise typer.Exit()
+
+    console = Console()
+    t = Table(show_lines=False)
+    for c in ["#", "Ticker", "Score", "Entry", "Add≤", "Median", "Stretch", "Stop", "Up%", "Dn%", "R/R", "Timing"]:
+        t.add_column(c, justify="right")
+    for i, p in enumerate(plan["picks"], 1):
+        rr = p["reward_risk"]
+        rr_c = "green" if (rr and rr >= 2) else ("yellow" if rr and rr >= 1 else "red")
+        t.add_row(
+            str(i), f"[bold]{p['ticker']}[/bold]", f"{p['score']:+.4f}",
+            f"${p['entry']:.2f}", f"${p['add_on_dip_below']:.2f}", f"${p['median_target']:.2f}",
+            f"${p['stretch_target']:.2f}", f"${p['invalidation_stop']:.2f}",
+            f"[green]{p['upside_pct']*100:+.0f}%[/green]", f"[red]{p['downside_pct']*100:+.0f}%[/red]",
+            f"[{rr_c}]{rr if rr is not None else '—'}[/{rr_c}]", p["timing"],
+        )
+    console.print(t)
+    if write:
+        md = write_picks(cfg, plan)
+        rprint(f"[green]Wrote {md}[/green]")
+
+
+@app.command()
 def complexity(
     ticker: str,
     config: str = "configs/default.yaml",
@@ -1624,6 +1678,7 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
         ("backtest", "Vectorized backtest of a strategy with metrics"),
     ],
     "Decisions": [
+        ("picks", "★ Long-term buy plan: what/when/entry/target/stop, ranked"),
         ("analyze", "Single-symbol decision + report (bounds, SHAP, narration)"),
         ("analyze-all", "Run analyze across the whole universe"),
         ("signals", "Cross-sectional signal table"),
