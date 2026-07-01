@@ -17,6 +17,7 @@ universe_file: configs/universe_core.yaml
 universe_files:
   core: configs/universe_core.yaml
   master: configs/universe_master.yaml
+  liquid: configs/universe_liquid.yaml
   "100": configs/universe_100.yaml
 
 # V3: Decision-tree playbook (flags + standing rules + cycles)
