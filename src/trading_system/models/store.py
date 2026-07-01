@@ -52,7 +52,8 @@ def _load(path: Path) -> Any:
             return pickle.load(f)
 
 
-def save_forecast_results(results: dict, store_dir: Path, compute_summary: str = "") -> Path:
+def save_forecast_results(results: dict, store_dir: Path, compute_summary: str = "",
+                          train_config: dict | None = None) -> Path:
     """Persist per-horizon best models + a manifest. ``results`` is {h: HorizonResult}."""
     store_dir = Path(store_dir)
     fdir = store_dir / "forecast"
@@ -62,6 +63,7 @@ def save_forecast_results(results: dict, store_dir: Path, compute_summary: str =
         "created_at": time.time(),
         "created_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "compute": compute_summary,
+        "train_config": train_config or {},
         "horizons": {},
     }
     for h, res in results.items():
@@ -83,6 +85,7 @@ def save_forecast_results(results: dict, store_dir: Path, compute_summary: str =
         manifest["horizons"][str(h)] = {
             "best_model": res.best_model_name,
             "icir": round(best.get("icir", 0.0), 3),
+            "univ_icir": round(best.get("univ_icir", 0.0), 3),
             "ic_mean": round(best.get("ic_mean", 0.0), 4),
             "hit_rate": round(best.get("hit_rate", 0.0), 3),
             "leak_pass": res.leakage_gate.get("pass"),

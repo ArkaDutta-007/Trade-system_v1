@@ -91,32 +91,51 @@ def _perdate_ic(y, p, dates, min_names: int = 10) -> float:
     return float(np.mean(ics)) if ics else 0.0
 
 
-def _fold_metrics(y, p, dates) -> dict:
+def _fold_metrics(y, p, dates, priority_mask=None) -> dict:
+    """Per-fold metrics. ``priority_mask`` (bool over rows) also yields a
+    cross-sectional IC restricted to the priority universe, so a broadly-trained
+    model can be judged on how well it ranks *your* names too."""
     from sklearn.metrics import mean_absolute_error, r2_score
     hit = float(np.mean((np.sign(p) == np.sign(y))[np.abs(y) > 1e-9])) if len(y) else 0.0
-    return {
-        "ic": _perdate_ic(y, p, dates),   # cross-sectional, not pooled
+    out = {
+        "ic": _perdate_ic(y, p, dates),   # broad cross-sectional (not pooled)
         "hit_rate": hit,
         "mae": float(mean_absolute_error(y, p)) if len(y) else 0.0,
         "r2": float(r2_score(y, p)) if len(y) > 1 and np.std(y) > 1e-12 else 0.0,
     }
+    if priority_mask is not None and priority_mask.any():
+        m = priority_mask
+        out["univ_ic"] = _perdate_ic(y[m], p[m], np.asarray(dates)[m])
+    else:
+        out["univ_ic"] = out["ic"]
+    return out
 
 
 def _aggregate(fold_rows: list[dict]) -> dict:
     if not fold_rows:
-        return {"ic_mean": 0.0, "ic_std": 0.0, "icir": 0.0, "hit_rate": 0.0,
-                "mae": 0.0, "r2": 0.0, "n_folds": 0}
+        return {"ic_mean": 0.0, "ic_std": 0.0, "icir": 0.0, "univ_ic_mean": 0.0,
+                "univ_icir": 0.0, "hit_rate": 0.0, "mae": 0.0, "r2": 0.0, "n_folds": 0}
     ics = np.array([r["ic"] for r in fold_rows])
     ic_std = float(ics.std()) if len(ics) > 1 else 0.0
+    uics = np.array([r.get("univ_ic", r["ic"]) for r in fold_rows])
+    uic_std = float(uics.std()) if len(uics) > 1 else 0.0
     return {
         "ic_mean": float(ics.mean()),
         "ic_std": ic_std,
         "icir": float(ics.mean() / ic_std) if ic_std > 1e-9 else 0.0,
+        "univ_ic_mean": float(uics.mean()),
+        "univ_icir": float(uics.mean() / uic_std) if uic_std > 1e-9 else 0.0,
         "hit_rate": float(np.mean([r["hit_rate"] for r in fold_rows])),
         "mae": float(np.mean([r["mae"] for r in fold_rows])),
         "r2": float(np.mean([r["r2"] for r in fold_rows])),
         "n_folds": len(fold_rows),
     }
+
+
+def _selection_score(m: dict, universe_weight: float) -> float:
+    """Blend broad and priority-universe ICIR for model selection.
+    universe_weight=0 → pure general performance; 1 → pure your-universe."""
+    return (1.0 - universe_weight) * m["icir"] + universe_weight * m["univ_icir"]
 
 
 # ── Model factory (hardware-aware) ────────────────────────────────────────────
@@ -181,6 +200,9 @@ def train_horizon(
     models: list[str] | None = None,
     lookback: int = 64,
     seq_epochs: int = 40,
+    neutralize: bool = False,
+    priority_tickers: set[str] | None = None,
+    universe_weight: float = 0.5,
 ) -> HorizonResult:
     prof = get_compute_profile()
     tgt = f"fwd_ret_{horizon}d"
@@ -188,9 +210,21 @@ def train_horizon(
     df = features.sort(["ticker", "date"]).with_columns(
         ((px.shift(-horizon).over("ticker") / px) - 1).alias(tgt)
     )
+    if neutralize:
+        # Market-neutral target: subtract each date's cross-sectional mean forward
+        # return, so the model learns pure stock selection instead of fighting the
+        # market factor (the dominant, non-stationary component at short horizons).
+        df = df.with_columns((pl.col(tgt) - pl.col(tgt).mean().over("date")).alias(tgt))
+
     X, y, dates, sub = _xy(df, feat_cols, tgt)
     if len(X) < 500:
         raise ValueError(f"horizon {horizon}d: too few labeled rows ({len(X)})")
+
+    # Priority-universe mask (over the null-free rows) for weighted selection
+    priority_mask = None
+    if priority_tickers:
+        pset = {t.upper() for t in priority_tickers}
+        priority_mask = np.array([t.upper() in pset for t in sub["ticker"].to_list()])
 
     horizon_cal = int(round(horizon * _CAL_PER_TD))
     splits = purged_walkforward_splits(
@@ -225,20 +259,22 @@ def train_horizon(
         if len(s.train_idx) < 200 or len(s.test_idx) < 20:
             continue
         dte = dates_arr[s.test_idx]
+        pmask = priority_mask[s.test_idx] if priority_mask is not None else None
         for name in active:
             try:
                 mat = _mat(name)
                 m = _new_estimator(name)  # fresh estimator per fold
                 m.fit(mat[s.train_idx], ytr)
-                per_model_folds[name].append(_fold_metrics(yte, m.predict(mat[s.test_idx]), dte))
+                per_model_folds[name].append(
+                    _fold_metrics(yte, m.predict(mat[s.test_idx]), dte, priority_mask=pmask))
             except Exception as e:
                 logger.warning(f"  {horizon}d/{name} fold {s.fold} failed: {e}")
 
     per_model = {k: _aggregate(v) for k, v in per_model_folds.items()}
-    # best by ICIR, requiring positive mean IC
+    # Best by blended (general + your-universe) ICIR, requiring positive mean IC.
     ranked = sorted(
         per_model.items(),
-        key=lambda kv: (kv[1]["ic_mean"] > 0, kv[1]["icir"], kv[1]["ic_mean"]),
+        key=lambda kv: (kv[1]["ic_mean"] > 0, _selection_score(kv[1], universe_weight), kv[1]["ic_mean"]),
         reverse=True,
     )
     best_name = ranked[0][0]
@@ -284,10 +320,12 @@ def train_horizon(
     best.fit(best_mat, y)
     trained_through = max(dates).isoformat() if dates else ""
 
+    _b = per_model[best_name]
     logger.info(
         f"horizon {horizon}d: best={best_name} "
-        f"ICIR={per_model[best_name]['icir']:.2f} IC={per_model[best_name]['ic_mean']:+.3f} "
-        f"hit={per_model[best_name]['hit_rate']:.1%} leak_pass={leak.get('pass')}"
+        f"ICIR={_b['icir']:.2f} IC={_b['ic_mean']:+.3f} "
+        f"univ_ICIR={_b['univ_icir']:.2f} hit={_b['hit_rate']:.1%} "
+        f"{'[neutral] ' if neutralize else ''}leak_pass={leak.get('pass')}"
     )
     return HorizonResult(
         horizon=horizon, feature_columns=feat_cols, per_model=per_model,
@@ -305,6 +343,9 @@ def train_all_horizons(
     models: list[str] | None = None,
     lookback: int = 64,
     seq_epochs: int = 40,
+    neutralize: bool = False,
+    priority_tickers: set[str] | None = None,
+    universe_weight: float = 0.5,
 ) -> dict[int, HorizonResult]:
     out: dict[int, HorizonResult] = {}
     for h in horizons:
@@ -312,6 +353,8 @@ def train_all_horizons(
             out[h] = train_horizon(
                 features, feat_cols, h, n_splits, embargo_days, models,
                 lookback=lookback, seq_epochs=seq_epochs,
+                neutralize=neutralize, priority_tickers=priority_tickers,
+                universe_weight=universe_weight,
             )
         except Exception as e:
             logger.warning(f"horizon {h}d training failed: {e}")

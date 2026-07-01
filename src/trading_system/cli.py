@@ -377,6 +377,12 @@ def train_forecast(
         False, "--all", help="train EVERY family incl. deep sequence models (needs torch/.[deep])"),
     lookback: int = typer.Option(64, help="lookback window for sequence models"),
     epochs: int = typer.Option(40, help="max epochs for sequence models"),
+    neutralize: bool = typer.Option(
+        False, "--neutralize", help="market-neutral target: learn pure stock-selection (demean per date)"),
+    universe_weight: float = typer.Option(
+        0.5, help="model-selection blend: 0=general perf only, 1=your-universe only"),
+    priority_universe: str = typer.Option(
+        "core", help="universe whose ICIR is weighted in selection (alias or path)"),
 ):
     """Train + rigorously evaluate long-horizon forecasters; save best to models_store/.
 
@@ -422,9 +428,26 @@ def train_forecast(
         mdl = [m.strip() for m in models.split(",") if m.strip()] or None
     if mdl:
         rprint(f"[cyan]model families:[/cyan] {mdl}")
+
+    # Priority universe for universe-weighted selection (the names you actually trade)
+    priority: set[str] = set()
+    if universe_weight > 0:
+        try:
+            pcfg = get_config(config).use_universe(priority_universe)
+            priority = {t.upper() for t in pcfg["universe"]["tickers"]}
+            rprint(f"[cyan]selection blend:[/cyan] {1-universe_weight:.0%} general + "
+                   f"{universe_weight:.0%} your universe ('{priority_universe}', {len(priority)} names)")
+        except Exception as e:
+            rprint(f"[yellow]priority universe '{priority_universe}' unavailable ({e}); "
+                   f"selecting on general performance.[/yellow]")
+    if neutralize:
+        rprint("[cyan]target:[/cyan] market-neutral (per-date demeaned) — pure cross-sectional selection")
+
     results = train_all_horizons(
         feat, feat_cols, horizons=hz, n_splits=n_splits,
         models=mdl, lookback=lookback, seq_epochs=epochs,
+        neutralize=neutralize, priority_tickers=(priority or None),
+        universe_weight=universe_weight,
     )
     if not results:
         rprint("[red]No horizons trained.[/red]")
@@ -432,8 +455,8 @@ def train_forecast(
 
     # ── Summary table ────────────────────────────────────────────────────────
     console = Console()
-    t = Table(title="Forecast models — purged walk-forward (ranked by ICIR)", show_lines=True)
-    for c in ["Horizon", "Best", "ICIR", "IC", "Hit", "MAE", "Folds", "Leak gate"]:
+    t = Table(title="Forecast models — purged walk-forward (blended ICIR selection)", show_lines=True)
+    for c in ["Horizon", "Best", "ICIR", "univ ICIR", "IC", "Hit", "Folds", "Leak gate"]:
         t.add_column(c, justify="right")
     for h, res in results.items():
         b = res.per_model.get(res.best_model_name, {})
@@ -443,13 +466,19 @@ def train_forecast(
         t.add_row(
             f"{h}d", res.best_model_name,
             f"[{'green' if icir>0.3 else 'yellow' if icir>0 else 'red'}]{icir:.2f}[/]",
+            f"{b.get('univ_icir',0):.2f}",
             f"{b.get('ic_mean',0):+.3f}", f"{b.get('hit_rate',0):.1%}",
-            f"{b.get('mae',0):.4f}", str(b.get("n_folds",0)), lk_s,
+            str(b.get("n_folds",0)), lk_s,
         )
     console.print(t)
 
     store = default_store(cfg.project_root)
-    save_forecast_results(results, store, compute_summary=prof.summary())
+    save_forecast_results(results, store, compute_summary=prof.summary(), train_config={
+        "neutralize": neutralize,
+        "universe_weight": universe_weight,
+        "priority_universe": priority_universe if priority else None,
+        "n_features": len(feat_cols),
+    })
     rprint(f"[green]Best models saved → {store}/forecast/[/green]")
 
     # ── Conformal interval bundle on the same reserve ────────────────────────
