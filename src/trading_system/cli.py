@@ -1710,8 +1710,9 @@ def log_trade_cmd(
 COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
     "Data & features": [
         ("ingest", "Pull daily OHLCV for the universe (yfinance)"),
+        ("backfill-news", "GDELT daily news tone+volume history → trained feature"),
         ("quality", "OHLCV data-quality checks"),
-        ("features", "Build the gold feature matrix (technical+macro+events+nonlinear; --deep)"),
+        ("features", "Build the gold feature matrix (technical+macro+news+nonlinear; --deep/--text)"),
         ("universe", "Show the active universe"),
     ],
     "Forecasting & models": [

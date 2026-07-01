@@ -601,6 +601,27 @@ ts dashboard         # Streamlit desk (5 grouped sections)
   (`NEWSDATA_API_KEY`). Finnhub keys are not `pub_`-prefixed.
 * **`lxml` required** for yfinance `earnings_dates` (now a dependency).
 
+### 18.1 Point-in-time & data-integrity principles
+These are load-bearing — violating them silently inflates measured skill:
+* **News for training vs live.** Recent-fetch backends only cover ~a week, so they
+  are **not** trained features — they power the live decision layer (analyze / RAG
+  / apprehension). The *trained* news signal comes from **GDELT** (`ts backfill-news`),
+  which gives full daily tone/attention back to 2017, causal by construction.
+* **Null-when-absent, never 0.** "No coverage" ≠ "neutral 0". Event/apprehension/
+  text/news features are left **null** where absent, so `resolve_reserve`'s ≥60%
+  coverage gate honestly drops a sparse column instead of the model learning a
+  near-constant **recency artifact**.
+* **Earnings look-ahead cap.** `days_to_earnings` only counts a future date within
+  a ~90-day announcement window (dates months out weren't knowable).
+* **Survivorship bias.** The universe is *today's* constituents; delisted names are
+  absent and recent IPOs have short history, so long-run ICIR/picks read
+  optimistically — `ts picks` prints the caveat. (Free data can't give point-in-time
+  index membership; treat it as a known discount.)
+* **`known_at` on rebuild.** The RAG point-in-time filter is only fully honest if
+  events were accumulated by daily runs; a from-scratch rebuild stamps `known_at`
+  = now. Irrelevant to GDELT (dates are historical) and to training (keyed on the
+  event date), but matters for RAG backtests.
+
 ---
 
 ## 19. Glossary

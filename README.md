@@ -385,9 +385,19 @@ purged+embargoed paths, not one fragile walk-forward) plus a **deflated-ICIR**
 multiple-testing haircut (the winner must beat the best-of-N null), surfaced as a
 `Deflate` gate alongside the leakage gate.
 
-**FinBERT news features** (`ts features --text`, needs `pip install -e '.[text]'`)
-— the one orthogonal signal: news scored by a finance transformer (cached,
-causal, point-in-time), applied to *text* not prices. New `text` reserve group.
+**GDELT historical news → a real trained feature** (`ts backfill-news`) — the
+recent-fetch backends only cover the last few days, so news was empty across ~all
+of the training panel. GDELT DOC 2.0 returns each ticker's **full daily media
+tone + attention back to 2017** in one call (cached per ticker), giving causal,
+point-in-time `news_tone` / `news_tone_mom` / `news_buzz` (new `news` reserve
+group, ~62% panel coverage → actually trains). **FinBERT** (`ts features --text`,
+`[text]` extra) adds transformer-scored sentiment on top for the recent window.
+
+**Point-in-time hygiene** — event & apprehension features are now **null-when-
+absent** (not 0-filled), so a sparse recent-only signal is honestly dropped by the
+coverage gate instead of feeding a recency artifact; `days_to_earnings` caps its
+forward horizon to a ~90-day announcement window (no backward leak); and `ts
+picks` prints a **survivorship-bias** caveat (the universe is today's names).
 
 **Long-term decision artifact** (`ts picks`) — packages the committed
 long-horizon forecaster + calibrated bounds into a ranked, actionable plan:
@@ -396,7 +406,8 @@ long-horizon forecaster + calibrated bounds into a ranked, actionable plan:
 leakage-gate verdict attached.
 
 ```bash
-ts ingest -u liquid && ts features -u liquid              # breadth (+ --text for FinBERT)
+ts ingest -u liquid && ts backfill-news -u liquid         # OHLCV + full news history
+ts features -u liquid                                     # (+ --text for FinBERT, --deep for heavy maths)
 ts train-forecast --all --neutralize --cv cpcv \
     --universe-weight 0.5 --priority-universe core        # honest, universe-aware
 ts picks --horizon 252 --top 20 --write                   # the long-term plan
