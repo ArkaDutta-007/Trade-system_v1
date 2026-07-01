@@ -139,6 +139,11 @@ def features(
     events = pl.read_parquet(silver / "events.parquet") if (silver / "events.parquet").exists() else None
     appr_p = silver / "apprehension_scores.parquet"
     apprehension = pl.read_parquet(appr_p) if appr_p.exists() else None
+    gdelt_p = silver / "gdelt_history.parquet"
+    gdelt = pl.read_parquet(gdelt_p) if gdelt_p.exists() else None
+    if gdelt is not None:
+        rprint(f"[cyan]GDELT news history:[/cyan] {gdelt.height:,} ticker-days "
+               f"({gdelt['date'].min()} → {gdelt['date'].max()})")
 
     macro_features, econ_cal, earnings_cal = build_macro_inputs(
         cfg, tickers=list(cfg["universe"]["tickers"]), with_earnings=True
@@ -156,6 +161,7 @@ def features(
         nonlinear_jobs=(jobs or None),
         add_text_features=text,
         text_cache_dir=(silver / "finbert_cache") if text else None,
+        gdelt=gdelt,
     )
     out = cfg.path("data_gold") / "features.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +172,39 @@ def features(
            f"{rep['_total']['reserve_size']}[/cyan] "
            + " · ".join(f"{g}:{i['present']}/{i['defined']}"
                         for g, i in rep.items() if not g.startswith('_')))
+
+
+@app.command("backfill-news")
+def backfill_news(
+    config: str = "configs/default.yaml",
+    universe: str = UNIVERSE_OPT,
+    start: str = typer.Option("2017-01-01", help="history start (GDELT floor is 2017)"),
+    workers: int = typer.Option(4, help="concurrent GDELT fetchers (rate-limited; keep low)"),
+):
+    """Backfill GDELT daily news tone + volume history → silver/gdelt_history.parquet.
+
+    One call per ticker returns the full daily series, so news becomes a real,
+    point-in-time trained feature across the whole panel (not just the last week).
+    Cached per ticker; re-runs are free. Then `ts features` picks it up.
+    """
+    from trading_system.ingestion.gdelt_news import collect_gdelt_history
+
+    cfg = get_config(config).use_universe(universe)
+    tickers = list(cfg["universe"]["tickers"])
+    silver = cfg.path("data_silver")
+    silver.mkdir(parents=True, exist_ok=True)
+    rprint(f"[cyan]GDELT backfill:[/cyan] {len(tickers)} tickers from {start} "
+           f"(cache: {silver}/gdelt_cache/)")
+    df = collect_gdelt_history(
+        tickers, start=start, cache_dir=silver / "gdelt_cache", workers=workers,
+    )
+    if df.is_empty():
+        rprint("[yellow]No GDELT history fetched.[/yellow]")
+        raise typer.Exit(1)
+    out = silver / "gdelt_history.parquet"
+    df.write_parquet(out, compression="zstd")
+    rprint(f"[green]Wrote {df.height:,} ticker-days ({df['ticker'].n_unique()} tickers, "
+           f"{df['date'].min()} → {df['date'].max()}) → {out}[/green]")
 
 
 @app.command()
@@ -594,6 +633,8 @@ def picks(
             f"[{rr_c}]{rr if rr is not None else '—'}[/{rr_c}]", p["timing"],
         )
     console.print(t)
+    rprint("[dim]⚠ Universe is today's constituents — survivorship-biased. Forecast is "
+           "model-implied; size to the stop, not the target.[/dim]")
     if write:
         md = write_picks(cfg, plan)
         rprint(f"[green]Wrote {md}[/green]")

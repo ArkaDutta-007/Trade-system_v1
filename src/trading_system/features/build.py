@@ -45,6 +45,7 @@ def build_feature_matrix(
     add_rmt_features: bool = True,
     add_text_features: bool = False,
     text_cache_dir=None,
+    gdelt: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """End-to-end feature build. Output is one row per (ticker, date).
 
@@ -79,25 +80,19 @@ def build_feature_matrix(
     feat = compute_regime_features(feat, benchmark=benchmark)
     feat = add_targets(feat, horizons=horizons)
 
+    # Event features are left NULL where there's no news (not 0). "No coverage" is
+    # not "neutral sentiment", and 0-filling a mostly-empty column both feeds the
+    # models a near-constant recency artifact and fools resolve_reserve's coverage
+    # gate. Consistent with the text/GDELT features: null → dropped unless dense.
+    # (The recent-fetch events still power the live decision layer via events.parquet.)
     if events is not None and not events.is_empty():
         ev = aggregate_events_to_daily(events)
-        feat = feat.join(ev, on=["date", "ticker"], how="left").with_columns(
-            pl.col("event_count").fill_null(0),
-            pl.col("event_sentiment_mean").fill_null(0.0),
-            pl.col("event_magnitude_mean").fill_null(0.0),
-            pl.col("event_novelty_max").fill_null(0.0),
-            pl.col("risk_flag_count").fill_null(0),
-            pl.col("sent_decay_3d").fill_null(0.0),
-            pl.col("sent_decay_7d").fill_null(0.0),
-            pl.col("sent_decay_14d").fill_null(0.0),
-            pl.col("sent_momentum").fill_null(0.0),
-        )
+        feat = feat.join(ev, on=["date", "ticker"], how="left")
 
     if apprehension is not None and not apprehension.is_empty():
         app = apprehension.select(["date", "ticker", "apprehension_score", "outlook"])
         feat = feat.join(app, on=["date", "ticker"], how="left").with_columns(
-            pl.col("apprehension_score").fill_null(0.0),
-            pl.col("outlook").fill_null("stable"),
+            pl.col("outlook").fill_null("stable"),   # categorical, not a trained feature
         )
 
     # V2: Macro + earnings calendar features
@@ -128,6 +123,11 @@ def build_feature_matrix(
     # RMT cross-sectional denoising (systematic-risk fraction + market-mode beta).
     if add_rmt_features:
         feat = compute_rmt_features(feat)
+
+    # GDELT historical news tone/attention — dense back to 2017, point-in-time.
+    if gdelt is not None and not gdelt.is_empty():
+        from .gdelt_features import compute_gdelt_features
+        feat = compute_gdelt_features(feat, gdelt)
 
     # FinBERT news-text sentiment (optional; needs transformers + events).
     if add_text_features and events is not None and not events.is_empty():

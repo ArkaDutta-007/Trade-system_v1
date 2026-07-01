@@ -156,6 +156,13 @@ def render_picks_markdown(plan: dict) -> str:
             f"{p['invalidation_stop']:.2f} | {p['upside_pct']*100:+.0f}% | {p['downside_pct']*100:+.0f}% | "
             f"{p['reward_risk'] if p['reward_risk'] is not None else '—'} | {p['timing']} |"
         )
+    out += [
+        "",
+        "> **Caveats.** The universe is *today's* constituents, so the ranking is "
+        "**survivorship-biased** (delisted/failed names are absent, recent IPOs have "
+        "short history) — read the numbers with that discount. The forecast is "
+        "model-implied, not a guarantee; size to the invalidation stop, not the target.",
+    ]
     return "\n".join(out)
 
 

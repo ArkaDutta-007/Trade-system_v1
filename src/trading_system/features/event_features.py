@@ -243,9 +243,21 @@ def add_macro_calendar_features(
             if t and d:
                 ticker_earnings.setdefault(t, []).append(d)
 
-        def _days_to_earnings_for_row(ticker: str, as_of: _date) -> float:
-            edates = ticker_earnings.get(ticker, [])
-            return _nearest_signed_distance(as_of, edates)
+        def _earnings_signed_distance(as_of: _date, edates: list[_date],
+                                      max_forward: int = 90) -> float:
+            """Days to next earnings, but a *future* date only counts if within a
+            realistic pre-announcement window — companies confirm the date ~weeks
+            ahead, so a date months out wasn't knowable (avoids look-ahead). Beyond
+            the window we fall back to days-since-last (negative), else NaN."""
+            if not edates:
+                return float("nan")
+            future = [(d - as_of).days for d in edates if d >= as_of and (d - as_of).days <= max_forward]
+            past = [(d - as_of).days for d in edates if d < as_of]
+            if future:
+                return float(min(future))
+            if past:
+                return float(max(past))
+            return float("nan")
 
         # Build lookup as polars expression via join
         rows = []
@@ -254,7 +266,7 @@ def add_macro_calendar_features(
                 rows.append({
                     "ticker": ticker,
                     "date": d,
-                    "days_to_earnings": _nearest_signed_distance(d, edates),
+                    "days_to_earnings": _earnings_signed_distance(d, edates),
                 })
         if rows:
             earnings_df = pl.DataFrame(rows).with_columns(

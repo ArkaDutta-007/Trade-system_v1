@@ -45,6 +45,8 @@ EVENTS = [
     "apprehension_score",
 ]
 CALENDAR = ["days_to_fomc", "days_to_earnings", "macro_event_imminent"]
+# GDELT historical news tone/attention (dense back to 2017 — a real trained signal)
+NEWS = ["news_tone", "news_tone_mom", "news_buzz"]
 # FinBERT news-text sentiment (optional tier — needs transformers + events)
 TEXT = ["finbert_sent", "finbert_sent_mom", "finbert_news_30d"]
 
@@ -57,6 +59,7 @@ GROUPS: dict[str, list[str]] = {
     "macro": MACRO,
     "events": EVENTS,
     "calendar": CALENDAR,
+    "news": NEWS,
     "text": TEXT,
 }
 
