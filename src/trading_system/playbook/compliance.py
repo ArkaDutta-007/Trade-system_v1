@@ -11,8 +11,7 @@ recommendation, an order, or a logged trade:
     5. position caps (3.5)  → >13% (or per-name cap) bars new cash until <11%
     6. drawdown rule (3.4)  → invested down >15% from Jun 10 → no semi adds
   SELL gates (advisory — selling is the user's call)
-    7. hold-winner names    → warn: NRA prime directive, ~36% haircut
-    8. tax impact           → shield usage / tax due attached to every sell
+    7. hold-winner names    → warn: sell only on a thesis break, not to rebalance
 """
 from __future__ import annotations
 
@@ -20,7 +19,6 @@ from dataclasses import dataclass, field
 
 from ..flags.models import FlagSnapshot
 from .loader import Playbook, Portfolio
-from .tax import sell_impact, shield_status
 
 
 @dataclass
@@ -30,7 +28,6 @@ class ComplianceResult:
     allowed: bool
     violations: list[str] = field(default_factory=list)   # hard blocks
     warnings: list[str] = field(default_factory=list)     # advisory
-    tax: dict | None = None
 
     @property
     def verdict(self) -> str:
@@ -40,7 +37,6 @@ class ComplianceResult:
         return {
             "ticker": self.ticker, "side": self.side, "verdict": self.verdict,
             "violations": self.violations, "warnings": self.warnings,
-            **({"tax": self.tax} if self.tax else {}),
         }
 
 
@@ -61,7 +57,6 @@ def check_trade(
     snapshot: FlagSnapshot | None = None,
     prices: dict[str, float] | None = None,
     sma50: dict[str, float] | None = None,
-    blotter_realized: list[float] | None = None,
 ) -> ComplianceResult:
     ticker = ticker.upper()
     side = side.upper()
@@ -148,16 +143,9 @@ def check_trade(
         pos = portfolio.position(ticker)
         if pos is None:
             res.warnings.append(f"no held position in {ticker} per the portfolio snapshot")
-        else:
-            if ticker in _hold_winner_tickers(playbook):
-                res.warnings.append(
-                    "NRA prime directive: winners are not sold for rebalancing (~36% haircut). "
-                    "Sell only on thesis break."
-                )
-            shield = shield_status(playbook, portfolio, blotter_realized)
-            px = price or pos.last_price
-            qty = min(pos.quantity, dollars / px) if dollars > 0 else pos.quantity
-            res.tax = sell_impact(qty, px, pos.average_cost, shield)
-            res.warnings.append(f"tax: {res.tax['note']}")
+        elif ticker in _hold_winner_tickers(playbook):
+            res.warnings.append(
+                "hold-winner: not sold for rebalancing — sell only on a thesis break."
+            )
 
     return res

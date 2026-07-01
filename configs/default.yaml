@@ -19,7 +19,7 @@ universe_files:
   master: configs/universe_master.yaml
   "100": configs/universe_100.yaml
 
-# V3: Decision-tree playbook (flags + standing rules + cycles + NRA tax)
+# V3: Decision-tree playbook (flags + standing rules + cycles)
 playbook:
   file: configs/playbook_v2.yaml
   overrides: configs/flag_overrides.yaml

@@ -3,7 +3,7 @@
 reports/blotter.csv is deliberately CSV: git-diffable, hand-editable, and
 importable into a spreadsheet. Every executed trade (done manually in
 Fidelity) should be logged with `ts log-trade` so that:
-  - realized P&L feeds the NRA tax-shield tracker
+  - realized P&L is tracked per fill
   - position drift vs the JSON snapshot is visible
   - every fill carries its compliance verdict for the audit trail
 """
@@ -76,7 +76,7 @@ def load_blotter(reports_dir: Path) -> pl.DataFrame | None:
 
 
 def blotter_realized(reports_dir: Path, year: int | None = None) -> list[float]:
-    """Realized P&L amounts from logged SELLs (for the tax-shield ledger)."""
+    """Realized P&L amounts from logged SELLs."""
     df = load_blotter(reports_dir)
     if df is None or df.is_empty() or "realized_pnl" not in df.columns:
         return []

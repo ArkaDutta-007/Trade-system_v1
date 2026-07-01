@@ -1,6 +1,5 @@
 # ============================================================================
-# Investment Decision Tree v2 — NRA Edition (Jun 10 → Sep 2026)
-# Machine-readable encoding of investment-decision-tree-v2-nra.pdf.
+# Investment Decision Tree v2 (Jun 10 → Sep 2026)
 #
 # This file is the single source of truth for:
 #   - the five flags (O/F/I/S/C) and their GREEN/YELLOW/RED thresholds
@@ -9,14 +8,13 @@
 #   - cycle playbooks 0–3 (§4)
 #   - never-buy list (§5), re-entry lockouts, position caps
 #   - catalyst calendar (§2)
-#   - NRA tax engine facts (§8)
 #
 # Quantitative flags (O, I, S) are looked up live. Qualitative flags (F tone,
 # C capex) come from configs/flag_overrides.yaml with an automatic fallback.
 # Research framework only — not personalized financial advice.
 # ============================================================================
 
-version: v2-nra
+version: v2
 as_of: "2026-06-10"
 horizon_end: "2026-09-30"
 owner: Arka
@@ -92,8 +90,8 @@ ticker_classes:
   speculative: [BE, APLD, IREN, SBET]   # "BE = most speculative, not in any rule"
 
 # ── §3 STANDING SELL / HOLD RULES (existing positions — definitive) ────────
-# NRA prime directive: realized gains cost ≈36% all-in. Winners are not sold
-# for "rebalancing" — concentration is fixed by steering NEW cash elsewhere.
+# Prime directive: winners are not sold for "rebalancing" — concentration is
+# fixed by steering NEW cash elsewhere.
 standing_rules:
   - tickers: [TSM, NVDA, SPMO, GOOGL, AMD, CRWD, AMZN]
     kind: hold_winner
@@ -108,7 +106,7 @@ standing_rules:
     kind: stop_and_trim
     stop_below: 75.0          # close < $75 → SELL ALL (≈15% trail)
     trim_above: 110.0         # > $110 blow-off → TRIM 1/2
-    note: "Gain lands in the 2026 tax shield — a HOOD sale is ~federally free this year."
+    note: "Stop below $75, trim above $110."
   - tickers: [NOW]
     kind: probation_floor
     hard_floor: 95.0          # closes < $95 → sell without waiting
@@ -132,7 +130,7 @@ standing_rules:
     kind: exit_band
     recovery_exit: [170.0, 185.0]
     capitulation_below: 140.0
-    note: "No tax reason to rush — NRA losses past the shield do nothing."
+    note: "No reason to rush — let the thesis play out or capitulate on a break."
   - tickers: [CRWV]
     kind: event_kill_switch
     event_key: crwv_equity_raise
@@ -171,7 +169,7 @@ never_buy:
   RL: 1.8
   CL: 1.9
   VRTX: 2.4
-  ABBV: 7.5    # demoted for NRA specifically — 25–30% dividend leak (§8)
+  ABBV: 7.5    # demoted — high dividend yield preferred lower in a growth tilt
 
 # Re-entry lockouts: the 7 cleanup names. Re-entry EVER requires
 # StarMine > 6 AND price > 50-day MA. (At print, all fail.)
@@ -461,26 +459,9 @@ cycles:
   - id: "3.5"
     cycle: 3
     window: ["2026-06-10", "2026-12-31"]
-    label: "Concentration check (NRA version) — >13% positions: bar new cash until <11%, never sell"
+    label: "Concentration check — >13% positions: bar new cash until <11%, never sell"
     condition: {}
     orders: []
-
-# ── §8 NRA TAX ENGINE ───────────────────────────────────────────────────────
-tax:
-  status: "Nonresident alien (F-1 yr 3, 183+ days) · NY State tax resident"
-  federal_rate: 0.30          # flat on net US-source capital gains (Schedule NEC, 1040-NR)
-  state_rate: 0.06            # NY at bracket
-  shield_year: 2026
-  # Realized YTD baseline (from the portfolio JSON cleanup ledger). The blotter
-  # adds to this. Net ≈ –$905 → ~$905 of additional 2026 gains cost ~$0.
-  notes:
-    - "No long-term rate, no short-term rate — holding period is irrelevant federally."
-    - "Losses are same-year-only: no carryforward, no $3k income offset. Unabsorbed losses evaporate Dec 31."
-    - "Never trim winners outside the shield while 183-day NRA + NY resident (~36% haircut)."
-    - "Departure-year window (<183 days present): US-source gains 0% federal — the natural year to realize big embedded gains; end NY domicile first."
-    - "Dividends leak 25–30% (US-India treaty trims portfolio dividends to ~25%) → ABBV demoted; prefer sub-1% yielders and zero-dividend growth."
-    - "SPAXX distributions generally treaty/portfolio-interest-exempt for NRAs."
-    - "Confirm Fidelity W-8BEN on file (expect 1042-S, not 1099-B/DIV)."
 
 # Pre-buy chart check (§7) — surfaced in the briefing as a manual checklist.
 prebuy_checklist:

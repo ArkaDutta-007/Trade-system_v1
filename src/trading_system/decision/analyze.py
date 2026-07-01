@@ -198,7 +198,6 @@ def _playbook_overlay(
       1. A TRIGGERED standing rule forces its action (SELL/TRIM/REVIEW).
       2. A BUY must clear pre-trade compliance (never-buy, lockouts, caps,
          semi freeze, composite RED) or it is downgraded to HOLD.
-      3. A SELL of a held name gets its NRA tax impact attached.
     Fails soft: any error leaves the model stance untouched.
     """
     reasons: list[str] = []
@@ -206,12 +205,10 @@ def _playbook_overlay(
     try:
         from ..flags import get_flag_snapshot
         from ..playbook import (
-            blotter_realized,
             check_trade,
             evaluate_standing_rules,
             load_playbook,
             load_portfolio,
-            shield_status,
         )
 
         playbook = load_playbook(cfg)
@@ -264,17 +261,6 @@ def _playbook_overlay(
                 stance = "HOLD"
             else:
                 reasons.extend(f"compliance note: {w}" for w in comp.warnings)
-
-        if stance == "SELL" and portfolio.position(ticker) is not None:
-            realized = blotter_realized(cfg.path("reports"), year=int(playbook.tax.get("shield_year", 2026)))
-            shield = shield_status(playbook, portfolio, realized)
-            pos = portfolio.position(ticker)
-            px = last_price or pos.last_price
-            from ..playbook import sell_impact
-
-            impact = sell_impact(pos.quantity, px, pos.average_cost, shield)
-            grounding["tax_impact_full_exit"] = impact
-            reasons.append(f"NRA tax (full exit): {impact['note']}")
 
     except Exception as e:
         logger.warning(f"playbook overlay skipped for {ticker}: {e}")
@@ -402,7 +388,7 @@ def analyze_symbol(
     # ---- Stance ----
     stance, stance_reasons = _stance(score, confidence, row, cfg)
 
-    # ---- Playbook overlay (flags + standing rules + compliance + tax) ----
+    # ---- Playbook overlay (flags + standing rules + compliance) ----
     last_price = row.get("adj_close") or row.get("close")
     stance, playbook_reasons, playbook_grounding = _playbook_overlay(
         ticker, stance, cfg, float(last_price) if last_price else None

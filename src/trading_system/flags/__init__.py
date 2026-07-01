@@ -1,4 +1,4 @@
-"""Five-flag (O/F/I/S/C) regime system from the v2 NRA decision tree.
+"""Five-flag (O/F/I/S/C) regime system from the v2 decision tree.
 
 O — Oil/Iran (Brent) · F — Fed (policy+tone) · I — Inflation (core CPI m/m)
 S — Semi tape (NDX level) · C — AI capex (hyperscaler guidance)

@@ -23,7 +23,7 @@ operational gotchas. Companion to the [README](../README.md) and the auto-genera
 9. [Forecasting methodology](#9-forecasting-methodology)
 10. [Probabilistic price bounds](#10-probabilistic-price-bounds)
 11. [Decision pipeline](#11-decision-pipeline)
-12. [Playbook & NRA tax engine](#12-playbook--nra-tax-engine)
+12. [Playbook engine](#12-playbook-engine)
 13. [Backtesting & leakage tests](#13-backtesting--leakage-tests)
 14. [LLM layer (DeepSeek + RAG)](#14-llm-layer-deepseek--rag)
 15. [Compute & hardware layer](#15-compute--hardware-layer)
@@ -66,7 +66,7 @@ src/trading_system/
 │                   store, predict, shap_analysis, model_registry
 ├── decision/       analyze, bounds, explain, groundings, report
 ├── flags/          O/F/I/S/C live flag board + composite regime
-├── playbook/       standing rules, compliance, cycles, NRA tax, blotter, briefing
+├── playbook/       standing rules, compliance, cycles, blotter, briefing
 ├── portfolio/      sizing (incl. distribution-based), risk, order_policy
 ├── backtesting/    vectorized, event_driven, slippage, metrics, engines/
 ├── execution/      paper_broker, live_broker (stub)
@@ -453,16 +453,16 @@ cap per name, renormalise to ≤100% gross.
 5. **Groundings**: technical, regime, cross-section, events, **relevant_news**
    (RAG), apprehension, model+SHAP, **bounds**, **per-ticker SHAP waterfall**.
 6. **Playbook overlay** (§12): triggered standing rules force action; a BUY must
-   clear compliance or downgrade to HOLD; held SELLs get NRA tax impact.
+   clear compliance or downgrade to HOLD; a triggered §3 rule forces the action.
 7. Write markdown + JSON report; append a compact **DeepSeek narration**.
 
 `analyze-all` runs the universe threaded (IV+LLM-bound) with a progress bar.
 
 ---
 
-## 12. Playbook & NRA tax engine
+## 12. Playbook engine
 
-Enforces `investment-decision-tree-v2-nra.pdf` (`configs/playbook_v2.yaml`).
+A decision-tree playbook encoded in `configs/playbook_v2.yaml`.
 
 * **Five flags** (`flags/`): **O** oil/Iran (Brent), **F** Fed (FRED + tone), **I**
   inflation (core CPI), **S** semi tape (NDX), **C** AI capex. Each GREEN/YELLOW/RED,
@@ -471,8 +471,8 @@ Enforces `investment-decision-tree-v2-nra.pdf` (`configs/playbook_v2.yaml`).
   defensives only, 25% cap. `C=RED or S=RED → semi freeze`.
 * **Compliance** (`playbook/compliance.py`): never-buy list, re-entry lockouts,
   13%/4% concentration caps, semi freeze, composite gating.
-* **NRA tax** (`playbook/tax.py`): F-1/NY non-resident-alien rules; 2026 shield of
-  gains at ~$0 federal; sell screens attach after-tax impact.
+* **Blotter** (`playbook/blotter.py`): append-only fill log with realized P&L;
+  `ts log-trade` records fills and stores their compliance verdict.
 
 ---
 
@@ -593,7 +593,7 @@ ts dashboard         # Streamlit desk (5 grouped sections)
 * **LPPLS** — log-periodic power-law singularity; bubble/crash signature.
 * **Critical slowing down** — rising AR(1)+variance near a tipping point.
 * **Apprehension score** — LLM-assessed market fear for a name [0,1].
-* **NRA** — non-resident alien (US tax status driving the sell logic).
+* **Composite deployment** — the flag-board-driven fraction of cash to deploy.
 
 ---
 

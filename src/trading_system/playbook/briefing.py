@@ -8,8 +8,7 @@ page before the open:
   3. Standing-rule checks vs live prices (triggered / near first)
   4. Cycle rules active today and whether they fire
   5. Portfolio concentration vs caps + drawdown vs the Jun 10 baseline
-  6. 2026 NRA tax-shield status
-  7. The §7 pre-buy checklist
+  6. The §7 pre-buy checklist
 
 Written to reports/briefings/brief_YYYYMMDD_HHMM.md (+ .json sidecar).
 """
@@ -22,11 +21,9 @@ from pathlib import Path
 from ..config import Config
 from ..flags.models import FlagSnapshot, FLAG_ORDER
 from ..utils import get_logger
-from .blotter import blotter_realized
 from .cycles import evaluate_cycles
 from .loader import Playbook, Portfolio, load_playbook, load_portfolio
 from .standing_rules import evaluate_standing_rules
-from .tax import shield_status
 
 logger = get_logger(__name__)
 
@@ -76,9 +73,6 @@ def build_briefing(
     rule_checks = evaluate_standing_rules(playbook, portfolio, prices)
     cycle_evals = evaluate_cycles(playbook, portfolio, snapshot, prices, today=today)
 
-    realized = blotter_realized(cfg.path("reports"), year=int(playbook.tax.get("shield_year", 2026)))
-    shield = shield_status(playbook, portfolio, realized)
-
     horizon = today + timedelta(days=14)
     upcoming = [
         c for c in playbook.catalysts
@@ -118,15 +112,6 @@ def build_briefing(
             ],
             "cap_watch": cap_breaches,
         },
-        "tax_shield": {
-            "year": shield.year,
-            "realized_gains": round(shield.realized_gains, 2),
-            "realized_losses": round(shield.realized_losses, 2),
-            "net_realized": round(shield.net_realized, 2),
-            "shield_remaining": round(shield.shield_remaining, 2),
-            "all_in_rate": shield.all_in_rate,
-            "summary": shield.summary(),
-        },
         "prebuy_checklist": playbook.raw.get("prebuy_checklist", []),
     }
 
@@ -147,7 +132,7 @@ def render_markdown(brief: dict) -> str:
     comp = brief["flags"]["composite"]
     out: list[str] = []
     out.append(f"# Morning Briefing — {brief['as_of_date']}")
-    out.append(f"_generated {brief['generated_at']} · playbook v2-nra_\n")
+    out.append(f"_generated {brief['generated_at']} · playbook v2_\n")
 
     out.append("## 1 · Flag board")
     out.append(_md_flag_table(brief))
@@ -218,10 +203,7 @@ def render_markdown(brief: dict) -> str:
             state = "BARRED" if c["barred"] else "approaching"
             out.append(f"- {c['ticker']}: {c['weight_pct']:.1f}% vs cap {c['cap_pct']:.0f}% → {state}")
 
-    out.append("\n## 6 · 2026 NRA tax shield")
-    out.append(brief["tax_shield"]["summary"])
-
-    out.append("\n## 7 · Pre-buy chart check (run manually before any order)")
+    out.append("\n## 6 · Pre-buy chart check (run manually before any order)")
     for i, item in enumerate(brief["prebuy_checklist"], 1):
         out.append(f"{i}. {item}")
 

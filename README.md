@@ -24,7 +24,7 @@ trading-system/
 │   │                    #   news_events (pluggable: finnhub/newsdata/google/newsapi),
 │   │                    #   dedup, rag, llm_extractor, realtime
 │   ├── flags/           # live O/F/I/S/C flag lookups + composite regime
-│   ├── playbook/        # standing rules, compliance, cycles, NRA tax, blotter, briefing
+│   ├── playbook/        # standing rules, compliance, cycles, blotter, briefing
 │   ├── features/        # technical, extended_features, regimes, macro, event_features,
 │   │                    #   reserve (catalog), context (macro inputs), build
 │   ├── strategies/      # momentum, mean_reversion, event_driven, ml_signal, extended(2)
@@ -47,11 +47,11 @@ trading-system/
 └── pyproject.toml
 ```
 
-## Decision-tree playbook v2 (NRA edition)
+## Decision-tree playbook v2
 
-The system enforces `investment-decision-tree-v2-nra.pdf`, encoded in
+The system enforces a decision-tree playbook encoded in
 [`configs/playbook_v2.yaml`](configs/playbook_v2.yaml). Portfolio truth comes
-from `portfolio and watchlist.json` (Fidelity snapshot); post-snapshot fills
+from `portfolio and watchlist.json` (broker snapshot); post-snapshot fills
 are layered on via the blotter.
 
 ### The five flags — live lookup
@@ -74,9 +74,8 @@ ts flags --refresh      # live flag board + composite + semi-freeze state
 ts brief                # one-page morning briefing (writes reports/briefings/)
 ts playbook             # which §4 cycle rules fire today, with price guards
 ts check ASML BUY 700   # pre-trade compliance: never-buy, lockouts, caps, freeze
-ts check TSM SELL       # sell screen with NRA tax impact (~36% / 2026 shield)
-ts log-trade HOOD SELL 3.627 76.10   # blotter + realized P&L → tax shield
-ts tax                  # 2026 shield status (≈$905 of gains at $0 federal)
+ts check TSM SELL       # sell screen: hold-winner + standing-rule advisories
+ts log-trade HOOD SELL 3.627 76.10   # blotter + realized P&L
 ```
 
 How it gates decisions:
@@ -84,8 +83,7 @@ How it gates decisions:
 * `ts analyze` / `analyze-all` — a model BUY must clear compliance (never-buy
   §5, re-entry lockouts, 13%/4% caps, semi freeze, composite RED) or it is
   downgraded to HOLD; a TRIGGERED §3 standing rule (e.g. HOOD < $75) forces
-  SELL; held-name SELLs get their tax impact attached. Audit trail lands in
-  the report's `playbook` grounding.
+  SELL. Audit trail lands in the report's `playbook` grounding.
 * `ts daily` — today's target weights are scaled by the composite deployment
   fraction; semi-class and never-buy names are zeroed under freeze; standing
   rule breaches raise alerts and are written into the daily report JSON.
@@ -98,9 +96,9 @@ Two flag/playbook pages front the Streamlit dashboard:
   Off / 5s / 15s / 30s / 60s) showing the O/F/I/S/C flag board, composite +
   deployment %, a live holdings price strip, and **standing-rule alerts
   evaluated at live prices** (so HOOD crossing $75 lights up intraday). Below
-  it: concentration vs caps, the 21-day catalyst calendar, and the tax shield.
-* **🧭 Playbook & Tax** — cycle-rule evaluation (§4), a pre-trade compliance
-  widget, the 2026 tax-shield panel, and the blotter with an inline log form.
+  it: concentration vs caps and the 21-day catalyst calendar.
+* **🧭 Playbook** — cycle-rule evaluation (§4), a pre-trade compliance
+  widget, and the blotter with an inline log form.
 
 ### Data resilience (no paid feeds)
 

@@ -1408,7 +1408,7 @@ def brief_cmd(
     refresh: bool = typer.Option(False, "--refresh", "-r", help="Force fresh flag lookups"),
     no_write: bool = typer.Option(False, "--no-write", help="Print only, skip writing files"),
 ):
-    """Morning briefing: flags, catalysts, standing rules, cycle rules, caps, tax shield."""
+    """Morning briefing: flags, catalysts, standing rules, cycle rules, caps."""
     from rich.markdown import Markdown
     from rich.console import Console
     from .flags import get_flag_snapshot
@@ -1480,9 +1480,9 @@ def check_cmd(
     dollars: float = typer.Argument(0.0, help="Order size in USD (SELL: 0 = full position)"),
     config: str = "configs/default.yaml",
 ):
-    """Pre-trade compliance check: never-buy, lockouts, caps, semi freeze, tax."""
+    """Pre-trade compliance check: never-buy, lockouts, caps, semi freeze."""
     from .flags import get_flag_snapshot
-    from .playbook import blotter_realized, check_trade, load_playbook, load_portfolio
+    from .playbook import check_trade, load_playbook, load_portfolio
     from .playbook.briefing import _live_prices
 
     cfg = get_config(config)
@@ -1503,10 +1503,9 @@ def check_cmd(
         except Exception:
             pass
 
-    realized = blotter_realized(cfg.path("reports"), year=int(pb.tax.get("shield_year", 2026)))
     res = check_trade(
         ticker, side, dollars, pb, pf,
-        snapshot=snap, prices=prices, sma50=sma50, blotter_realized=realized,
+        snapshot=snap, prices=prices, sma50=sma50,
     )
     color = "green" if res.allowed else "red"
     rprint(f"[bold {color}]{res.verdict}[/bold {color}] — {res.side} {res.ticker} "
@@ -1515,8 +1514,6 @@ def check_cmd(
         rprint(f"  [red]✗ {v}[/red]")
     for w in res.warnings:
         rprint(f"  [yellow]⚠ {w}[/yellow]")
-    if res.tax:
-        rprint(f"  [cyan]tax: {res.tax['note']}[/cyan]")
     rprint(f"\n[dim]{snap.summary_line()}[/dim]")
 
 
@@ -1534,8 +1531,8 @@ def log_trade_cmd(
 ):
     """Log an executed fill to the blotter (reports/blotter.csv).
 
-    Runs the compliance check first and stores its verdict alongside the fill —
-    SELL realized P&L feeds the 2026 NRA tax-shield tracker automatically.
+    Runs the compliance check first and stores its verdict alongside the fill;
+    SELLs with a known basis record realized P&L.
     """
     from .flags import get_flag_snapshot
     from .playbook import check_trade, load_playbook, load_portfolio, log_trade
@@ -1575,27 +1572,6 @@ def log_trade_cmd(
            + (f"  realized P&L: {row['realized_pnl']}" if row['realized_pnl'] != "" else ""))
 
 
-@app.command("tax")
-def tax_cmd(config: str = "configs/default.yaml"):
-    """2026 NRA tax-shield status (JSON cleanup ledger + blotter SELLs)."""
-    from .playbook import blotter_realized, load_playbook, load_portfolio, shield_status
-
-    cfg = get_config(config)
-    pb = load_playbook(cfg)
-    pf = load_portfolio(cfg)
-    realized = blotter_realized(cfg.path("reports"), year=int(pb.tax.get("shield_year", 2026)))
-    s = shield_status(pb, pf, realized)
-    rprint(f"[bold]NRA Tax Shield — {s.year}[/bold]")
-    rprint(f"  realized gains:   [green]{s.realized_gains:+,.2f}[/green]")
-    rprint(f"  realized losses:  [red]{s.realized_losses:+,.2f}[/red]")
-    rprint(f"  net realized:     {s.net_realized:+,.2f}")
-    c = "green" if s.shield_remaining > 0 else "yellow"
-    rprint(f"  shield remaining: [{c}]${s.shield_remaining:,.2f}[/{c}] of gains at ~$0 tax (expires Dec 31)")
-    rprint(f"  beyond shield:    ~{s.all_in_rate:.0%} all-in haircut on net gains")
-    for n in pb.tax.get("notes", []):
-        rprint(f"  [dim]· {n}[/dim]")
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Command directory — single source of truth for grouping + docs
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1625,13 +1601,12 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
         ("future-status", "Show a session's equity + hit-rate"),
         ("future-update", "MTM + redeploy dry powder for live sessions"),
     ],
-    "Playbook & NRA tax": [
+    "Playbook": [
         ("flags", "Live O/F/I/S/C flag board + composite"),
         ("brief", "One-page morning briefing"),
         ("playbook", "Which §4 cycle rules fire today"),
-        ("check", "Pre-trade compliance (never-buy, caps, freeze, tax)"),
+        ("check", "Pre-trade compliance (never-buy, caps, freeze)"),
         ("log-trade", "Record a fill in the blotter"),
-        ("tax", "2026 NRA tax-shield status"),
     ],
     "Paper trading": [
         ("paper-trade", "Run the ML/ensemble paper portfolio"),

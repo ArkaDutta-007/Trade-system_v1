@@ -1,4 +1,4 @@
-"""Unit tests for the playbook engine: compliance, tax shield, standing rules, cycles."""
+"""Unit tests for the playbook engine: compliance, standing rules, cycles."""
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
@@ -17,10 +17,7 @@ from trading_system.playbook import (
     load_playbook,
     load_portfolio,
     log_trade,
-    sell_impact,
-    shield_status,
 )
-from trading_system.playbook.blotter import blotter_realized
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -75,43 +72,15 @@ class TestPortfolioLoad:
         assert portfolio.cash == pytest.approx(3321.16, abs=0.01)
 
 
-# ── tax engine (§8) ──────────────────────────────────────────────────────────
+# ── blotter (trade log + realized P&L) ───────────────────────────────────────
 
-class TestTaxShield:
-    def test_shield_matches_pdf_estimate(self, playbook, portfolio):
-        s = shield_status(playbook, portfolio)
-        # PDF: net ≈ –$900 → shield ≈ $900 (JSON ledger gives –905.38)
-        assert s.net_realized == pytest.approx(-905.38, abs=0.5)
-        assert s.shield_remaining == pytest.approx(905.38, abs=0.5)
-        assert s.all_in_rate == pytest.approx(0.36)
-
-    def test_sell_inside_shield_is_free(self, playbook, portfolio):
-        s = shield_status(playbook, portfolio)
-        impact = sell_impact(qty=10, price=150.0, average_cost=100.0, shield=s)  # +500 gain
-        assert impact["gain"] == pytest.approx(500.0)
-        assert impact["shield_used"] == pytest.approx(500.0)
-        assert impact["tax_due"] == 0.0
-
-    def test_sell_beyond_shield_taxed_at_36pct(self, playbook, portfolio):
-        s = shield_status(playbook, portfolio)
-        impact = sell_impact(qty=10, price=300.0, average_cost=100.0, shield=s)  # +2000 gain
-        taxable = 2000.0 - s.shield_remaining
-        assert impact["taxable_gain"] == pytest.approx(taxable)
-        assert impact["tax_due"] == pytest.approx(taxable * 0.36)
-
-    def test_loss_sale_has_no_tax(self, playbook, portfolio):
-        s = shield_status(playbook, portfolio)
-        impact = sell_impact(qty=10, price=50.0, average_cost=100.0, shield=s)
-        assert impact["tax_due"] == 0.0
-        assert impact["gain"] < 0
-
-    def test_blotter_realized_feeds_shield(self, playbook, portfolio, tmp_path):
-        log_trade(tmp_path, "HOOD", "SELL", qty=3.627, price=112.0, avg_cost_basis=75.21)
+class TestBlotter:
+    def test_sell_records_realized_pnl(self, tmp_path):
+        from trading_system.playbook.blotter import blotter_realized
+        row = log_trade(tmp_path, "HOOD", "SELL", qty=3.627, price=112.0, avg_cost_basis=75.21)
+        assert row["realized_pnl"] == pytest.approx((112.0 - 75.21) * 3.627, abs=0.01)
         realized = blotter_realized(tmp_path, year=date.today().year)
-        assert len(realized) == 1
-        s = shield_status(playbook, portfolio, realized)
-        # HOOD gain shrinks the shield
-        assert s.shield_remaining < 905.38
+        assert len(realized) == 1 and realized[0] > 0
 
 
 # ── compliance gates ─────────────────────────────────────────────────────────
@@ -177,12 +146,11 @@ class TestCompliance:
         assert any("position cap" in v for v in res.violations)
         assert any("do NOT sell" in v for v in res.violations)
 
-    def test_sell_winner_warns_tax_directive(self, playbook, portfolio):
+    def test_sell_winner_warns_hold_directive(self, playbook, portfolio):
         res = check_trade("TSM", "SELL", 0, playbook, portfolio, snapshot=_snapshot())
         assert res.allowed  # advisory, not blocking
-        assert any("prime directive" in w for w in res.warnings)
-        assert res.tax is not None
-        assert res.tax["gain"] > 0  # TSM is up big
+        assert any("hold-winner" in w for w in res.warnings)
+        assert set(res.to_dict()) == {"ticker", "side", "verdict", "violations", "warnings"}
 
 
 # ── standing rules (§3) ──────────────────────────────────────────────────────

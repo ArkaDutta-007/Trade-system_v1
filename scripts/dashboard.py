@@ -166,7 +166,7 @@ with st.sidebar:
 
     # Grouped, two-level navigation — 14 pages collapsed into 5 intuitive sections
     NAV_GROUPS = {
-        "🚦 Desk": ["🚦 Trading Desk", "🧭 Playbook & Tax", "⚡ Live Prices"],
+        "🚦 Desk": ["🚦 Trading Desk", "🧭 Playbook", "⚡ Live Prices"],
         "🔭 Research": ["🔭 Stock Analysis", "🔍 Stock Screener",
                         "🌐 Universe Overview", "🎯 Trade Signals"],
         "🔮 Forecasts": ["📈 Future Predictions", "📋 Decision Reports", "🤖 Agent Analysis"],
@@ -196,15 +196,15 @@ with st.sidebar:
         slippage = float(cfg["backtest"]["slippage_bps"])
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page: Trading Desk + Playbook & Tax  (V3 — live flags + playbook engine)
+# Page: Trading Desk + Playbook  (V3 — live flags + playbook engine)
 # ─────────────────────────────────────────────────────────────────────────────
 if page == "🚦 Trading Desk":
     import desk
     desk.render_trading_desk(cfg)
 
-elif page == "🧭 Playbook & Tax":
+elif page == "🧭 Playbook":
     import desk
-    desk.render_playbook_tax(cfg)
+    desk.render_playbook(cfg)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Trade Signals  (PRIMARY PAGE)

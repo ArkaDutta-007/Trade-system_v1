@@ -148,10 +148,6 @@ class Playbook:
         return self.raw.get("catalysts") or []
 
     @property
-    def tax(self) -> dict:
-        return self.raw.get("tax") or {}
-
-    @property
     def events(self) -> dict:
         return self.overrides.get("events") or {}
 

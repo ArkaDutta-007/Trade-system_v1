@@ -39,16 +39,15 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | `ts future-status` | Show a session's equity + hit-rate |
 | `ts future-update` | MTM + redeploy dry powder for live sessions |
 
-## Playbook & NRA tax
+## Playbook
 
 | Command | What it does |
 | --- | --- |
 | `ts flags` | Live O/F/I/S/C flag board + composite |
 | `ts brief` | One-page morning briefing |
 | `ts playbook` | Which §4 cycle rules fire today |
-| `ts check` | Pre-trade compliance (never-buy, caps, freeze, tax) |
+| `ts check` | Pre-trade compliance (never-buy, caps, freeze) |
 | `ts log-trade` | Record a fill in the blotter |
-| `ts tax` | 2026 NRA tax-shield status |
 
 ## Paper trading
 

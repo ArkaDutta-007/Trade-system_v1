@@ -1,12 +1,12 @@
-"""Live Trading Desk + Playbook/Tax pages for the Streamlit dashboard.
+"""Live Trading Desk + Playbook pages for the Streamlit dashboard.
 
 Kept separate from dashboard.py so the V3 flag/playbook engine gets a clean,
 self-contained home. Two entry points, both called from dashboard.py:
 
   render_trading_desk(cfg)  — auto-refreshing flag board, live price strip, and
                               standing-rule alerts evaluated at live prices.
-  render_playbook_tax(cfg)  — cycle rules, 2026 NRA tax shield, pre-trade
-                              compliance check, and the trade blotter.
+  render_playbook(cfg)      — cycle rules, pre-trade compliance check, and the
+                              trade blotter.
 
 The "live" feel comes from st.fragment(run_every=...): only the live block
 reruns on the chosen cadence, so prices and flags tick without recomputing the
@@ -129,7 +129,7 @@ def _render_standing_alerts(playbook, portfolio, prices: dict) -> None:
 
 def render_trading_desk(cfg) -> None:
     st.header("🚦 Trading Desk")
-    st.caption("Live O/F/I/S/C flag board · standing-rule alerts at live prices · v2 NRA playbook")
+    st.caption("Live O/F/I/S/C flag board · standing-rule alerts at live prices · v2 playbook")
 
     try:
         playbook, portfolio = _playbook_portfolio(cfg)
@@ -209,19 +209,12 @@ def render_trading_desk(cfg) -> None:
         else:
             st.caption("No catalysts in the next 21 days.")
 
-        # tax shield mini-panel
-        from trading_system.playbook import blotter_realized, shield_status
-        realized = blotter_realized(cfg.path("reports"), year=int(playbook.tax.get("shield_year", 2026)))
-        s = shield_status(playbook, portfolio, realized)
-        st.metric(f"{s.year} tax shield remaining", f"${s.shield_remaining:,.0f}",
-                  help="Gains realizable at ~$0 federal this year; expires Dec 31.")
 
+# ── PAGE: Playbook ───────────────────────────────────────────────────────────
 
-# ── PAGE: Playbook & Tax ─────────────────────────────────────────────────────
-
-def render_playbook_tax(cfg) -> None:
-    st.header("🧭 Playbook & Tax")
-    st.caption("Cycle rules (§4) · NRA tax shield (§8) · pre-trade compliance · blotter")
+def render_playbook(cfg) -> None:
+    st.header("🧭 Playbook")
+    st.caption("Cycle rules (§4) · pre-trade compliance · blotter")
 
     try:
         playbook, portfolio = _playbook_portfolio(cfg)
@@ -230,8 +223,8 @@ def render_playbook_tax(cfg) -> None:
         st.error(f"Could not load playbook: {e}")
         return
 
-    tab_cycles, tab_check, tab_tax, tab_blotter = st.tabs(
-        ["📋 Cycle Rules", "✅ Pre-Trade Check", "🧾 Tax Shield", "📒 Blotter"]
+    tab_cycles, tab_check, tab_blotter = st.tabs(
+        ["📋 Cycle Rules", "✅ Pre-Trade Check", "📒 Blotter"]
     )
 
     held = tuple(portfolio.held_symbols)
@@ -274,7 +267,7 @@ def render_playbook_tax(cfg) -> None:
         side = c2.selectbox("Side", ["BUY", "SELL"], key="chk_s")
         dollars = c3.number_input("Dollars (0 = full position for SELL)", 0, 100000, 700, 50, key="chk_d")
         if st.button("Check", key="chk_go"):
-            from trading_system.playbook import blotter_realized, check_trade
+            from trading_system.playbook import check_trade
             sma50 = {}
             if ticker in playbook.lockout_tickers:
                 try:
@@ -283,31 +276,14 @@ def render_playbook_tax(cfg) -> None:
                     sma50[ticker] = float(px["close"].tail(50).mean())
                 except Exception:
                     pass
-            realized = blotter_realized(cfg.path("reports"), year=int(playbook.tax.get("shield_year", 2026)))
             res = check_trade(ticker, side, float(dollars), playbook, portfolio,
-                              snapshot=snap, prices=prices, sma50=sma50, blotter_realized=realized)
+                              snapshot=snap, prices=prices, sma50=sma50)
             (st.success if res.allowed else st.error)(
                 f"{res.verdict} — {side} {ticker} " + (f"${dollars:,.0f}" if dollars else "(full)"))
             for v in res.violations:
                 st.markdown(f"- 🚫 {v}")
             for w in res.warnings:
                 st.markdown(f"- ⚠ {w}")
-            if res.tax:
-                st.info(f"Tax: {res.tax['note']}")
-
-    with tab_tax:
-        from trading_system.playbook import blotter_realized, shield_status
-        realized = blotter_realized(cfg.path("reports"), year=int(playbook.tax.get("shield_year", 2026)))
-        s = shield_status(playbook, portfolio, realized)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Realized gains", f"${s.realized_gains:,.0f}")
-        c2.metric("Realized losses", f"${s.realized_losses:,.0f}")
-        c3.metric("Shield remaining", f"${s.shield_remaining:,.0f}")
-        st.progress(min(1.0, s.shield_remaining / 1000.0) if s.shield_remaining else 0.0)
-        st.markdown(f"**{s.summary()}**")
-        st.caption("Notes (§8):")
-        for n in playbook.tax.get("notes", []):
-            st.markdown(f"- {n}")
 
     with tab_blotter:
         from trading_system.playbook import load_blotter
