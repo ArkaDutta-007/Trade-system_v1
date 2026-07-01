@@ -227,7 +227,9 @@ def backfill_history(
     universe: str = UNIVERSE_OPT,
     sources: str = typer.Option("gdelt,sec,wiki", help="which historical sources to backfill"),
     start: str = typer.Option("2010-01-01", help="history start (clamped to each source's floor)"),
-    workers: int = typer.Option(4, help="concurrent fetchers per source (rate-limited)"),
+    workers: int = typer.Option(8, help="concurrent fetchers per source"),
+    min_coverage: float = typer.Option(0.9, help="keep retrying uncovered tickers until this fraction has data"),
+    max_rounds: int = typer.Option(8, help="max retry rounds per source (stops early on a plateau)"),
 ):
     """Backfill ALL deep-history sources for training → silver/{gdelt,sec,wiki}_history.parquet.
 
@@ -237,33 +239,42 @@ def backfill_history(
       * sec   — EDGAR filing events: all-forms / 8-K / Form-4 intensity (deep);
       * wiki  — English-Wikipedia daily pageviews as a retail-attention proxy (2015+).
 
-    All three are cached per ticker and updated **incrementally** — re-run any time
-    to top up. `ts features` reads whichever tables are present as trained features
-    (news_*, sec_*, wiki_*), densified with per-source presence flags.
+    **Coverage-driven**: each source retries its still-uncovered tickers round after
+    round until ``--min-coverage`` of them have data (or coverage plateaus, meaning
+    the rest genuinely have none). Safe to leave running in tmux. All sources are
+    cached per ticker and incremental, so a re-run only does the missing work.
+    ``ts features`` reads whichever tables are present as trained features (news_* /
+    sec_* / wiki_*, densified with per-source presence flags).
+
+    Note: ``--min-coverage`` is **ticker** coverage, not panel-row coverage — GDELT
+    (2017+) and Wiki (2015+) can't fill pre-floor rows on a 2010→now panel.
     """
     cfg = get_config(config).use_universe(universe)
     tickers = list(cfg["universe"]["tickers"])
     silver = cfg.path("data_silver"); silver.mkdir(parents=True, exist_ok=True)
     want = {s.strip().lower() for s in sources.split(",") if s.strip()}
     names = None
+    cov = dict(min_coverage=min_coverage, max_rounds=max_rounds, workers=workers)
+    rprint(f"[cyan]backfill-history:[/cyan] {len(tickers)} tickers · target ≥{min_coverage:.0%} "
+           f"ticker-coverage · ≤{max_rounds} rounds · {workers} workers")
 
     if "gdelt" in want:
         from trading_system.ingestion.gdelt_news import collect_gdelt_history, company_names
         names = company_names()
         rprint(f"[cyan]GDELT backfill:[/cyan] {len(tickers)} tickers")
         g = collect_gdelt_history(tickers, start=start, cache_dir=silver / "gdelt_cache",
-                                  names=names, workers=workers)
+                                  names=names, **cov)
         if not g.is_empty():
             g.write_parquet(silver / "gdelt_history.parquet", compression="zstd")
-            rprint(f"[green]  gdelt → {g.height:,} ticker-days, {g['ticker'].n_unique()} tickers[/green]")
+            rprint(f"[green]  gdelt → {g.height:,} ticker-days, {g['ticker'].n_unique()}/{len(tickers)} tickers[/green]")
 
     if "sec" in want:
         from trading_system.ingestion.sec_history import collect_sec_history
         rprint(f"[cyan]SEC backfill:[/cyan] {len(tickers)} tickers")
-        s = collect_sec_history(tickers, cache_dir=silver / "sec_cache", workers=max(workers, 6))
+        s = collect_sec_history(tickers, cache_dir=silver / "sec_cache", **cov)
         if not s.is_empty():
             s.write_parquet(silver / "sec_history.parquet", compression="zstd")
-            rprint(f"[green]  sec → {s.height:,} filings, {s['ticker'].n_unique()} tickers[/green]")
+            rprint(f"[green]  sec → {s.height:,} filings, {s['ticker'].n_unique()}/{len(tickers)} tickers[/green]")
 
     if "wiki" in want:
         from trading_system.ingestion.wiki_pageviews import collect_wiki_history
@@ -272,10 +283,10 @@ def backfill_history(
             names = company_names()
         rprint(f"[cyan]Wiki backfill:[/cyan] {len(tickers)} tickers")
         w = collect_wiki_history(tickers, names=names, start=start,
-                                 cache_dir=silver / "wiki_cache", workers=workers)
+                                 cache_dir=silver / "wiki_cache", **cov)
         if not w.is_empty():
             w.write_parquet(silver / "wiki_history.parquet", compression="zstd")
-            rprint(f"[green]  wiki → {w.height:,} ticker-days, {w['ticker'].n_unique()} tickers[/green]")
+            rprint(f"[green]  wiki → {w.height:,} ticker-days, {w['ticker'].n_unique()}/{len(tickers)} tickers[/green]")
 
     rprint("[green]backfill-history complete — run `ts features` to fold these into the matrix.[/green]")
 

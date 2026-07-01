@@ -610,6 +610,12 @@ These are load-bearing — violating them silently inflates measured skill:
   Form-4 counts + recency — covers the *whole* panel), and **Wikipedia** pageviews
   (retail-attention proxy, 2015+). All causal by construction (each value known by
   that day's close) and cached per ticker.
+* **Coverage-driven, resumable backfill.** `ts backfill-history` retries the
+  still-uncovered tickers round after round until ≥90% *ticker* coverage (not
+  panel-row coverage — the pre-floor years can't be filled) or a plateau. A
+  per-source progress ledger (`_progress.json`) + the per-ticker caches make it
+  idempotent: a re-run or a restart of an interrupted (tmux) run does **zero**
+  network for tickers already completed for that day, so it never repeats work.
 * **Impute-and-indicator for sparse signals.** A signal that only exists from a
   source's coverage floor (GDELT 2017+, Wiki 2015+) or for covered names is
   *structurally* sparse — leaving it null both trips `resolve_reserve`'s ≥60%

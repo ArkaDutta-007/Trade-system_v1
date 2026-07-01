@@ -16,6 +16,7 @@ causal abnormal-attention z-score + momentum.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from datetime import date, timedelta
@@ -39,7 +40,7 @@ _MIN_START = date(2015, 7, 1)          # Wikimedia pageviews coverage floor
 # Wikimedia's UA policy wants an identifiable client with a contact URL.
 _UA = {"User-Agent": "trading-system-research/1.0 "
                      "(https://github.com/ArkaDutta-007/Trade-system_v1)"}
-_THROTTLE_S = 0.2
+_THROTTLE_S = 0.1                        # Wikimedia tolerates more than GDELT
 _throttle_lock = threading.Lock()
 _last_call = 0.0
 
@@ -71,7 +72,7 @@ def _throttle() -> None:
         time.sleep(wait)
 
 
-def resolve_wiki_title(name: str, sess: requests.Session, retries: int = 4) -> str | None:
+def resolve_wiki_title(name: str, sess: requests.Session, retries: int = 6) -> str | None:
     """Best-matching English-Wikipedia article title for a company name.
 
     Retries on rate-limit/5xx — without this a single 429 (easy to hit at any
@@ -86,19 +87,21 @@ def resolve_wiki_title(name: str, sess: requests.Session, retries: int = 4) -> s
                 "action": "query", "list": "search", "srsearch": q,
                 "srlimit": 1, "format": "json",
             }, timeout=30)
-            if r.status_code in (429, 403, 502, 503):
-                time.sleep(1.5 * (attempt + 1)); continue
+            if r.status_code in (429, 403, 500, 502, 503, 504):
+                time.sleep(min(20.0, 1.5 * 2 ** attempt) + random.uniform(0, 1.0)); continue
             r.raise_for_status()
             hits = r.json().get("query", {}).get("search", [])
             return hits[0]["title"] if hits else None
         except Exception as e:
             if attempt == retries - 1:
                 logger.debug(f"wiki title resolve failed for {name!r}: {e}")
+            else:
+                time.sleep(0.5 + random.uniform(0, 0.5))
     return None
 
 
 def _fetch_range(title: str, start: date, end: date, sess: requests.Session,
-                 retries: int = 3) -> list[dict]:
+                 retries: int = 6) -> list[dict]:
     url = _PAGEVIEWS.format(
         title=quote(title.replace(" ", "_"), safe=""),
         start=start.strftime("%Y%m%d"), end=end.strftime("%Y%m%d"),
@@ -109,8 +112,8 @@ def _fetch_range(title: str, start: date, end: date, sess: requests.Session,
             r = sess.get(url, timeout=60)
             if r.status_code == 404:
                 return []                      # article/timespan has no data
-            if r.status_code in (429, 502, 503):
-                time.sleep(1.5 * (attempt + 1)); continue
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(min(20.0, 1.5 * 2 ** attempt) + random.uniform(0, 1.0)); continue
             r.raise_for_status()
             rows = []
             for it in r.json().get("items", []):
@@ -182,12 +185,15 @@ def collect_wiki_history(
     start: str | date = _MIN_START,
     end: str | date | None = None,
     cache_dir: Path | None = None,
-    workers: int = 4,
+    workers: int = 8,
+    min_coverage: float = 0.9,
+    max_rounds: int = 8,
 ) -> pl.DataFrame:
     """Backfill Wikipedia daily pageviews for many tickers → (ticker, date, wiki_views).
 
     ``names`` maps ticker → company name (e.g. from the SEC map); each is resolved
-    to an article title once and the resolution is cached alongside the series.
+    to an article title once (successes cached) and the still-uncovered tickers are
+    retried each round until ``min_coverage`` or a plateau.
     """
     tickers = [t.upper() for t in tickers]
     start = date.fromisoformat(start) if isinstance(start, str) else start
@@ -204,7 +210,7 @@ def collect_wiki_history(
             except Exception:
                 title_cache = {}
 
-    from ..utils import parallel_map
+    from .backfill_util import collect_until_covered, BackfillLedger
 
     def _one(t: str):
         sess = requests.Session(); sess.headers.update(_UA)
@@ -217,8 +223,17 @@ def collect_wiki_history(
                                  cache_dir=cache_dir, session=sess)
         return [{"ticker": t, **r} for r in recs]
 
-    results = parallel_map(_one, tickers, workers=max(1, min(workers, 6)),
-                           description="Wiki pageviews")
+    def _load_cached(t: str):                    # title=None → read cache only, no network
+        return [{"ticker": t, **r}
+                for r in fetch_wiki_ticker(t, None, start, end, cache_dir=cache_dir)]
+
+    ledger = BackfillLedger(Path(cache_dir) / "_progress.json", end) if cache_dir else None
+
+    flat = collect_until_covered(
+        tickers, _one, source="Wiki", workers=max(1, min(workers, 16)),
+        min_coverage=min_coverage, max_rounds=max_rounds,
+        ledger=ledger, load_cached=_load_cached,
+    )
     if tc_file is not None:
         try:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
@@ -226,7 +241,6 @@ def collect_wiki_history(
         except Exception:
             pass
 
-    flat = [r for sub in results if sub for r in sub]
     if not flat:
         return pl.DataFrame(schema={"ticker": pl.Utf8, "date": pl.Date, "wiki_views": pl.Int64})
     df = (

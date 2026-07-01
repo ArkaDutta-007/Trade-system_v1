@@ -70,19 +70,22 @@ def company_ciks(user_agent: str = _UA["User-Agent"]) -> dict[str, str]:
         return {}
 
 
-def _get_json(url: str, sess: requests.Session, retries: int = 3):
+def _get_json(url: str, sess: requests.Session, retries: int = 5):
+    import random
     for attempt in range(retries):
         try:
             _throttle()
             r = sess.get(url, timeout=60)
-            if r.status_code in (429, 502, 503):
-                time.sleep(1.5 * (attempt + 1))
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(min(15.0, 1.5 * 2 ** attempt) + random.uniform(0, 0.5))
                 continue
             r.raise_for_status()
             return r.json()
         except Exception as e:
             if attempt == retries - 1:
                 logger.debug(f"SEC fetch failed {url}: {e}")
+            else:
+                time.sleep(0.5 + random.uniform(0, 0.5))
     return None
 
 
@@ -158,22 +161,36 @@ def collect_sec_history(
     tickers: Iterable[str],
     cache_dir: Path | None = None,
     ciks: dict[str, str] | None = None,
-    workers: int = 6,
+    workers: int = 10,
+    min_coverage: float = 0.9,
+    max_rounds: int = 6,
 ) -> pl.DataFrame:
-    """Backfill SEC filing history for many tickers → long-form (ticker, date, form)."""
+    """Backfill SEC filing history for many tickers → long-form (ticker, date, form).
+
+    Retries the uncovered tickers until ``min_coverage`` (ETFs with no CIK never
+    resolve and are dropped once coverage plateaus).
+    """
     tickers = [t.upper() for t in tickers]
     ciks = ciks if ciks is not None else company_ciks()
 
-    from ..utils import parallel_map
+    from .backfill_util import collect_until_covered, BackfillLedger
+    from datetime import date as _date
 
     def _one(t: str):
         sess = requests.Session(); sess.headers.update(_UA)
         recs = fetch_ticker_filings(t, ciks.get(t), cache_dir=cache_dir, session=sess)
         return [{"ticker": t, **r} for r in recs]
 
-    results = parallel_map(_one, tickers, workers=max(1, min(workers, 10)),
-                           description="SEC filings")
-    flat = [r for sub in results if sub for r in sub]
+    def _load_cached(t: str):                    # cik=None → read cache only, no network
+        return [{"ticker": t, **r} for r in fetch_ticker_filings(t, None, cache_dir=cache_dir)]
+
+    ledger = BackfillLedger(Path(cache_dir) / "_progress.json", _date.today()) if cache_dir else None
+
+    flat = collect_until_covered(
+        tickers, _one, source="SEC", workers=max(1, min(workers, 16)),
+        min_coverage=min_coverage, max_rounds=max_rounds,
+        ledger=ledger, load_cached=_load_cached,
+    )
     if not flat:
         return pl.DataFrame(schema={"ticker": pl.Utf8, "date": pl.Date, "form": pl.Utf8})
     df = (

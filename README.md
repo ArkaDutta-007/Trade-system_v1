@@ -144,6 +144,41 @@ DEEPSEEK_API_KEY=...    # event apprehension + decision narration (optional)
 
 Hardware overrides (optional): `TS_DEVICE=cpu|gpu`, `TS_N_JOBS=<int>`, `TS_GPU=0|1`.
 
+## Data setup — run once on every machine
+
+`data/` is gitignored, so **every machine** (laptop or GPU box) builds its own
+copy after cloning. The same three steps everywhere — OHLCV, then all deep-history
+signals, then the feature matrix:
+
+```bash
+ts ingest -u liquid              # daily OHLCV for the universe
+ts backfill-history -u liquid    # GDELT + SEC + Wikipedia deep-history signals
+ts features -u liquid            # fold everything into gold/features.parquet (+ --deep for heavy maths)
+ts quality                       # sanity gate
+```
+
+`ts backfill-history` is built to be run unattended (e.g. in `tmux`):
+
+* **Coverage-driven** — it retries the still-uncovered tickers round after round
+  until `--min-coverage` (default **0.9**, meaning ≥90% of *tickers* have data — not
+  panel rows: GDELT starts 2017 and Wiki 2015, so pre-floor rows can't be filled)
+  or coverage plateaus (the rest genuinely have none).
+* **Resumable & non-repeating** — a per-source progress ledger + per-ticker caches
+  mean a re-run (or restarting an interrupted run) does **zero** network for tickers
+  already completed for that day; only missing/stale ones are fetched. Re-run it any
+  time to top up.
+* **Tunable** — `--workers`, `--min-coverage`, `--max-rounds`, and `--sources
+  gdelt,sec,wiki` to do one source at a time.
+
+Typical coverage on the liquid universe: **SEC ~98%** (filings back to the 1990s,
+the densest signal), **GDELT ~90%+** after retries, **Wiki** varies (fuzzy
+name→article resolution). Uncovered names degrade gracefully — `densify_sparse_signals`
+sets their `*_present` flag to 0, so they never poison training.
+
+> Instead of rebuilding on a second machine, you can `scp` the built
+> `data/gold/features.parquet` (+ `data/bronze/`, `data/silver/`) across — handy for
+> scoring on the laptop with the *same* features the GPU box trained on (see below).
+
 ## Training on a GPU server (RTX / CUDA)
 
 `data/` and `.env` are gitignored, so a fresh clone has **no data and no keys** —
@@ -162,11 +197,8 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.ge
 # 3. recreate .env with your keys (scp it from the laptop, or:)
 cp .env.example .env && $EDITOR .env   # fill FRED / NEWSDATA / DEEPSEEK keys
 
-# 4. build data → features (one-off; the backfill is cached + incremental)
-ts ingest -u liquid                    # OHLCV (+ recent news/apprehension if keys set)
-ts backfill-history -u liquid          # ALL deep-history signals: GDELT + SEC + Wikipedia
-ts features -u liquid                  # full reserve incl. news_*/sec_*/wiki_* (add --deep for heavy maths)
-ts quality                             # sanity gate
+# 4. build data → features (the shared "Data setup" steps above; safe in tmux)
+ts ingest -u liquid && ts backfill-history -u liquid && ts features -u liquid && ts quality
 
 # 5. train everything on the GPU (RNN/LSTM/GRU + xgb on CUDA, lgbm on cores)
 #    compute log should read  GPU=CUDA · xgb=cuda
@@ -434,11 +466,13 @@ ts picks --horizon 252 --top 20 --write                   # the long-term plan
 ## V3.9 — all deep-history signals, and memory-safe sequence training
 
 **More historical signal beyond GDELT** — one command backfills every
-point-in-time source with real depth, each cached per ticker and updated
-incrementally:
+point-in-time source with real depth. It's **coverage-driven** (retries the
+uncovered tickers until ≥90% are covered or coverage plateaus) and **resumable**
+(a per-source progress ledger + per-ticker caches → a re-run does zero network for
+already-completed tickers), so it's safe to leave in `tmux`:
 
 ```bash
-ts backfill-history -u liquid        # GDELT + SEC + Wikipedia, then:
+ts backfill-history -u liquid        # GDELT + SEC + Wikipedia — coverage-driven, resumable
 ts features -u liquid                # folds news_* / sec_* / wiki_* into the matrix
 ```
 

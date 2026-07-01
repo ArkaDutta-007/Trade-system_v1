@@ -18,6 +18,7 @@ Output silver table: ``data/silver/gdelt_history.parquet`` — one row per
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from datetime import date
@@ -77,7 +78,7 @@ def _clean_name(name: str) -> str:
 
 
 def _gdelt_timeline(query: str, start: date, end: date, mode: str,
-                    session: requests.Session, retries: int = 3) -> list[dict]:
+                    session: requests.Session, retries: int = 6) -> list[dict]:
     params = {
         "query": query, "mode": mode, "format": "json", "timelinesmooth": "0",
         "startdatetime": start.strftime("%Y%m%d000000"),
@@ -87,8 +88,9 @@ def _gdelt_timeline(query: str, start: date, end: date, mode: str,
         try:
             _throttle()
             r = session.get(_DOC_URL, params=params, timeout=60)
-            if r.status_code in (429, 502, 503):
-                time.sleep(2.0 * (attempt + 1))
+            if r.status_code in (429, 500, 502, 503, 504):
+                # exponential backoff + jitter so a burst of workers doesn't re-collide
+                time.sleep(min(20.0, 1.5 * 2 ** attempt) + random.uniform(0, 1.0))
                 continue
             r.raise_for_status()
             tl = r.json().get("timeline", [])
@@ -96,6 +98,8 @@ def _gdelt_timeline(query: str, start: date, end: date, mode: str,
         except Exception as e:
             if attempt == retries - 1:
                 logger.debug(f"GDELT {mode} failed for {query!r}: {e}")
+            else:
+                time.sleep(1.0 + random.uniform(0, 1.0))
     return []
 
 
@@ -185,11 +189,15 @@ def collect_gdelt_history(
     end: str | date | None = None,
     cache_dir: Path | None = None,
     names: dict[str, str] | None = None,
-    workers: int = 4,
+    workers: int = 8,
+    min_coverage: float = 0.9,
+    max_rounds: int = 8,
 ) -> pl.DataFrame:
     """Backfill GDELT daily tone + volume for many tickers → long-form frame.
 
-    Returns columns: ticker, date, gdelt_tone, gdelt_vol.
+    Retries the still-uncovered tickers each round until ``min_coverage`` of them
+    have data (or coverage plateaus). Returns columns: ticker, date, gdelt_tone,
+    gdelt_vol.
     """
     tickers = [t.upper() for t in tickers]
     start = date.fromisoformat(start) if isinstance(start, str) else start
@@ -197,17 +205,26 @@ def collect_gdelt_history(
     end = (date.fromisoformat(end) if isinstance(end, str) else end) or date.today()
     names = names if names is not None else company_names()
 
-    from ..utils import parallel_map
+    from .backfill_util import collect_until_covered, BackfillLedger
 
     def _one(t: str):
         sess = requests.Session(); sess.headers.update(_UA)
         recs = fetch_gdelt_ticker(t, names.get(t), start, end, cache_dir=cache_dir, session=sess)
         return [{"ticker": t, **r} for r in recs]
 
-    # GDELT is rate-limited — keep concurrency low; cache makes re-runs free.
-    results = parallel_map(_one, tickers, workers=max(1, min(workers, 6)),
-                           description="GDELT news")
-    flat = [r for sub in results if sub for r in sub]
+    def _load_cached(t: str):                    # name=None → read cache only, no network
+        return [{"ticker": t, **r}
+                for r in fetch_gdelt_ticker(t, None, start, end, cache_dir=cache_dir)]
+
+    ledger = BackfillLedger(Path(cache_dir) / "_progress.json", end) if cache_dir else None
+
+    # GDELT is rate-limited (a global throttle spaces calls); more workers overlap
+    # the timeline downloads, and the coverage loop reclaims rate-limited misses.
+    flat = collect_until_covered(
+        tickers, _one, source="GDELT", workers=max(1, min(workers, 12)),
+        min_coverage=min_coverage, max_rounds=max_rounds,
+        ledger=ledger, load_cached=_load_cached,
+    )
     if not flat:
         return pl.DataFrame(schema={"ticker": pl.Utf8, "date": pl.Date,
                                     "gdelt_tone": pl.Float64, "gdelt_vol": pl.Int64})
