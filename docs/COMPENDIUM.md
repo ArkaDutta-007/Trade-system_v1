@@ -416,6 +416,15 @@ ICIR 1.10 / IC +0.124 / 64% hit / gate PASS.
 * **FinBERT text features** (`features/text_features.py`, `ts features --text`):
   causal, cached news sentiment from a finance transformer — the one orthogonal
   input (text, not prices). New `text` reserve group.
+* **Futility pruning** (V4.1, default on; `--no-screen` disables): from the 2nd
+  viable CV fold, a family whose running mean IC is ≤ 0 or < 35% of the
+  leader's stops scheduling its remaining folds — the top-2 always keep
+  running. This is where hopeless sequence families (minutes per fold) stop
+  burning compute. Honesty is preserved: pruned families are **ineligible for
+  selection** (1–2 lucky low-std folds would otherwise fake a huge ICIR), stay
+  in the report (`pruned_after_fold`), and still count in the deflated-ICIR
+  trial count. The panel is also sorted once across all horizons instead of
+  per horizon.
 
 ### 9.6 Long-term decision artifact (`ts picks`)
 `decision/longterm.py` packages the committed forecaster + conformal bounds into a

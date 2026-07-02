@@ -511,6 +511,10 @@ def train_forecast(
         "core", help="universe whose ICIR is weighted in selection (alias or path)"),
     cv: str = typer.Option(
         "walkforward", help="cross-validation: walkforward | cpcv (combinatorial purged)"),
+    no_screen: bool = typer.Option(
+        False, "--no-screen",
+        help="disable futility pruning (by default, families whose running mean IC "
+             "is ≤0 or <35% of the leader's after 2 folds skip their remaining folds)"),
 ):
     """Train + rigorously evaluate long-horizon forecasters; save best to models_store/.
 
@@ -577,7 +581,7 @@ def train_forecast(
         feat, feat_cols, horizons=hz, n_splits=n_splits,
         models=mdl, lookback=lookback, seq_epochs=epochs,
         neutralize=neutralize, priority_tickers=(priority or None),
-        universe_weight=universe_weight, cv_mode=cv,
+        universe_weight=universe_weight, cv_mode=cv, screen=not no_screen,
     )
     if not results:
         rprint("[red]No horizons trained.[/red]")

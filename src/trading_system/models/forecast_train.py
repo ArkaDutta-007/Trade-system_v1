@@ -220,11 +220,14 @@ def train_horizon(
     priority_tickers: set[str] | None = None,
     universe_weight: float = 0.5,
     cv_mode: str = "walkforward",
+    screen: bool = True,
+    assume_sorted: bool = False,
 ) -> HorizonResult:
     prof = get_compute_profile()
     tgt = f"fwd_ret_{horizon}d"
     px = pl.col("adj_close")
-    df = features.sort(["ticker", "date"]).with_columns(
+    df = features if assume_sorted else features.sort(["ticker", "date"])
+    df = df.with_columns(
         ((px.shift(-horizon).over("ticker") / px) - 1).alias(tgt)
     )
     if neutralize:
@@ -278,13 +281,23 @@ def train_horizon(
 
     dates_arr = np.asarray(dates)
     per_model_folds: dict[str, list[dict]] = {k: [] for k in active}
+    # Futility pruning ("screen"): from the 2nd viable fold on, stop scheduling
+    # families whose running mean IC is ≤ 0 or far below the leader's — they
+    # cannot win selection, so their remaining folds are wasted compute (this is
+    # where slow sequence families cost minutes each). The top-2 always keep
+    # running, pruned families stay in the report + the deflation trial count,
+    # and a pruned family is never eligible to be selected.
+    active_set = list(active)
+    pruned_at: dict[str, int] = {}
+    n_viable = 0
     for s in splits:
         ytr, yte = y[s.train_idx], y[s.test_idx]
         if len(s.train_idx) < 200 or len(s.test_idx) < 20:
             continue
+        n_viable += 1
         dte = dates_arr[s.test_idx]
         pmask = priority_mask[s.test_idx] if priority_mask is not None else None
-        for name in active:
+        for name in active_set:
             try:
                 mat = _mat(name)
                 m = _new_estimator(name)  # fresh estimator per fold
@@ -296,11 +309,31 @@ def train_horizon(
                     _free_torch()
             except Exception as e:
                 logger.warning(f"  {horizon}d/{name} fold {s.fold} failed: {e}")
+        if screen and n_viable >= 2 and len(active_set) > 2:
+            means = {k: float(np.mean([r["ic"] for r in per_model_folds[k]]))
+                     for k in active_set if per_model_folds[k]}
+            if means:
+                leader = max(means.values())
+                keep = set(sorted(means, key=means.get, reverse=True)[:2])
+                for k in list(active_set):
+                    mk = means.get(k)
+                    if k in keep or mk is None:
+                        continue
+                    if mk <= 0.0 or (leader > 0 and mk < 0.35 * leader):
+                        active_set.remove(k)
+                        pruned_at[k] = n_viable
+                        logger.info(
+                            f"  {horizon}d: pruned {k} after fold {n_viable} "
+                            f"(mean IC {mk:+.4f} vs leader {leader:+.4f})")
 
     per_model = {k: _aggregate(v) for k, v in per_model_folds.items()}
+    for k, fold_n in pruned_at.items():
+        per_model[k]["pruned_after_fold"] = fold_n
     # Best by blended (general + your-universe) ICIR, requiring positive mean IC.
+    # Pruned families are ineligible: with only 1–2 folds a lucky low-std run
+    # would otherwise post a huge (meaningless) ICIR.
     ranked = sorted(
-        per_model.items(),
+        ((k, v) for k, v in per_model.items() if k not in pruned_at),
         key=lambda kv: (kv[1]["ic_mean"] > 0, _selection_score(kv[1], universe_weight), kv[1]["ic_mean"]),
         reverse=True,
     )
@@ -417,7 +450,11 @@ def train_all_horizons(
     priority_tickers: set[str] | None = None,
     universe_weight: float = 0.5,
     cv_mode: str = "walkforward",
+    screen: bool = True,
 ) -> dict[int, HorizonResult]:
+    # One (ticker, date) sort shared by every horizon — each train_horizon
+    # otherwise re-sorts the full panel.
+    features = features.sort(["ticker", "date"])
     out: dict[int, HorizonResult] = {}
     for h in horizons:
         try:
@@ -426,6 +463,7 @@ def train_all_horizons(
                 lookback=lookback, seq_epochs=seq_epochs,
                 neutralize=neutralize, priority_tickers=priority_tickers,
                 universe_weight=universe_weight, cv_mode=cv_mode,
+                screen=screen, assume_sorted=True,
             )
         except Exception as e:
             logger.warning(f"horizon {h}d training failed: {e}")
