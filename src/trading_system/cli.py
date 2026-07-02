@@ -725,6 +725,137 @@ def picks(
 
 
 @app.command()
+def invest(
+    budget: float = typer.Argument(..., help="dollar budget to deploy right now"),
+    config: str = "configs/default.yaml",
+    top: int = typer.Option(8, help="max number of names in the tranche"),
+    max_weight: float = typer.Option(0.25, help="per-name cap as a fraction of the tranche"),
+    min_position: float = typer.Option(50.0, help="drop allocations smaller than this ($)"),
+    no_flags: bool = typer.Option(False, "--no-flags", help="skip the live flag board (no composite gating)"),
+    no_record: bool = typer.Option(False, "--no-record", help="don't log the plan to the decision ledger"),
+    write: bool = typer.Option(False, "--write", help="also write reports/invest/*.md + .json"),
+    universe: str = UNIVERSE_OPT,
+):
+    """Budget → buy plan: what to buy, how many shares, and how long to hold.
+
+    Blends every committed forecaster horizon into one conviction (weighted by
+    honest ICIR), picks each name's hold horizon from its calibrated band,
+    gates through playbook compliance + the composite flag board, sizes with
+    RMT-cleaned HRP × Kelly, and logs each position to the decision ledger.
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.decision.invest import build_invest_plan, write_invest_plan
+
+    cfg = get_config(config).use_universe(universe)
+    try:
+        plan = build_invest_plan(
+            cfg, budget=budget, top_n=top, max_weight=max_weight,
+            min_position=min_position, use_flags=not no_flags,
+            record=not no_record,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        rprint(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    comp = plan.get("composite") or {}
+    comp_s = f"{comp.get('color', 'n/a')} → deploy {plan['deployment_fraction']:.0%}"
+    rprint(f"[bold]Invest plan · ${plan['budget']:,.0f}[/bold] · as of {plan['as_of']} "
+           f"· composite {comp_s}")
+    rprint(f"Invested [green]${plan['invested']:,.2f}[/green] · "
+           f"cash reserve [yellow]${plan['cash_reserve']:,.2f}[/yellow]"
+           + (f" · ledger +{plan['ledger_recorded']}" if plan.get("ledger_recorded") else ""))
+    if not plan["positions"]:
+        rprint("[yellow]Nothing clears the gates today — hold cash.[/yellow]")
+    else:
+        console = Console()
+        t = Table(show_lines=False)
+        for c in ["#", "Ticker", "$", "Shares", "Wt", "Entry", "Median", "Stretch",
+                  "Stop", "Hold", "Ann.Edge", "Timing"]:
+            t.add_column(c, justify="right")
+        for i, s in enumerate(plan["positions"], 1):
+            t.add_row(
+                str(i), f"[bold]{s['ticker']}[/bold]", f"${s['dollars']:,.0f}",
+                f"{s['shares']:.3f}", f"{s['weight']*100:.1f}%", f"${s['entry']:.2f}",
+                f"${s['median_target']:.2f}", f"${s['stretch_target']:.2f}",
+                f"[red]${s['stop']:.2f}[/red]", s["hold"],
+                f"[green]{s['annualized_edge']*100:+.0f}%[/green]", s["timing"],
+            )
+        console.print(t)
+        for s in plan["positions"]:
+            for w in s.get("warnings", []):
+                rprint(f"[yellow]⚠ {s['ticker']}: {w}[/yellow]")
+    if plan.get("skipped"):
+        rprint("[dim]Not bought: " + " · ".join(
+            f"{s['ticker']} ({s['reason']})" for s in plan["skipped"][:8]) + "[/dim]")
+    rprint("[dim]⚠ Survivorship-biased universe; review at stop/target; not financial advice.[/dim]")
+    if write:
+        md = write_invest_plan(cfg, plan)
+        rprint(f"[green]Wrote {md}[/green]")
+
+
+@app.command()
+def ledger(
+    config: str = "configs/default.yaml",
+    resolve: bool = typer.Option(False, "--resolve", help="score matured predictions against realised prices first"),
+    recent: int = typer.Option(10, help="how many recent predictions to list"),
+):
+    """The system's scored track record: hit rate, band coverage, conviction IC.
+
+    Every `ts invest` position is a falsifiable prediction; once its hold
+    horizon elapses, `--resolve` scores it. This is how the system learns
+    whether its own advice works — and how much to trust each horizon.
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.monitoring.ledger import (
+        resolve_ledger, calibration_report, load_ledger,
+    )
+
+    cfg = get_config(config)
+    if resolve:
+        counts = resolve_ledger(cfg)
+        rprint(f"[green]Resolved {counts['resolved']}[/green] · "
+               f"pending {counts['pending']} · total {counts['total']}")
+    rep = calibration_report(cfg)
+    if rep["n_predictions"] == 0:
+        rprint("[yellow]Ledger is empty — run `ts invest <budget>` to start the track record.[/yellow]")
+        raise typer.Exit()
+    rprint(f"[bold]Decision ledger[/bold] · {rep['n_predictions']} predictions · "
+           f"{rep['n_resolved']} resolved · {rep['n_pending']} pending")
+    if rep["groups"]:
+        console = Console()
+        t = Table(title="Calibration by horizon (resolved only)")
+        for c in ["Source", "Horizon", "N", "Hit rate", "Band coverage (target ~90%)",
+                  "Avg forecast", "Avg realized", "Conviction IC"]:
+            t.add_column(c, justify="right")
+        for g in rep["groups"]:
+            hit = g["hit_rate"]
+            hit_c = "green" if hit >= 0.55 else ("yellow" if hit >= 0.45 else "red")
+            cov = g["band_coverage"]
+            t.add_row(
+                g["source"], f"{g['horizon_days']}d", str(g["n"]),
+                f"[{hit_c}]{hit:.0%}[/{hit_c}]",
+                f"{cov:.0%}" if cov is not None else "—",
+                f"{g['avg_forecast']*100:+.1f}%" if g["avg_forecast"] is not None else "—",
+                f"{g['avg_realized']*100:+.1f}%",
+                f"{g['conviction_ic']:+.2f}" if g["conviction_ic"] is not None else "—",
+            )
+        console.print(t)
+    df = load_ledger(cfg)
+    if not df.is_empty() and recent > 0:
+        rows = df.sort("created_at", descending=True).head(recent).to_dicts()
+        rprint("[bold]Recent predictions[/bold]")
+        for r in rows:
+            status = ("[green]HIT[/green]" if r.get("hit") else "[red]MISS[/red]") \
+                if r.get("realized_return") is not None else "[dim]open[/dim]"
+            rr = r.get("realized_return")
+            rprint(f"  {str(r.get('as_of'))[:10]} {r['ticker']:<6} {r['horizon_days']:>4}d "
+                   f"entry ${r.get('entry_price', 0):.2f} → "
+                   + (f"{rr*100:+.1f}% {status}" if rr is not None else f"{status}"))
+
+
+@app.command()
 def complexity(
     ticker: str,
     config: str = "configs/default.yaml",
@@ -1808,6 +1939,8 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
         ("backtest", "Vectorized backtest of a strategy with metrics"),
     ],
     "Decisions": [
+        ("invest", "★ Budget → buy plan: what, how many shares, how long to hold"),
+        ("ledger", "Scored track record: hit rate, band coverage, conviction IC"),
         ("picks", "★ Long-term buy plan: what/when/entry/target/stop, ranked"),
         ("analyze", "Single-symbol decision + report (bounds, SHAP, narration)"),
         ("analyze-all", "Run analyze across the whole universe"),

@@ -481,6 +481,43 @@ cap per name, renormalise to ≤100% gross.
 
 `analyze-all` runs the universe threaded (IV+LLM-bound) with a progress bar.
 
+### 11.1 Invest planner (`ts invest <budget>`)
+
+`decision/invest.py` — turns a dollar budget into a gated, sized,
+hold-horizon-annotated buy plan:
+
+1. **Conviction**: all committed horizons score the latest cross-section;
+   per-horizon z-scores blend weighted by `horizon_reliability` =
+   `max(ICIR, 0.05) × (1.0 if leak_pass else 0.35)`.
+2. **Hold horizon**: `choose_hold_horizon` picks, per name, the conformal
+   band's best `annualized_edge / annualized_downside × reliability`
+   (edge annualized linearly, downside by √t). Hold = that horizon; the band's
+   median/hi/lo become target/stretch/stop.
+3. **Gates**: playbook compliance per BUY (blocked names reported with
+   reasons); composite flag board scales deployable budget
+   (`budget × deployment_fraction`).
+4. **Sizing**: `portfolio/allocate.py` — Kelly conviction (band
+   edge/downside) blended 50/50 with HRP on an **RMT-cleaned covariance**
+   (Marchenko–Pastur noise eigenvalues flattened to their mean before
+   single-linkage clustering + recursive bisection). Per-name cap with
+   pro-rata excess redistribution; dollars → fractional/whole shares;
+   sub-minimum allocations dropped and redistributed.
+5. **Ledger**: each position is recorded as a falsifiable prediction (§11.2).
+
+### 11.2 Decision ledger (`ts ledger`)
+
+`monitoring/ledger.py` — the self-scoring feedback loop. Append-only JSONL
+under `data/ledger/` (`predictions.jsonl` + `resolutions.jsonl`; a resolution
+never mutates a prediction; ids are deterministic
+`sha1(ticker|as_of|horizon|source)` so re-runs dedup). `resolve_ledger` scores
+each prediction once its horizon has elapsed **in trading days on the ticker's
+own price index**: directional hit, band coverage (the ~90% conformal promise,
+checked on the system's own picks), realised vs forecast return.
+`calibration_report` aggregates by (source, horizon): hit rate, coverage,
+avg forecast vs realised, Spearman IC of conviction vs outcome. Surfaced as
+`ts ledger [--resolve]` and the 📒 Calibration Ledger dashboard page. The
+resolved ledger doubles as future training data for a meta-labeling stage.
+
 ---
 
 ## 12. Playbook engine
@@ -569,6 +606,8 @@ ts train             # ensemble (5d)
 ts train-forecast    # long-horizon best models (+ --models lstm,gru) → models_store/
 ts train-intervals   # conformal price-bound models
 ts analyze TICKER    # decision + report (bounds, SHAP, narration)
+ts invest 2000       # budget → gated, sized, hold-annotated buy plan (+ ledger)
+ts ledger --resolve  # score matured predictions: hit rate, coverage, IC
 ts bounds TICKER     # calibrated low/median/high per horizon
 ts complexity TICKER # nonlinear fingerprint
 ts daily             # full pipeline + paper rebalance + report

@@ -253,6 +253,10 @@ ts bounds MSFT                    # min/median/max price over 5d…12m, calibrat
 ts train-forecast                 # 21/63/126/252d best models → models_store/ (ICIR-ranked)
 ts commands                       # grouped directory of every command (or: ts commands --write)
 
+# Budget → buy plan + the system's scored track record (V4)
+ts invest 2000                    # what to buy, how many shares, how long to hold
+ts ledger --resolve               # score matured predictions: hit rate, coverage, IC
+
 # Full daily flow
 ts backtest momentum_rotation     # vectorized backtest with metrics
 ts daily                          # full pipeline + paper rebalance + report
@@ -504,6 +508,52 @@ batch**, so peak RAM is O(batch); GPU/host caches are released between folds. Sa
 maths, ~60× less memory — `--all --cv cpcv` now trains within budget. Inference
 (`ts picks`) was also fixed to window a sequence model correctly instead of feeding
 it a flat row.
+
+## V4 — budget-aware invest planner + self-scoring decision ledger
+
+The decision stack now answers the actual question — *"I have $X right now:
+what do I buy, how much of each, and how long do I hold?"* — and then **keeps
+score of its own answers** so trust is earned, not assumed.
+
+**Invest planner** ([`decision/invest.py`](src/trading_system/decision/invest.py),
+`ts invest 2000`, dashboard **💰 Invest Planner**):
+
+1. **Conviction** — every committed `models_store/` horizon (21/63/126/252d)
+   scores the latest cross-section; per-horizon z-scores blend into one
+   conviction weighted by honest quality (ICIR, ×0.35 haircut when that
+   horizon's leakage gate failed).
+2. **Hold horizon** — per name, the calibrated conformal band picks the horizon
+   with the best *annualized* reward-to-downside × model reliability. That
+   horizon is the recommended holding period; the band's median / stretch /
+   conformal-lower become the review levels (target / stretch / stop).
+3. **Gates** — each BUY clears playbook compliance (never-buy, lockouts, caps,
+   semi freeze) and the composite flag board scales deployment (YELLOW → only
+   half the budget deploys; the rest is an explicit cash reserve). Blocked
+   names are *reported with reasons*, not hidden.
+4. **Sizing** ([`portfolio/allocate.py`](src/trading_system/portfolio/allocate.py)) —
+   conviction (Kelly on band edge/downside) blended 50/50 with **Hierarchical
+   Risk Parity** on an **RMT-cleaned** covariance (Marchenko–Pastur noise
+   eigenvalues flattened before clustering — the same spectral theory as §RMT,
+   now steering allocation, not just features). Per-name cap with pro-rata
+   excess redistribution, then dollars → fractional + whole shares.
+
+**Decision ledger** ([`monitoring/ledger.py`](src/trading_system/monitoring/ledger.py),
+`ts ledger`, dashboard **📒 Calibration Ledger**): every plan position is
+appended to an immutable JSONL ledger (`data/ledger/`) as a falsifiable
+prediction — entry, band, horizon, conviction, model, composite state. Once its
+horizon matures (measured in *trading days* on the ticker's own price index),
+`ts ledger --resolve` scores it: directional **hit rate**, **band coverage**
+(did the ~90% conformal promise hold on the system's own picks?), realised vs
+forecast return, and the rank-IC of conviction vs outcome — grouped by horizon
+and source. This is the system's continuously-evolving feedback loop: the
+numbers that tell you whether to trust it more or less this quarter, and the
+training data for a future meta-labeling stage (sizing by P(the model is right)).
+
+```bash
+ts invest 2000                 # gated, sized, hold-annotated plan (+ ledger log)
+ts invest 500 --top 4 --write  # smaller tranche, write reports/invest/*.md+json
+ts ledger --resolve            # score everything that has matured
+```
 
 ## Universes
 

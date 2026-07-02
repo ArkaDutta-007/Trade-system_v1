@@ -6,8 +6,10 @@ Primary pages:
   🔍 Stock Screener    — filter by momentum, vol, RSI
   📋 Decision Reports  — full per-ticker analysis reports
 
-Simulation:
+Portfolio:
+  💰 Invest Planner    — budget → gated, sized, hold-horizon buy plan
   💼 Paper Simulation  — clean forward paper trading (reset, fresh $10k)
+  📒 Calibration Ledger — the system's scored track record (hit/coverage/IC)
   ⚡ Live Prices       — quasi-realtime price overlay
   🤖 Agent Analysis    — ReAct thought chain + SHAP waterfall per ticker
 
@@ -184,7 +186,7 @@ with st.sidebar:
                         "🌐 Universe Overview", "🎯 Trade Signals"],
         "🔮 Forecasts": ["📈 Future Predictions", "📋 Decision Reports", "🤖 Agent Analysis"],
         "🧠 Models": ["🧠 Model Comparison", "📊 Strategy Backtest", "⚙️ Strategy Catalog"],
-        "💼 Portfolio": ["💼 Paper Simulation"],
+        "💼 Portfolio": ["💰 Invest Planner", "💼 Paper Simulation", "📒 Calibration Ledger"],
     }
     section = st.selectbox("Section", list(NAV_GROUPS), key="nav_section_main")
     page = st.radio("Page", NAV_GROUPS[section], label_visibility="collapsed", key="nav_page")
@@ -213,6 +215,14 @@ if page == "🚦 Trading Desk":
 elif page == "🧭 Playbook":
     from scripts import desk
     desk.render_playbook(cfg)
+
+elif page == "💰 Invest Planner":
+    from scripts import invest_desk
+    invest_desk.render_invest(cfg)
+
+elif page == "📒 Calibration Ledger":
+    from scripts import invest_desk
+    invest_desk.render_ledger(cfg)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page: Trade Signals  (PRIMARY PAGE)

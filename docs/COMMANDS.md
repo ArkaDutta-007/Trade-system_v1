@@ -27,6 +27,8 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 
 | Command | What it does |
 | --- | --- |
+| `ts invest` | ★ Budget → buy plan: what, how many shares, how long to hold |
+| `ts ledger` | Scored track record: hit rate, band coverage, conviction IC |
 | `ts picks` | ★ Long-term buy plan: what/when/entry/target/stop, ranked |
 | `ts analyze` | Single-symbol decision + report (bounds, SHAP, narration) |
 | `ts analyze-all` | Run analyze across the whole universe |
