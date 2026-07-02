@@ -1,39 +1,53 @@
 {
-  "created_at": 1782789492.8490305,
-  "created_at_iso": "2026-06-29T23:18:12",
+  "created_at": 1782978044.2614937,
+  "created_at_iso": "2026-07-02T03:40:44",
   "compute": "linux_gpu \u00b7 14 workers \u00b7 67GB RAM \u00b7 GPU=CUDA \u00b7 lgbm=cpu \u00b7 xgb=cuda",
+  "train_config": {
+    "neutralize": true,
+    "universe_weight": 0.5,
+    "priority_universe": "core",
+    "n_features": 86
+  },
   "horizons": {
     "21": {
-      "best_model": "lgbm",
-      "icir": 0.619,
-      "ic_mean": 0.0131,
-      "hit_rate": 0.487,
-      "leak_pass": false,
-      "trained_through": "2026-05-28"
+      "best_model": "ridge",
+      "icir": 0.969,
+      "univ_icir": 0.969,
+      "ic_mean": 0.028,
+      "hit_rate": 0.508,
+      "leak_pass": true,
+      "deflation_pass": true,
+      "trained_through": "2026-06-01"
     },
     "63": {
-      "best_model": "ridge",
-      "icir": 0.312,
-      "ic_mean": 0.0249,
-      "hit_rate": 0.562,
+      "best_model": "xgb",
+      "icir": 0.746,
+      "univ_icir": 0.746,
+      "ic_mean": 0.0142,
+      "hit_rate": 0.52,
       "leak_pass": false,
-      "trained_through": "2026-03-27"
+      "deflation_pass": true,
+      "trained_through": "2026-03-31"
     },
     "126": {
-      "best_model": "ridge",
-      "icir": 0.195,
-      "ic_mean": 0.0244,
-      "hit_rate": 0.634,
+      "best_model": "xgb",
+      "icir": 0.836,
+      "univ_icir": 0.836,
+      "ic_mean": 0.0291,
+      "hit_rate": 0.526,
       "leak_pass": false,
-      "trained_through": "2025-12-24"
+      "deflation_pass": true,
+      "trained_through": "2025-12-29"
     },
     "252": {
-      "best_model": "hist_gbm",
-      "icir": 1.258,
-      "ic_mean": 0.1054,
-      "hit_rate": 0.66,
+      "best_model": "ridge",
+      "icir": 1.574,
+      "univ_icir": 1.574,
+      "ic_mean": 0.1178,
+      "hit_rate": 0.543,
       "leak_pass": true,
-      "trained_through": "2025-06-26"
+      "deflation_pass": true,
+      "trained_through": "2025-06-30"
     }
   }
 }
