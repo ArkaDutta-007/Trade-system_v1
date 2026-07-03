@@ -258,6 +258,7 @@ ts commands                       # grouped directory of every command (or: ts c
 # Budget → buy plan + the system's scored track record (V4)
 ts invest 2000                    # what to buy, how many shares, how long to hold
 ts ledger --resolve               # score matured predictions: hit rate, coverage, IC
+ts train-meta                     # V4.3 meta-labeling: P(forecast right | state) → sizing multiplier
 ts discover                       # moonshot scan: EDGAR spinoffs/listings/IPOs + sleepers
 ts tab                            # money-level scoreboard: every portfolio vs SPY
 

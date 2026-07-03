@@ -89,7 +89,8 @@ def render_invest(cfg) -> None:
                 "Weight": s["weight"], "Entry": s["entry"],
                 "Median target": s["median_target"], "Stretch": s["stretch_target"],
                 "Stop": s["stop"], "Hold": s["hold"],
-                "Ann. edge": s["annualized_edge"], "R/Downside": s["reward_downside"],
+                "Ann. edge": s["annualized_edge"], "P(right)": s.get("meta_p"),
+                "R/Downside": s["reward_downside"],
                 "Model": f"{s.get('model')} ({s.get('hold_days')}d"
                          f"{', leak-gate FAIL' if s.get('leak_pass') is False else ''})",
                 "Timing": s["timing"],
@@ -107,6 +108,10 @@ def render_invest(cfg) -> None:
                 "Stretch": st.column_config.NumberColumn(format="$%.2f"),
                 "Stop": st.column_config.NumberColumn(format="$%.2f"),
                 "Ann. edge": st.column_config.NumberColumn(format="percent"),
+                "P(right)": st.column_config.NumberColumn(
+                    format="percent",
+                    help="Meta-labeling: calibrated P(this call is right | "
+                         "market state); position sizes are scaled by it"),
             },
         )
 

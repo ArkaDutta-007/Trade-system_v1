@@ -19,6 +19,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | --- | --- |
 | `ts train` | Walk-forward 14-model ensemble (5d target) |
 | `ts train-forecast` | ★ Long-horizon best models (trees+RNN/LSTM/GRU) via purged CV |
+| `ts train-meta` | Meta-labeling: P(forecast right | state) → sizing multiplier |
 | `ts train-intervals` | Conformalized quantile price-bound models (90% coverage) |
 | `ts bounds` | Show lower/median/upper price bounds for a ticker |
 | `ts backtest` | Vectorized backtest of a strategy with metrics |

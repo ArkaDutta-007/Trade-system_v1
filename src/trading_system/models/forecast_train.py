@@ -195,6 +195,9 @@ class HorizonResult:
     trained_through: str = ""
     cv_mode: str = "walkforward"
     lookback: int = 64
+    # the winner's out-of-sample predictions across all CV folds — the
+    # "pseudo-ledger" that trains the meta-labeling stage (ts train-meta)
+    oos_predictions: object = None      # pl.DataFrame | None
 
 
 # ── Core ──────────────────────────────────────────────────────────────────────
@@ -290,6 +293,9 @@ def train_horizon(
     active_set = list(active)
     pruned_at: dict[str, int] = {}
     n_viable = 0
+    # per-family OOS predictions [(test_idx, preds)] — the winner's become the
+    # pseudo-ledger for meta-labeling
+    oos_store: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {k: [] for k in active}
     for s in splits:
         ytr, yte = y[s.train_idx], y[s.test_idx]
         if len(s.train_idx) < 200 or len(s.test_idx) < 20:
@@ -302,8 +308,10 @@ def train_horizon(
                 mat = _mat(name)
                 m = _new_estimator(name)  # fresh estimator per fold
                 m.fit(mat[s.train_idx], ytr)
+                preds = np.asarray(m.predict(mat[s.test_idx])).ravel()
                 per_model_folds[name].append(
-                    _fold_metrics(yte, m.predict(mat[s.test_idx]), dte, priority_mask=pmask))
+                    _fold_metrics(yte, preds, dte, priority_mask=pmask))
+                oos_store[name].append((np.asarray(s.test_idx), preds))
                 if name in SEQUENCE_MODELS:
                     del m
                     _free_torch()
@@ -381,6 +389,22 @@ def train_horizon(
     except Exception as e:
         leak = {"error": str(e), "pass": None}
 
+    # ── Pseudo-ledger: the winner's OOS predictions across folds ─────────────
+    # Under CPCV a (ticker,date) can sit in several test paths — kept as-is
+    # (path multiplicity ≈ mild bagging); the meta trainer purges by date.
+    oos_frame = None
+    winner_oos = oos_store.get(best_name) or []
+    if winner_oos:
+        idx = np.concatenate([i for i, _ in winner_oos])
+        prd = np.concatenate([p for _, p in winner_oos])
+        tickers_all = sub["ticker"].to_numpy()
+        oos_frame = pl.DataFrame({
+            "ticker": tickers_all[idx].tolist(),
+            "date": dates_arr[idx].tolist(),   # python date objects → pl.Date
+            "y_pred": prd.astype(np.float64),
+            "y_true": y[idx],
+        }).with_columns(pl.col("date").cast(pl.Date))
+
     # ── Refit best on all fully-labeled rows ─────────────────────────────────
     best = _new_estimator(best_name)
     best.fit(best_mat, y)
@@ -398,7 +422,7 @@ def train_horizon(
         horizon=horizon, feature_columns=feat_cols, per_model=per_model,
         best_model_name=best_name, best_model=best, leakage_gate=leak,
         deflation=deflation, n_rows=len(X), trained_through=trained_through,
-        cv_mode=cv_mode, lookback=lookback,
+        cv_mode=cv_mode, lookback=lookback, oos_predictions=oos_frame,
     )
 
 

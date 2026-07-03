@@ -427,6 +427,25 @@ ICIR 1.10 / IC +0.124 / 64% hit / gate PASS.
   trial count. The panel is also sorted once across all horizons instead of
   per horizon.
 
+### 9.6a Meta-labeling (`ts train-meta`, V4.3)
+
+López de Prado's second stage. `ts train-forecast` now persists the winning
+family's **out-of-sample predictions across all CV folds**
+(`forecast/<h>d/oos_predictions.parquet` — the *pseudo-ledger*: thousands of
+honest (prediction, outcome) pairs, no waiting for the live ledger).
+`models/meta.py` trains a per-horizon LightGBM classifier on
+`hit = sign(y_pred)==sign(y_true)` conditioned on **state, not alpha**: the
+nonlinear fingerprint (Hurst, permutation/sample entropy, RQA determinism,
+early-warning, tail index, LPPLS), RMT systematic fraction, vol/regime/macro
+context, plus the signal's within-date shape (rank pct, z, sign) and
+cross-sectional dispersion/breadth — "is this name currently in a
+*forecastable* state?". Same purged walk-forward splitter as the primary
+(labels span the same [d, d+h]); probabilities **isotonic-calibrated on
+pooled OOS folds**; reported AUC/Brier-skill/decile-lift are OOS-only.
+`ts invest` then sizes by **weight × P(right)** (`meta_p` on every position
+and ledger record, `P✓` column in CLI/dashboard). Missing meta models degrade
+gracefully to unscaled sizing.
+
 ### 9.6 Long-term decision artifact (`ts picks`)
 `decision/longterm.py` packages the committed forecaster + conformal bounds into a
 ranked plan: **entry** (last close), **add-on-dip** (1m lower band), **median &

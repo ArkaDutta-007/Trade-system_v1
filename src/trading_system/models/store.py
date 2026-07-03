@@ -84,6 +84,10 @@ def save_forecast_results(results: dict, store_dir: Path, compute_summary: str =
             "trained_through": res.trained_through,
         }
         (hd / "metrics.json").write_text(json.dumps(metrics, indent=2, default=str))
+        oos = getattr(res, "oos_predictions", None)
+        if oos is not None and getattr(oos, "height", 0):
+            # the winner's OOS pseudo-ledger — input to `ts train-meta`
+            oos.write_parquet(hd / "oos_predictions.parquet")
         best = res.per_model.get(res.best_model_name, {})
         manifest["horizons"][str(h)] = {
             "best_model": res.best_model_name,

@@ -728,6 +728,81 @@ def picks(
         rprint(f"[green]Wrote {md}[/green]")
 
 
+@app.command("train-meta")
+def train_meta(
+    config: str = "configs/default.yaml",
+    horizons: str = typer.Option("", help="comma-sep horizons (empty = every horizon with an OOS pseudo-ledger)"),
+    n_splits: int = typer.Option(5, help="purged walk-forward folds for the meta CV"),
+):
+    """Meta-labeling: train P(forecast is right | market state) per horizon.
+
+    Uses the pseudo-ledger written by `ts train-forecast` (the winning
+    family's out-of-sample predictions across all CV folds) to train a
+    second-stage classifier on the nonlinear/state fingerprint. `ts invest`
+    then sizes positions by weight × P(right). Probabilities are isotonic-
+    calibrated on purged OOS folds — they mean what they say.
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.models.meta import train_meta_for_horizon, save_meta
+
+    cfg = get_config(config)
+    store = cfg.project_root / "models_store"
+    gold = cfg.path("data_gold") / "features.parquet"
+    if not gold.exists():
+        rprint("[red]No gold features — run `ts features` first.[/red]")
+        raise typer.Exit(1)
+    feat = pl.read_parquet(gold)
+
+    if horizons.strip():
+        hz = [int(h) for h in horizons.split(",") if h.strip()]
+    else:
+        hz = sorted(
+            int(p.parent.name[:-1])
+            for p in (store / "forecast").glob("*d/oos_predictions.parquet")
+        )
+    if not hz:
+        rprint("[red]No OOS pseudo-ledger found — retrain first: "
+               "`ts train-forecast` now writes forecast/<h>d/oos_predictions.parquet.[/red]")
+        raise typer.Exit(1)
+
+    console = Console()
+    t = Table(title="Meta-labeling — P(forecast right | state), purged OOS")
+    for c in ["Horizon", "Rows", "AUC", "Base hit", "Brier skill",
+              "Top−bottom decile", "Verdict"]:
+        t.add_column(c, justify="right")
+    trained = 0
+    for h in hz:
+        oos_path = store / "forecast" / f"{h}d" / "oos_predictions.parquet"
+        if not oos_path.exists():
+            rprint(f"[yellow]{h}d: no oos_predictions.parquet — skipping "
+                   "(retrain this horizon first).[/yellow]")
+            continue
+        try:
+            bundle = train_meta_for_horizon(
+                pl.read_parquet(oos_path), feat, h, n_splits=n_splits)
+        except ValueError as e:
+            rprint(f"[yellow]{h}d: {e}[/yellow]")
+            continue
+        save_meta(bundle, h, store)
+        m = bundle["metrics"]
+        auc = m["auc_mean"] or 0.0
+        lift = m["top_minus_bottom_decile"]
+        useful = auc >= 0.53 and (lift or 0) > 0.02
+        t.add_row(
+            f"{h}d", str(m["n_rows"]),
+            f"{auc:.3f}", f"{m['base_hit_rate']:.1%}",
+            f"{m['brier_skill']:+.3f}" if m["brier_skill"] is not None else "—",
+            f"{lift:+.1%}",
+            "[green]USEFUL[/green]" if useful else "[yellow]WEAK — sizing impact will be mild[/yellow]",
+        )
+        trained += 1
+    console.print(t)
+    if trained:
+        rprint(f"[green]Saved {trained} meta model(s) → models_store/meta/ — "
+               "`ts invest` now sizes by weight × P(right).[/green]")
+
+
 @app.command()
 def invest(
     budget: float = typer.Argument(..., help="dollar budget to deploy right now"),
@@ -780,16 +855,23 @@ def invest(
         console = Console()
         t = Table(show_lines=False)
         for c in ["#", "Ticker", "$", "Shares", "Wt", "Entry", "Median", "Stretch",
-                  "Stop", "Hold", "Ann.Edge", "Timing"]:
+                  "Stop", "Hold", "Ann.Edge", "P✓", "Timing"]:
             t.add_column(c, justify="right")
         for i, s in enumerate(plan["positions"], 1):
+            mp = s.get("meta_p")
+            mp_c = "green" if (mp or 0) >= 0.55 else ("yellow" if (mp or 0) >= 0.45 else "red")
             t.add_row(
                 str(i), f"[bold]{s['ticker']}[/bold]", f"${s['dollars']:,.0f}",
                 f"{s['shares']:.3f}", f"{s['weight']*100:.1f}%", f"${s['entry']:.2f}",
                 f"${s['median_target']:.2f}", f"${s['stretch_target']:.2f}",
                 f"[red]${s['stop']:.2f}[/red]", s["hold"],
-                f"[green]{s['annualized_edge']*100:+.0f}%[/green]", s["timing"],
+                f"[green]{s['annualized_edge']*100:+.0f}%[/green]",
+                f"[{mp_c}]{mp:.0%}[/{mp_c}]" if mp is not None else "—",
+                s["timing"],
             )
+        if plan.get("meta_applied"):
+            rprint("[dim]P✓ = calibrated P(the call is right | market state) — "
+                   "meta-labeling; sizes are scaled by it.[/dim]")
         console.print(t)
         for s in plan["positions"]:
             for w in s.get("warnings", []):
@@ -2154,6 +2236,7 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
     "Forecasting & models": [
         ("train", "Walk-forward 14-model ensemble (5d target)"),
         ("train-forecast", "★ Long-horizon best models (trees+RNN/LSTM/GRU) via purged CV"),
+        ("train-meta", "Meta-labeling: P(forecast right | state) → sizing multiplier"),
         ("train-intervals", "Conformalized quantile price-bound models (90% coverage)"),
         ("bounds", "Show lower/median/upper price bounds for a ticker"),
         ("backtest", "Vectorized backtest of a strategy with metrics"),

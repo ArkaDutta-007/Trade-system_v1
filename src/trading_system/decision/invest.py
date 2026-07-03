@@ -152,6 +152,7 @@ def build_invest_plan(
     # 1. score every committed horizon, blend into one conviction ---------------
     reliability: dict[int, float] = {}
     zscores: dict[int, dict[str, float]] = {}
+    raw_scores: dict[int, dict[str, float]] = {}   # meta-labeling needs raw preds
     for h, meta_h in sorted(horizon_meta.items()):
         loaded = load_forecast_model(h, store_dir)
         if loaded is None:
@@ -166,6 +167,7 @@ def build_invest_plan(
         sd = s.std()
         z = (s - s.mean()) / sd if sd > 1e-12 else np.zeros_like(s)
         zscores[h] = dict(zip(tickers_h, z))
+        raw_scores[h] = dict(zip(tickers_h, s))
         reliability[h] = horizon_reliability(meta_h)
     if not zscores:
         raise RuntimeError("no committed forecaster could score the latest cross-section")
@@ -258,6 +260,25 @@ def build_invest_plan(
             "warnings": warnings,
             "bounds_method": b.get("method", "conformal"),
         })
+
+    # 3b. meta-labeling: scale conviction by calibrated P(the call is right) ----
+    # (López de Prado's second stage — same forecasts, better-placed bets)
+    meta_applied = False
+    try:
+        from ..models.meta import load_meta, meta_probabilities
+        meta_p_cache: dict[int, dict[str, float]] = {}
+        for h in {s["hold_days"] for s in selected}:
+            bundle = load_meta(h, store_dir)
+            if bundle is not None and h in raw_scores:
+                meta_p_cache[h] = meta_probabilities(bundle, latest, raw_scores[h])
+        for s in selected:
+            p = meta_p_cache.get(s["hold_days"], {}).get(s["ticker"])
+            s["meta_p"] = round(float(p), 3) if p is not None else None
+            if p is not None:
+                kelly[s["ticker"]] *= max(float(p), 0.05)
+                meta_applied = True
+    except Exception as e:
+        logger.warning(f"meta-labeling unavailable ({e}) — sizing without P(right)")
 
     # 4. size: conviction × RMT-cleaned HRP, then budget → shares ---------------
     moonshot_frac = float(np.clip(moonshot_frac, 0.0, 0.30))
@@ -362,6 +383,7 @@ def build_invest_plan(
         "cash_reserve": round(budget - invested, 2),
         "composite": snapshot.composite.to_dict() if snapshot else None,
         "horizon_reliability": {h: round(v, 4) for h, v in reliability.items()},
+        "meta_applied": meta_applied,
         "positions": selected,
         "moonshot": moonshot_positions,
         "moonshot_frac": moonshot_frac,
@@ -388,6 +410,7 @@ def build_invest_plan(
                     "band_median": s["median_target"],
                     "band_hi": s["stretch_target"],
                     "conviction": s["conviction"],
+                    "meta_p": s.get("meta_p"),
                     "weight": s.get("weight"),
                     "dollars": s.get("dollars"),
                     "model": s.get("model"),
