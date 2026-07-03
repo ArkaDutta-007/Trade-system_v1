@@ -1,0 +1,105 @@
+{
+  "horizon": 21,
+  "n_rows": 5551380,
+  "n_folds": 5,
+  "auc_mean": 0.5139,
+  "auc_std": 0.0198,
+  "base_hit_rate": 0.5016,
+  "brier": 0.2498,
+  "brier_base": 0.25,
+  "brier_skill": 0.0006,
+  "decile_lift": [
+    {
+      "p_mean": 0.486,
+      "hit_rate": 0.4873,
+      "n": 349379
+    },
+    {
+      "p_mean": 0.4863,
+      "hit_rate": 0.4821,
+      "n": 349379
+    },
+    {
+      "p_mean": 0.4863,
+      "hit_rate": 0.4895,
+      "n": 349379
+    },
+    {
+      "p_mean": 0.4927,
+      "hit_rate": 0.4927,
+      "n": 349379
+    },
+    {
+      "p_mean": 0.499,
+      "hit_rate": 0.4978,
+      "n": 349379
+    },
+    {
+      "p_mean": 0.5054,
+      "hit_rate": 0.5074,
+      "n": 349378
+    },
+    {
+      "p_mean": 0.5136,
+      "hit_rate": 0.5131,
+      "n": 349378
+    },
+    {
+      "p_mean": 0.5155,
+      "hit_rate": 0.5162,
+      "n": 349378
+    },
+    {
+      "p_mean": 0.5155,
+      "hit_rate": 0.4921,
+      "n": 349378
+    },
+    {
+      "p_mean": 0.5159,
+      "hit_rate": 0.538,
+      "n": 349378
+    }
+  ],
+  "top_minus_bottom_decile": 0.0507,
+  "meta_columns": [
+    "amihud_illiq_20",
+    "beta_60",
+    "bull_regime",
+    "chaos01_120",
+    "corr_bench_60",
+    "dominant_period_120",
+    "high_vol_regime",
+    "higuchi_fd_120",
+    "hill_tail_alpha_250",
+    "hurst_dfa_120",
+    "hurst_rs_120",
+    "lppls_conf_250",
+    "lyapunov_60",
+    "macro_hy_oas",
+    "macro_hy_oas_chg_20d",
+    "macro_hy_oas_z_252",
+    "macro_vix",
+    "macro_vix_chg_20d",
+    "macro_vix_z_252",
+    "macro_yield_curve",
+    "macro_yield_curve_chg_20d",
+    "macro_yield_curve_z_252",
+    "ret_kurt_60",
+    "ret_skew_60",
+    "rmt_market_beta",
+    "rmt_systematic_frac",
+    "rough_vol_h_120",
+    "rqa_determinism_60",
+    "sample_entropy_60",
+    "spectral_entropy_60",
+    "vol_20d",
+    "vol_60d",
+    "vol_of_vol_60",
+    "wavelet_hf_60",
+    "pred_rank_pct",
+    "pred_z",
+    "pred_sign",
+    "xsec_mom_dispersion",
+    "xsec_breadth"
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "horizon": 126,
+  "n_rows": 5384635,
+  "n_folds": 5,
+  "auc_mean": 0.5167,
+  "auc_std": 0.0237,
+  "base_hit_rate": 0.535,
+  "brier": 0.2479,
+  "brier_base": 0.2488,
+  "brier_skill": 0.0034,
+  "decile_lift": [
+    {
+      "p_mean": 0.4757,
+      "hit_rate": 0.4768,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5137,
+      "hit_rate": 0.5118,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5284,
+      "hit_rate": 0.5291,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5417,
+      "hit_rate": 0.5415,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5484,
+      "hit_rate": 0.5633,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5484,
+      "hit_rate": 0.5866,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5484,
+      "hit_rate": 0.5849,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5484,
+      "hit_rate": 0.4996,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5484,
+      "hit_rate": 0.5865,
+      "n": 338534
+    },
+    {
+      "p_mean": 0.5485,
+      "hit_rate": 0.4701,
+      "n": 338534
+    }
+  ],
+  "top_minus_bottom_decile": -0.0067,
+  "meta_columns": [
+    "amihud_illiq_20",
+    "beta_60",
+    "bull_regime",
+    "chaos01_120",
+    "corr_bench_60",
+    "dominant_period_120",
+    "high_vol_regime",
+    "higuchi_fd_120",
+    "hill_tail_alpha_250",
+    "hurst_dfa_120",
+    "hurst_rs_120",
+    "lppls_conf_250",
+    "lyapunov_60",
+    "macro_hy_oas",
+    "macro_hy_oas_chg_20d",
+    "macro_hy_oas_z_252",
+    "macro_vix",
+    "macro_vix_chg_20d",
+    "macro_vix_z_252",
+    "macro_yield_curve",
+    "macro_yield_curve_chg_20d",
+    "macro_yield_curve_z_252",
+    "ret_kurt_60",
+    "ret_skew_60",
+    "rmt_market_beta",
+    "rmt_systematic_frac",
+    "rough_vol_h_120",
+    "rqa_determinism_60",
+    "sample_entropy_60",
+    "spectral_entropy_60",
+    "vol_20d",
+    "vol_60d",
+    "vol_of_vol_60",
+    "wavelet_hf_60",
+    "pred_rank_pct",
+    "pred_z",
+    "pred_sign",
+    "xsec_mom_dispersion",
+    "xsec_breadth"
+  ]
+}

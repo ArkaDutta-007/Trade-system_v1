@@ -1,6 +1,6 @@
 {
-  "created_at": 1782978044.2614937,
-  "created_at_iso": "2026-07-02T03:40:44",
+  "created_at": 1783118960.7919698,
+  "created_at_iso": "2026-07-03T18:49:20",
   "compute": "linux_gpu \u00b7 14 workers \u00b7 67GB RAM \u00b7 GPU=CUDA \u00b7 lgbm=cpu \u00b7 xgb=cuda",
   "train_config": {
     "neutralize": true,
@@ -11,43 +11,43 @@
   "horizons": {
     "21": {
       "best_model": "ridge",
-      "icir": 0.969,
-      "univ_icir": 0.969,
-      "ic_mean": 0.028,
-      "hit_rate": 0.508,
-      "leak_pass": true,
+      "icir": 1.596,
+      "univ_icir": 0.947,
+      "ic_mean": 0.021,
+      "hit_rate": 0.502,
+      "leak_pass": false,
       "deflation_pass": true,
-      "trained_through": "2026-06-01"
+      "trained_through": "2026-06-02"
     },
     "63": {
-      "best_model": "xgb",
-      "icir": 0.746,
-      "univ_icir": 0.746,
-      "ic_mean": 0.0142,
-      "hit_rate": 0.52,
-      "leak_pass": false,
-      "deflation_pass": true,
-      "trained_through": "2026-03-31"
-    },
-    "126": {
-      "best_model": "xgb",
-      "icir": 0.836,
-      "univ_icir": 0.836,
-      "ic_mean": 0.0291,
-      "hit_rate": 0.526,
-      "leak_pass": false,
-      "deflation_pass": true,
-      "trained_through": "2025-12-29"
-    },
-    "252": {
-      "best_model": "ridge",
-      "icir": 1.574,
-      "univ_icir": 1.574,
-      "ic_mean": 0.1178,
-      "hit_rate": 0.543,
+      "best_model": "hist_gbm",
+      "icir": 3.397,
+      "univ_icir": 1.198,
+      "ic_mean": 0.0545,
+      "hit_rate": 0.527,
       "leak_pass": true,
       "deflation_pass": true,
-      "trained_through": "2025-06-30"
+      "trained_through": "2026-04-01"
+    },
+    "126": {
+      "best_model": "lgbm",
+      "icir": 2.225,
+      "univ_icir": 1.126,
+      "ic_mean": 0.0574,
+      "hit_rate": 0.529,
+      "leak_pass": true,
+      "deflation_pass": true,
+      "trained_through": "2025-12-30"
+    },
+    "252": {
+      "best_model": "lgbm",
+      "icir": 3.034,
+      "univ_icir": 1.661,
+      "ic_mean": 0.1037,
+      "hit_rate": 0.53,
+      "leak_pass": true,
+      "deflation_pass": true,
+      "trained_through": "2025-07-01"
     }
   }
 }
