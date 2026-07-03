@@ -28,6 +28,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | Command | What it does |
 | --- | --- |
 | `ts invest` | ★ Budget → buy plan: what, how many shares, how long to hold |
+| `ts discover` | ★ Moonshot discovery: spinoffs/new listings/sleepers with asymmetric upside |
 | `ts ledger` | Scored track record: hit rate, band coverage, conviction IC |
 | `ts picks` | ★ Long-term buy plan: what/when/entry/target/stop, ranked |
 | `ts analyze` | Single-symbol decision + report (bounds, SHAP, narration) |
@@ -60,6 +61,7 @@ All commands are invoked as `ts <command>`. Run `ts <command> --help` for option
 | --- | --- |
 | `ts paper-trade` | Run the ML/ensemble paper portfolio |
 | `ts paper-status` | Show paper-portfolio holdings + equity |
+| `ts tab` | Running P&L tab of named invest portfolios vs SPY |
 | `ts daily` | Full daily pipeline (ingest→features→signals→rebalance) |
 
 ## Agent (LLM)

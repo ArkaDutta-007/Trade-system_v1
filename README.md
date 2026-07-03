@@ -31,10 +31,12 @@ trading-system/
 │   ├── backtesting/     # vectorized, event_driven, slippage, metrics, engines/
 │   ├── models/          # ensemble, train, validation (purged CV), forecast_train,
 │   │                    #   intervals (conformal bounds), store, predict, shap_analysis
-│   ├── decision/        # analyze, bounds, explain, groundings, report
-│   ├── portfolio/       # sizing (incl. distribution-based), risk, order_policy
-│   ├── execution/       # paper_broker, live_broker (stub)
-│   ├── monitoring/      # drift (KS tests), pnl_attribution, alerts, shap_viz
+│   ├── decision/        # analyze, bounds, explain, groundings, report,
+│   │                    #   invest (budget→plan), longterm (picks), discover (moonshots)
+│   ├── portfolio/       # sizing, allocate (RMT-cleaned HRP), risk, order_policy
+│   ├── execution/       # paper_broker, tranches (portfolio tabs), live_broker (stub)
+│   ├── monitoring/      # drift (KS tests), pnl_attribution, alerts, shap_viz,
+│   │                    #   ledger (self-scoring decision ledger)
 │   ├── quality/         # data_checks, leakage tests
 │   ├── pipeline/        # daily flow
 │   ├── storage/         # DuckDB + Parquet helpers
@@ -256,6 +258,8 @@ ts commands                       # grouped directory of every command (or: ts c
 # Budget → buy plan + the system's scored track record (V4)
 ts invest 2000                    # what to buy, how many shares, how long to hold
 ts ledger --resolve               # score matured predictions: hit rate, coverage, IC
+ts discover                       # moonshot scan: EDGAR spinoffs/listings/IPOs + sleepers
+ts tab                            # money-level scoreboard: every portfolio vs SPY
 
 # Full daily flow
 ts backtest momentum_rotation     # vectorized backtest with metrics
@@ -553,6 +557,72 @@ training data for a future meta-labeling stage (sizing by P(the model is right))
 ts invest 2000                 # gated, sized, hold-annotated plan (+ ledger log)
 ts invest 500 --top 4 --write  # smaller tranche, write reports/invest/*.md+json
 ts ledger --resolve            # score everything that has matured
+```
+
+## V4.2 — moonshot discovery + portfolio tabs
+
+Two additions on top of the V4 planner: a disciplined way to *hunt*
+asymmetric under-the-radar names, and a money-level scoreboard that tells
+you whether any of it beat just buying SPY.
+
+**Moonshot discovery** ([`decision/discover.py`](src/trading_system/decision/discover.py),
+`ts discover`) — "find the next SNDK" decomposed into things free data can
+actually measure:
+
+* **Structural freshness**
+  ([`ingestion/edgar_discovery.py`](src/trading_system/ingestion/edgar_discovery.py)) —
+  big asymmetric winners are often names the market hasn't finished pricing
+  because they barely have a price history. EDGAR full-text search surfaces
+  the point-in-time paper trail: **Form 10-12B/10-12G** spinoff registrations
+  (the SNDK-from-WDC signature), **8-A12B** exchange listings ("about to
+  trade"), **424B4** final IPO prospectuses.
+* **Under-covered sleepers** — the quiet end of the configured universe:
+  bottom-decile dollar volume, but with attention *igniting* — Wikipedia
+  pageview momentum, news-tone momentum, insider Form-4 activity (the V3.9
+  deep-history signals earning their keep).
+* **Asymmetry** — each candidate's own daily returns are bootstrapped into a
+  12-month terminal distribution; picks are ranked by upside(95th) /
+  |downside(5th)|, boosted by category and attention ignition. A moonshot is
+  only rational when the band is genuinely lopsided.
+
+Honesty is enforced, not aspirational: names too young to band go to a
+**watch-list** (never scored), sub-$1 and < $2M/day dollar-volume names are
+excluded outright (an exit must exist), the bands are bootstrap fans — not
+conformal, the committed models have no coverage of fresh listings — and
+every pick is ledgered under **`source='moonshot'`**, so `ts ledger`
+eventually answers the only question that matters: *do your moonshots
+actually pay?*
+
+**Capped sleeve inside a tranche** — `ts invest 2000 --moonshot 0.15` carves
+at most 15% (hard cap 30%) of the deployable budget into an equal-weight
+speculative sleeve (≤ 4 playbook-cleared discovery names, 12m hold, the
+bootstrap band as target/stretch/stop); the rest is the normal core plan.
+Size is the risk control.
+
+**Portfolio tabs** ([`execution/tranches.py`](src/trading_system/execution/tranches.py),
+`ts tab`) — `--portfolio p1` books the plan's fills into a named virtual
+portfolio (`data/portfolios/p1.json`, committable), and `ts tab` marks every
+book to market: cost, value, P&L, stop/target flags per position — plus the
+**SPY counterfactual**: the benchmark shares the *same dollars* would have
+bought at the *same closes*, so the tab always shows **alpha vs "you could
+have just bought SPY"**, never raw P&L alone. `ts tab p1` drills into one
+book. Books are just names — run parallel strategies as `p1`…`p5`
+(core-only vs core+moonshot, different budgets) and let the tabs argue it
+out. This is paper accounting at plan closes: it measures decision quality,
+not execution (no slippage or commissions).
+
+The accounting refuses to lie: booking is **idempotent** per plan (re-running
+a cached plan can't double a book), a ticker with no price history has its
+cost **held out of P&L** (unknown ≠ loss) rather than faked at $0 — with
+non-universe moonshot names priced ad hoc via yfinance — the SPY
+counterfactual covers only the dollars it can actually match (no
+extrapolation), and each moonshot is individually capped at 10% of the
+deployable tranche.
+
+```bash
+ts discover                                    # ranked moonshot scan + watch-list (+ ledger)
+ts invest 2000 --moonshot 0.15 --portfolio p1  # 15% speculative sleeve, booked into tab p1
+ts tab                                         # every portfolio vs its SPY counterfactual
 ```
 
 ## Universes

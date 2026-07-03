@@ -57,19 +57,25 @@ def choose_hold_horizon(
 
     ``bands`` is ``bounds["horizons"]`` (label → {days, price, return});
     edge is annualized linearly, downside by √t, and each horizon is weighted
-    by its model's reliability. Returns ``(days, quality_info)`` or ``None``
-    when no horizon has positive median edge.
+    by its model's reliability. Only horizons with a committed forecaster
+    (present in ``reliability``) are eligible — a band alone (e.g. the 5d
+    interval bundle) must not set a hold period, or annualization lets an
+    unmodeled short horizon win on a fat weekly band. Returns
+    ``(days, quality_info)`` or ``None`` when no eligible horizon has positive
+    median edge.
     """
     best: tuple[float, int, dict] | None = None
     for label, hz in bands.items():
         h = int(hz.get("days") or 0)
+        rel = reliability.get(h)
+        if rel is None:
+            continue
         r = hz.get("return") or {}
         med, lo = float(r.get("median", 0.0)), float(r.get("lo", 0.0))
         if h <= 0 or med <= 0:
             continue
         ann_edge = med * 252.0 / h
         ann_dn = max(_DOWNSIDE_FLOOR, -lo) * np.sqrt(252.0 / h)
-        rel = reliability.get(h, 0.05)
         quality = ann_edge / ann_dn * rel
         info = {
             "label": label,
@@ -116,6 +122,7 @@ def build_invest_plan(
     min_position: float = 50.0,
     use_flags: bool = True,
     record: bool = True,
+    moonshot_frac: float = 0.0,
 ) -> dict[str, Any]:
     """Turn a dollar budget into a gated, sized, hold-horizon-annotated buy plan."""
     cfg = cfg or get_config()
@@ -253,11 +260,13 @@ def build_invest_plan(
         })
 
     # 4. size: conviction × RMT-cleaned HRP, then budget → shares ---------------
+    moonshot_frac = float(np.clip(moonshot_frac, 0.0, 0.30))
+    core_deployable = deployable * (1.0 - moonshot_frac)
     tickers = [s["ticker"] for s in selected]
     rets = _trailing_returns(ohlcv, tickers) if len(tickers) >= 2 else None
     weights = blend_weights(tickers, kelly, rets, max_weight=max_weight)
     positions, leftover = budget_to_positions(
-        weights, {t: float(px[t]) for t in tickers}, deployable,
+        weights, {t: float(px[t]) for t in tickers}, core_deployable,
         min_position=min_position,
     )
     dropped_small = [t for t in tickers if t not in positions]
@@ -271,8 +280,80 @@ def build_invest_plan(
                         "reason": f"allocation below ${min_position:.0f} minimum"})
     invested = round(sum(s["dollars"] for s in selected), 2)
 
+    # 4b. speculative moonshot sleeve (capped, equal-weight, separately labeled)
+    moonshot_positions: list[dict] = []
+    if moonshot_frac > 0:
+        sleeve_budget = deployable * moonshot_frac
+        try:
+            from .discover import build_discovery
+            disc = build_discovery(cfg, record=record)
+            eligible = []
+            core_names = {s["ticker"] for s in selected}
+            for p in disc.get("picks", []):
+                tk, price = p["ticker"], p.get("last_price")
+                if not price or tk in core_names or p.get("status") != "ok":
+                    continue
+                if playbook is not None and portfolio is not None:
+                    res = check_trade(tk, "BUY", 0.0, playbook, portfolio,
+                                      snapshot=snapshot, prices={tk: price},
+                                      sma50={})
+                    if not res.allowed:
+                        skipped.append({"ticker": tk,
+                                        "reason": f"moonshot blocked: {'; '.join(res.violations)}"})
+                        continue
+                eligible.append(p)
+                if len(eligible) >= 4:
+                    break
+            # fit the sleeve to the budget: fewer names beats dropping the
+            # sleeve when budget/min_position only supports 1-3 positions
+            max_names = max(1, min(4, int(sleeve_budget // min_position)))
+            eligible = eligible[:max_names]
+            # per-name cap: a lone pick must not absorb the whole sleeve —
+            # moonshots are individually capped at 10% of the deployable tranche
+            per_name = min(sleeve_budget / len(eligible), 0.10 * deployable) \
+                if eligible else 0.0
+            if per_name >= min_position:
+                for p in eligible:
+                    price = float(p["last_price"])
+                    a = p["asym"]
+                    moonshot_positions.append({
+                        "ticker": p["ticker"],
+                        "sleeve": "moonshot",
+                        "category": p["category"],
+                        "conviction": p["moonshot_score"],
+                        "entry": round(price, 2),
+                        "dollars": round(per_name, 2),
+                        "shares": round(per_name / price, 4),
+                        "weight": round(per_name / deployable, 4),
+                        "hold_days": 252,
+                        "hold": _HOLD_LABEL[252],
+                        "median_target": round(price * (1 + a["median"]), 2),
+                        "stretch_target": round(price * (1 + a["hi"]), 2),
+                        "stop": round(price * (1 + a["lo"]), 2),
+                        "expected_return": a["median"],
+                        "annualized_edge": a["median"],
+                        "reward_downside": a["asym"],
+                        "model": f"discover/{p['category']}",
+                        "timing": "speculative — size is the risk control",
+                        "warnings": ["moonshot sleeve: bootstrap band, no model "
+                                     "coverage — judge via its own ledger"],
+                        "bounds_method": "mc_bootstrap_adhoc",
+                    })
+            elif eligible:
+                skipped.append({"ticker": ",".join(p["ticker"] for p in eligible),
+                                "reason": f"moonshot sleeve ${sleeve_budget:.0f} too small "
+                                          f"to split ≥ ${min_position:.0f}/name"})
+        except Exception as e:
+            logger.warning(f"moonshot sleeve failed: {e}")
+        invested = round(invested + sum(m["dollars"] for m in moonshot_positions), 2)
+
+    spy = (ohlcv.filter((pl.col("ticker") == "SPY") & (pl.col("date") <= as_of))
+           .sort("date").tail(1))
+    benchmark_close = float(spy["adj_close"][0]) if spy.height else None
+
     plan: dict[str, Any] = {
         "as_of": str(as_of),
+        "benchmark_close": benchmark_close,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "budget": round(budget, 2),
         "deployment_fraction": deploy_frac,
@@ -282,6 +363,8 @@ def build_invest_plan(
         "composite": snapshot.composite.to_dict() if snapshot else None,
         "horizon_reliability": {h: round(v, 4) for h, v in reliability.items()},
         "positions": selected,
+        "moonshot": moonshot_positions,
+        "moonshot_frac": moonshot_frac,
         "skipped": skipped,
         "note": (
             "Long-horizon tranche plan. Hold = the horizon where the calibrated "

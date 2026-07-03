@@ -8,6 +8,10 @@ Primary pages:
 
 Portfolio:
   💰 Invest Planner    — budget → gated, sized, hold-horizon buy plan
+  🏦 Portfolio Tabs    — named virtual books of invest fills, marked vs a SPY
+                         counterfactual (did the decisions actually make money?)
+  🔬 Moonshot Discovery — EDGAR spinoffs/new listings/IPOs + in-universe
+                         sleepers, asymmetry-scored (speculative, own ledger)
   💼 Paper Simulation  — clean forward paper trading (reset, fresh $10k)
   📒 Calibration Ledger — the system's scored track record (hit/coverage/IC)
   ⚡ Live Prices       — quasi-realtime price overlay
@@ -182,11 +186,12 @@ with st.sidebar:
     # Grouped, two-level navigation — 14 pages collapsed into 5 intuitive sections
     NAV_GROUPS = {
         "🚦 Desk": ["🚦 Trading Desk", "🧭 Playbook", "⚡ Live Prices"],
-        "🔭 Research": ["🔭 Stock Analysis", "🔍 Stock Screener",
+        "🔭 Research": ["🔭 Stock Analysis", "🔍 Stock Screener", "🔬 Moonshot Discovery",
                         "🌐 Universe Overview", "🎯 Trade Signals"],
         "🔮 Forecasts": ["📈 Future Predictions", "📋 Decision Reports", "🤖 Agent Analysis"],
         "🧠 Models": ["🧠 Model Comparison", "📊 Strategy Backtest", "⚙️ Strategy Catalog"],
-        "💼 Portfolio": ["💰 Invest Planner", "💼 Paper Simulation", "📒 Calibration Ledger"],
+        "💼 Portfolio": ["💰 Invest Planner", "🏦 Portfolio Tabs",
+                         "💼 Paper Simulation", "📒 Calibration Ledger"],
     }
     section = st.selectbox("Section", list(NAV_GROUPS), key="nav_section_main")
     page = st.radio("Page", NAV_GROUPS[section], label_visibility="collapsed", key="nav_page")
@@ -219,6 +224,14 @@ elif page == "🧭 Playbook":
 elif page == "💰 Invest Planner":
     from scripts import invest_desk
     invest_desk.render_invest(cfg)
+
+elif page == "🏦 Portfolio Tabs":
+    from scripts import invest_desk
+    invest_desk.render_tabs(cfg)
+
+elif page == "🔬 Moonshot Discovery":
+    from scripts import invest_desk
+    invest_desk.render_discovery(cfg)
 
 elif page == "📒 Calibration Ledger":
     from scripts import invest_desk

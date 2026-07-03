@@ -57,20 +57,21 @@ operational gotchas. Companion to the [README](../README.md) and the auto-genera
 src/trading_system/
 ├── ingestion/      market_data, macro_fred, calendar_events, sec_filings,
 │                   news_events (+ finnhub_news, newsdata_news, google_news_fetcher,
-│                   dedup, rag), llm_extractor, realtime
+│                   dedup, rag), edgar_discovery (spinoffs/IPOs), llm_extractor, realtime
 ├── features/       technical, extended_features, regimes, macro, event_features,
 │                   nonlinear, nonlinear_panel, nonlinear_report, rmt,
 │                   reserve (catalog), context (macro inputs), build
 ├── models/         ensemble, train, validation (purged CV), forecast_train,
 │                   sequence (RNN/LSTM/GRU), intervals (conformal), implied_vol,
 │                   store, predict, shap_analysis, model_registry
-├── decision/       analyze, bounds, explain, groundings, report
+├── decision/       analyze, bounds, explain, groundings, report,
+│                   invest (budget→plan), longterm (picks), discover (moonshots)
 ├── flags/          O/F/I/S/C live flag board + composite regime
 ├── playbook/       standing rules, compliance, cycles, blotter, briefing
 ├── portfolio/      sizing (incl. distribution-based), risk, order_policy
 ├── backtesting/    vectorized, event_driven, slippage, metrics, engines/
-├── execution/      paper_broker, live_broker (stub)
-├── monitoring/     drift, pnl_attribution, alerts, shap_viz
+├── execution/      paper_broker, tranches (portfolio tabs), live_broker (stub)
+├── monitoring/     drift, pnl_attribution, alerts, shap_viz, ledger (decision ledger)
 ├── quality/        data_checks, leakage
 ├── pipeline/       daily flow
 ├── storage/        DuckDB + Parquet helpers
@@ -527,6 +528,95 @@ avg forecast vs realised, Spearman IC of conviction vs outcome. Surfaced as
 `ts ledger [--resolve]` and the 📒 Calibration Ledger dashboard page. The
 resolved ledger doubles as future training data for a meta-labeling stage.
 
+### 11.3 Moonshot discovery (`ts discover`)
+
+`decision/discover.py` + `ingestion/edgar_discovery.py` — a speculative
+sourcing layer for asymmetric, under-the-radar names. Two candidate pools:
+
+1. **Structural freshness** — EDGAR full-text search (`efts.sec.gov`) over a
+   lookback window (default 120d) for the forms that precede big repricings:
+   **10-12B / 10-12G** (spinoff registration — the SNDK signature),
+   **8-A12B** (exchange listing: "about to trade"), **424B4** (final IPO
+   prospectus). Filer CIKs map to tickers via the official
+   `company_tickers.json`; responses are disk-cached for a day and reuse the
+   SEC fair-access throttle from `sec_history`.
+2. **In-universe sleepers** — the quiet end of the gold panel: a
+   low-dollar-volume percentile blended with an **attention-ignition**
+   z-score, `0.4·z(wiki_attention_mom) + 0.3·z(news_tone_mom) +
+   0.2·z(sec_form4_90d) + 0.1·z(news_buzz)`; sleeper rank =
+   `0.5·quiet + 0.5·tanh(ignition)`.
+
+**Score.** Each candidate's own daily returns (de-meaned — no drift
+extrapolation) are bootstrapped into 2 000 twelve-month paths;
+`asym = upside(q95) / max(|downside(q5)|, 5%)`. Then:
+
+```
+moonshot_score = asym × category_boost × (1 + 0.25·tanh(ignition_z))
+category_boost:  spinoff 1.3 · new_listing 1.15 · ipo 1.1 · sleeper 1.0
+```
+
+**Honesty rules** (design constraints, not afterthoughts):
+
+* Names with too little history to band (< ~40 daily returns) go to a
+  **watch-list** — reported, never scored.
+* Sub-$1 prices and < **$2M/day** median dollar volume are excluded — an
+  exit must exist before the entry is interesting.
+* The 12m bands are **bootstrap fans, not conformal** — the committed models
+  have no coverage of fresh listings; every position carries that warning
+  (`bounds_method="mc_bootstrap_adhoc"`).
+* The sleeve is **capped twice**: `ts invest --moonshot f` clips `f` to
+  ≤ 0.30 of the deployable tranche and splits it equal-weight over
+  playbook-cleared picks (count fitted so each position clears the $50
+  minimum, ≤ 4 names), with each moonshot individually capped at **10% of
+  deployable** — a lone pick can never absorb the whole sleeve.
+* Every pick is ledgered under **`source="moonshot"`** so the §11.2
+  calibration report scores the moonshot strategy separately from the core
+  planner — the sleeve is judged by its own numbers, not by stories. Fresh
+  names outside bronze OHLCV are priced **ad hoc via yfinance** at resolve
+  time, so their predictions mature like any other (and their `as_of` is
+  stamped from their own price history, not the gold panel's date).
+
+Reports land in `reports/discover/discover_<date>.{md,json}`.
+
+### 11.4 Portfolio tabs (`ts tab`)
+
+`execution/tranches.py` — named virtual portfolios ("tabs"): the money-level
+scoreboard the prediction-level ledger (§11.2) cannot provide.
+
+* **Book format** — `data/portfolios/<name>.json`, an append-only list of
+  fills (committable, so every machine shares the tabs). Each fill records
+  ticker / shares / plan-close price / dollars, the plan's hold horizon and
+  review levels (stop, median target), and the **SPY counterfactual
+  shares** the same dollars would have bought at the same close.
+  `ts invest … --portfolio p1` books the plan (core + moonshot sleeve) into
+  `p1`; repeat tranches into the same name merge at mark time into a
+  cost-weighted average (review levels come from the **latest** fill).
+  Booking is **idempotent per plan**: each fill carries a `plan_id` (the
+  plan's `generated_at`), so re-booking the same cached plan — a Streamlit
+  re-render, a repeated CLI call — skips fills already present instead of
+  doubling the book.
+* **MTM semantics** — `ts tab` marks every book at the latest close in
+  bronze OHLCV, pricing non-universe (moonshot) names **ad hoc via
+  yfinance**; `ts tab p1` drills into one book with per-position P&L,
+  hold-day counts and `hit_stop` / `hit_target` flags (last close vs the
+  plan's review levels). All prices are **plan closes**: this measures
+  *decision quality*, not execution — no slippage, no commissions,
+  fractional shares assumed. A ticker that still can't be priced has its
+  cost **held out of P&L entirely** (`unpriced_cost`, reported separately) —
+  unknown is not a loss, and a fake $0 valuation would poison P&L% and
+  alpha.
+* **SPY counterfactual + alpha** — `spy_value` is what the same dollars,
+  deployed into SPY on the same dates, are worth at the same mark. The
+  comparison is strictly **covered-cost vs covered-cost** (no pro-rata
+  extrapolation onto fills the benchmark can't match):
+  `alpha_vs_spy = (pnl_pct − spy_pnl_pct) × cost`. The only fair null
+  hypothesis — "you could have just bought SPY" — is baked into every
+  readout.
+* **Parallel strategies** — books are just names: run `p1`…`p5` with
+  different planner flags (core-only vs `--moonshot 0.15`, different
+  budgets) and compare tabs. The ledger scores predictions; the tabs score
+  money.
+
 ---
 
 ## 12. Playbook engine
@@ -616,6 +706,8 @@ ts train-forecast    # long-horizon best models (+ --models lstm,gru) → models
 ts train-intervals   # conformal price-bound models
 ts analyze TICKER    # decision + report (bounds, SHAP, narration)
 ts invest 2000       # budget → gated, sized, hold-annotated buy plan (+ ledger)
+ts discover          # moonshot scan: EDGAR spinoffs/listings/IPOs + sleepers (+ ledger)
+ts tab [name]        # portfolio tabs: money-level P&L + alpha vs SPY counterfactual
 ts ledger --resolve  # score matured predictions: hit rate, coverage, IC
 ts bounds TICKER     # calibrated low/median/high per horizon
 ts complexity TICKER # nonlinear fingerprint

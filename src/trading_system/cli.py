@@ -738,6 +738,8 @@ def invest(
     no_flags: bool = typer.Option(False, "--no-flags", help="skip the live flag board (no composite gating)"),
     no_record: bool = typer.Option(False, "--no-record", help="don't log the plan to the decision ledger"),
     write: bool = typer.Option(False, "--write", help="also write reports/invest/*.md + .json"),
+    portfolio: str = typer.Option("", "--portfolio", "-p", help="book this plan's fills into a named virtual portfolio (see 'ts tab')"),
+    moonshot: float = typer.Option(0.0, "--moonshot", help="fraction of the tranche (0-0.3) for the speculative discovery sleeve"),
     universe: str = UNIVERSE_OPT,
 ):
     """Budget → buy plan: what to buy, how many shares, and how long to hold.
@@ -746,6 +748,9 @@ def invest(
     honest ICIR), picks each name's hold horizon from its calibrated band,
     gates through playbook compliance + the composite flag board, sizes with
     RMT-cleaned HRP × Kelly, and logs each position to the decision ledger.
+    `--moonshot` carves out a capped speculative sleeve from `ts discover`;
+    `--portfolio` books the fills into a named tab so `ts tab` can answer
+    whether the plans actually make money vs just buying SPY.
     """
     from rich.table import Table
     from rich.console import Console
@@ -756,7 +761,7 @@ def invest(
         plan = build_invest_plan(
             cfg, budget=budget, top_n=top, max_weight=max_weight,
             min_position=min_position, use_flags=not no_flags,
-            record=not no_record,
+            record=not no_record, moonshot_frac=moonshot,
         )
     except (FileNotFoundError, RuntimeError) as e:
         rprint(f"[red]{e}[/red]")
@@ -789,12 +794,112 @@ def invest(
         for s in plan["positions"]:
             for w in s.get("warnings", []):
                 rprint(f"[yellow]⚠ {s['ticker']}: {w}[/yellow]")
+    sleeve = plan.get("moonshot") or []
+    if sleeve:
+        t = Table(title="Moonshot sleeve (speculative)", show_lines=False)
+        for c in ["#", "Ticker", "Cat", "$", "Shares", "Entry", "Median",
+                  "Stretch", "Stop", "Score"]:
+            t.add_column(c, justify="right")
+        for i, s in enumerate(sleeve, 1):
+            t.add_row(
+                str(i), f"[bold]{s['ticker']}[/bold]", s["category"],
+                f"${s['dollars']:,.0f}", f"{s['shares']:.3f}", f"${s['entry']:.2f}",
+                f"${s['median_target']:.2f}", f"${s['stretch_target']:.2f}",
+                f"[red]${s['stop']:.2f}[/red]", f"{s['conviction']:.2f}",
+            )
+        Console().print(t)
+        for s in sleeve:
+            for w in s.get("warnings", []):
+                rprint(f"[yellow]⚠ {s['ticker']}: {w}[/yellow]")
     if plan.get("skipped"):
         rprint("[dim]Not bought: " + " · ".join(
             f"{s['ticker']} ({s['reason']})" for s in plan["skipped"][:8]) + "[/dim]")
     rprint("[dim]⚠ Survivorship-biased universe; review at stop/target; not financial advice.[/dim]")
     if write:
         md = write_invest_plan(cfg, plan)
+        rprint(f"[green]Wrote {md}[/green]")
+    if portfolio:
+        # money-level accountability: book the fills so `ts tab` can score them
+        from trading_system.execution.tranches import book_fills
+
+        from trading_system.execution.tranches import load_book
+        try:
+            n_before = len(load_book(cfg, portfolio).get("fills", []))
+            if plan["positions"]:
+                book_fills(cfg, portfolio, plan["positions"], as_of=plan["as_of"],
+                           spy_close=plan["benchmark_close"], source="invest",
+                           cash_reserve=plan["cash_reserve"],
+                           plan_id=plan["generated_at"])
+            if sleeve:
+                book_fills(cfg, portfolio, sleeve, as_of=plan["as_of"],
+                           spy_close=plan["benchmark_close"], source="moonshot",
+                           cash_reserve=0.0, plan_id=plan["generated_at"])
+            booked = len(load_book(cfg, portfolio).get("fills", [])) - n_before
+        except ValueError as e:
+            rprint(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+        if booked:
+            rprint(f"[green]Booked {booked} fills into portfolio {portfolio} — "
+                   f"track with ts tab {portfolio}[/green]")
+        else:
+            rprint("[yellow]Nothing to book — the plan has no positions.[/yellow]")
+
+
+@app.command()
+def discover(
+    config: str = "configs/default.yaml",
+    top: int = typer.Option(12, help="max number of ranked moonshot picks"),
+    lookback: int = typer.Option(120, help="EDGAR lookback days"),
+    write: bool = typer.Option(False, "--write", help="also write reports/discover/*.md + .json"),
+    no_record: bool = typer.Option(False, "--no-record", help="don't log picks to the decision ledger"),
+):
+    """Moonshot discovery: spinoffs, new listings and igniting sleepers.
+
+    Pools EDGAR structural freshness (spinoffs / new listings / IPOs the
+    market hasn't finished pricing) with under-covered in-universe sleepers
+    whose attention is igniting, then ranks by the lopsidedness of each
+    name's bootstrap 12m band. Candidates feed `ts invest --moonshot` and
+    are ledgered under source='moonshot' so the sleeve is judged by its own
+    calibration, not by stories.
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.decision.discover import build_discovery, write_discovery
+
+    cfg = get_config(config)
+    try:
+        plan = build_discovery(cfg, top_n=top, lookback_days=lookback,
+                               record=not no_record)
+    except (FileNotFoundError, RuntimeError) as e:
+        rprint(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    rprint(f"[bold]Moonshot discovery[/bold] · as of {plan['as_of']} · "
+           f"EDGAR fresh {plan['n_fresh']} · sleepers screened {plan['n_sleepers']}"
+           + (f" · ledger +{plan['ledger_recorded']}" if plan.get("ledger_recorded") else ""))
+    if not plan["picks"]:
+        rprint("[yellow]No band-able moonshot candidates today — see the watchlist below.[/yellow]")
+    else:
+        t = Table(show_lines=False)
+        for c in ["#", "Ticker", "Cat", "Score", "Price", "12m Lo/Med/Hi", "Asym", "Signal"]:
+            t.add_column(c, justify="right")
+        for i, p in enumerate(plan["picks"], 1):
+            a = p["asym"]
+            sig = p.get("filed") or (
+                f"ignition z={p['ignition_z']:+.2f}"
+                if p.get("ignition_z") is not None else "—")
+            t.add_row(
+                str(i), f"[bold]{p['ticker']}[/bold]", p["category"],
+                f"{p['moonshot_score']:.2f}", f"${p['last_price']:.2f}",
+                f"[red]{a['lo']:+.0%}[/red] / {a['median']:+.0%} / [green]{a['hi']:+.0%}[/green]",
+                f"{a['asym']:.1f}", str(sig),
+            )
+        Console().print(t)
+    for w in plan.get("watchlist", []):
+        rprint(f"[dim]watch: {w['ticker']} ({w['category']}) — {w['status']}[/dim]")
+    rprint(f"[dim]{plan['note']}[/dim]")
+    if write:
+        md = write_discovery(cfg, plan)
         rprint(f"[green]Wrote {md}[/green]")
 
 
@@ -857,6 +962,117 @@ def ledger(
             rprint(f"  {str(r.get('as_of'))[:10]} {r['ticker']:<6} {r['horizon_days']:>4}d "
                    f"entry ${r.get('entry_price', 0):.2f} → "
                    + (f"{rr*100:+.1f}% {status}" if rr is not None else f"{status}"))
+
+
+@app.command()
+def tab(
+    name: str = typer.Argument("", help="portfolio name; empty = summary of all"),
+    config: str = "configs/default.yaml",
+):
+    """Running P&L tab of the named virtual portfolios vs a SPY counterfactual.
+
+    `ts invest <budget> --portfolio <name>` books each plan's fills into a
+    named paper book; this marks every book to the latest local close and
+    shows the question the prediction ledger can't answer: did the decisions
+    actually make money — and did they beat just buying SPY with the same
+    dollars on the same day?
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from trading_system.execution.tranches import mark_all, mark_to_market
+
+    cfg = get_config(config)
+    console = Console()
+
+    if not name:
+        books = mark_all(cfg, fetch_missing=True)
+        if not books:
+            rprint("[yellow]No portfolios yet — book one with "
+                   "`ts invest <budget> --portfolio <name>`.[/yellow]")
+            raise typer.Exit()
+        t = Table(show_lines=False)
+        for c in ["Portfolio", "Fills", "Since", "Cost", "Value", "P&L $",
+                  "P&L %", "SPY %", "Alpha $", "As of"]:
+            t.add_column(c, justify="right")
+        for b in books:
+            if b.get("error"):
+                t.add_row(f"[bold]{b['name']}[/bold]", str(b.get("n_fills", 0)),
+                          *["—"] * 7, f"[yellow]{b['error']}[/yellow]")
+                continue
+            if not b.get("n_fills"):
+                t.add_row(f"[bold]{b['name']}[/bold]", "0",
+                          *["—"] * 7, "[dim]empty[/dim]")
+                continue
+            pc = "green" if b["pnl"] >= 0 else "red"
+            spy = b.get("spy_pnl_pct")
+            alpha = b.get("alpha_vs_spy")
+            ac = "green" if (alpha or 0) > 0 else "red"
+            t.add_row(
+                f"[bold]{b['name']}[/bold]", str(b["n_fills"]),
+                str(b["first_fill"])[:10],
+                f"${b['cost']:,.2f}", f"${b['value']:,.2f}",
+                f"[{pc}]{b['pnl']:+,.2f}[/{pc}]",
+                f"[{pc}]{(b['pnl_pct'] or 0) * 100:+.2f}%[/{pc}]",
+                f"{spy * 100:+.2f}%" if spy is not None else "—",
+                f"[{ac}]{alpha:+,.2f}[/{ac}]" if alpha is not None else "—",
+                str(b["as_of"]),
+            )
+        console.print(t)
+        raise typer.Exit()
+
+    try:
+        s = mark_to_market(cfg, name, fetch_missing=True)
+    except ValueError as e:
+        rprint(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except FileNotFoundError:
+        rprint("[red]No OHLCV — run `ts ingest` first.[/red]")
+        raise typer.Exit(1)
+    if not s.get("n_fills"):
+        rprint(f"[yellow]Portfolio '{name}' has no fills — book one with "
+               f"`ts invest <budget> --portfolio {name}`.[/yellow]")
+        raise typer.Exit()
+    if s.get("error"):
+        rprint(f"[yellow]{s['name']}: {s['error']}[/yellow]")
+        raise typer.Exit(1)
+
+    pc = "green" if s["pnl"] >= 0 else "red"
+    spy = s.get("spy_pnl_pct")
+    alpha = s.get("alpha_vs_spy")
+    ac = "green" if (alpha or 0) > 0 else "red"
+    rprint(f"[bold]{s['name']}[/bold] · {s['n_fills']} fills since "
+           f"{str(s['first_fill'])[:10]} · as of {s['as_of']}")
+    rprint(f"cost ${s['cost']:,.2f} → value ${s['value']:,.2f} · "
+           f"P&L [{pc}]${s['pnl']:+,.2f} ({(s['pnl_pct'] or 0) * 100:+.2f}%)[/{pc}]"
+           + (f" · SPY {spy * 100:+.2f}%" if spy is not None else "")
+           + (f" · alpha [{ac}]${alpha:+,.2f}[/{ac}]" if alpha is not None else ""))
+    t = Table(show_lines=False)
+    for c in ["Ticker", "Shares", "Avg cost", "Last", "Cost", "Value",
+              "P&L $", "P&L %", "Hold", "Flags"]:
+        t.add_column(c, justify="right")
+    for p in s["positions"]:
+        ppc = "green" if (p["pnl"] or 0) >= 0 else "red"
+        flags = []
+        if p.get("hit_stop"):
+            flags.append("[red]STOP[/red]")
+        if p.get("hit_target"):
+            flags.append("[green]TGT[/green]")
+        t.add_row(
+            f"[bold]{p['ticker']}[/bold]", f"{p['shares']:.3f}",
+            f"${p['avg_cost']:.2f}",
+            f"${p['last_price']:.2f}" if p["last_price"] is not None else "—",
+            f"${p['cost']:,.2f}",
+            f"${p['value']:,.2f}" if p["value"] is not None else "—",
+            f"[{ppc}]{p['pnl']:+,.2f}[/{ppc}]" if p["pnl"] is not None else "—",
+            f"[{ppc}]{p['pnl_pct'] * 100:+.2f}%[/{ppc}]" if p["pnl_pct"] is not None else "—",
+            f"{p['hold_days']}d" if p.get("hold_days") else "—",
+            " ".join(flags),
+        )
+    console.print(t)
+    if s.get("unpriced"):
+        rprint("[yellow]⚠ No local price history for: " + ", ".join(s["unpriced"])
+               + f" (${s.get('unpriced_cost', 0):,.2f} cost held OUT of P&L) — "
+               "run `ts ingest`, or wait for the ledger's ad-hoc pricing.[/yellow]")
 
 
 @app.command()
@@ -1944,6 +2160,7 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
     ],
     "Decisions": [
         ("invest", "★ Budget → buy plan: what, how many shares, how long to hold"),
+        ("discover", "★ Moonshot discovery: spinoffs/new listings/sleepers with asymmetric upside"),
         ("ledger", "Scored track record: hit rate, band coverage, conviction IC"),
         ("picks", "★ Long-term buy plan: what/when/entry/target/stop, ranked"),
         ("analyze", "Single-symbol decision + report (bounds, SHAP, narration)"),
@@ -1967,6 +2184,7 @@ COMMAND_GROUPS: dict[str, list[tuple[str, str]]] = {
     "Paper trading": [
         ("paper-trade", "Run the ML/ensemble paper portfolio"),
         ("paper-status", "Show paper-portfolio holdings + equity"),
+        ("tab", "Running P&L tab of named invest portfolios vs SPY"),
         ("daily", "Full daily pipeline (ingest→features→signals→rebalance)"),
     ],
     "Agent (LLM)": [

@@ -48,6 +48,17 @@ class TestChooseHoldHorizon:
         days, _ = choose_hold_horizon(bands, rel)
         assert days == 21
 
+    def test_unmodeled_horizon_ineligible(self):
+        # a juicy 5d band must not set the hold period when no committed
+        # forecaster exists for 5d (annualization would let it win)
+        bands = {
+            "5d": _band(5, -0.02, 0.02, 0.05),     # ~100%+ annualized edge
+            "12m": _band(252, -0.15, 0.20, 0.60),
+        }
+        rel = {21: 0.5, 252: 1.2}                   # no 5d model
+        days, _ = choose_hold_horizon(bands, rel)
+        assert days == 252
+
     def test_annualization_math(self):
         # 3m: 6% edge over 63d → ~24% annualized
         bands = {"3m": _band(63, -0.10, 0.06, 0.20)}

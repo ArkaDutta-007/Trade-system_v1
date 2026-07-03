@@ -134,6 +134,29 @@ def resolve_ledger(cfg: Config, ohlcv: pl.DataFrame | None = None) -> dict[str, 
                 sub["adj_close"].to_numpy().astype(np.float64),
             )
 
+    # Non-universe tickers (moonshot fresh names) have no bronze history —
+    # without a fallback their predictions would sit open forever, silently
+    # breaking the "judged by its own ledger" promise. Fetch ad hoc.
+    missing = {p["ticker"] for p in todo} - set(series)
+    if missing:
+        try:
+            import yfinance as yf
+            for tk in sorted(missing):
+                try:
+                    h = yf.Ticker(tk).history(period="2y", auto_adjust=True)
+                    if h is None or h.empty:
+                        continue
+                    series[tk] = (
+                        np.array([d.date() for d in h.index.to_pydatetime()],
+                                 dtype="datetime64[D]"),
+                        h["Close"].to_numpy().astype(np.float64),
+                    )
+                except Exception as e:
+                    logger.debug(f"ledger adhoc price fetch {tk} failed: {e}")
+        except ImportError:
+            logger.warning(f"yfinance unavailable — {len(missing)} non-universe "
+                           "predictions stay open")
+
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     resolutions: list[dict] = []
     for p in todo:
