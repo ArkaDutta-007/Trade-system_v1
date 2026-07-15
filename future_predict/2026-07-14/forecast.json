@@ -1,0 +1,2390 @@
+{
+  "prediction_date": "2026-07-14",
+  "features_as_of": "2026-07-13",
+  "prices_as_of": "2026-07-13",
+  "model": "ensemble_1784069157",
+  "best_variant": "ensemble_stack_lgbm",
+  "budget": 10000.0,
+  "horizons": {
+    "1m": "2026-08-12",
+    "2m": "2026-09-10",
+    "3m": "2026-10-09",
+    "6m": "2027-01-06",
+    "12m": "2027-07-01"
+  },
+  "allocation_strategy": "dynamic_vol_adjusted",
+  "portfolio": {
+    "initial_cash": 10000.0,
+    "deployed": 3900.94,
+    "cash_reserved": 6099.06,
+    "deploy_pct": 39.0,
+    "positions": [
+      {
+        "ticker": "ARM",
+        "score": 0.655364,
+        "tier": 1,
+        "entry_price": 298.99,
+        "allocated": 306.55,
+        "shares": 1.025278,
+        "vol_20d": 0.9786
+      },
+      {
+        "ticker": "SNDK",
+        "score": 0.265786,
+        "tier": 1,
+        "entry_price": 1673.97,
+        "allocated": 195.24,
+        "shares": 0.116632,
+        "vol_20d": 1.5366
+      },
+      {
+        "ticker": "HPE",
+        "score": 0.156778,
+        "tier": 1,
+        "entry_price": 47.24,
+        "allocated": 507.97,
+        "shares": 10.752989,
+        "vol_20d": 0.5906
+      },
+      {
+        "ticker": "TEAM",
+        "score": 0.140324,
+        "tier": 1,
+        "entry_price": 96.16,
+        "allocated": 444.31,
+        "shares": 4.620506,
+        "vol_20d": 0.6752
+      },
+      {
+        "ticker": "DELL",
+        "score": 0.138219,
+        "tier": 1,
+        "entry_price": 427.11,
+        "allocated": 537.55,
+        "shares": 1.258573,
+        "vol_20d": 0.5581
+      },
+      {
+        "ticker": "SNOW",
+        "score": 0.104379,
+        "tier": 2,
+        "entry_price": 268.65,
+        "allocated": 408.71,
+        "shares": 1.52136,
+        "vol_20d": 0.4404
+      },
+      {
+        "ticker": "SMCI",
+        "score": 0.068259,
+        "tier": 2,
+        "entry_price": 27.66,
+        "allocated": 196.23,
+        "shares": 7.094305,
+        "vol_20d": 0.9173
+      },
+      {
+        "ticker": "MU",
+        "score": 0.064455,
+        "tier": 2,
+        "entry_price": 937.0,
+        "allocated": 160.29,
+        "shares": 0.171068,
+        "vol_20d": 1.123
+      },
+      {
+        "ticker": "ENTG",
+        "score": 0.041348,
+        "tier": 2,
+        "entry_price": 136.27,
+        "allocated": 137.62,
+        "shares": 1.009905,
+        "vol_20d": 1.0816
+      },
+      {
+        "ticker": "INTC",
+        "score": 0.040816,
+        "tier": 2,
+        "entry_price": 103.12,
+        "allocated": 161.42,
+        "shares": 1.565393,
+        "vol_20d": 0.9103
+      },
+      {
+        "ticker": "IREN",
+        "score": 0.032043,
+        "tier": 2,
+        "entry_price": 38.98,
+        "allocated": 126.33,
+        "shares": 3.241007,
+        "vol_20d": 0.9131
+      },
+      {
+        "ticker": "MRVL",
+        "score": 0.028059,
+        "tier": 2,
+        "entry_price": 217.53,
+        "allocated": 99.28,
+        "shares": 0.456376,
+        "vol_20d": 1.0175
+      },
+      {
+        "ticker": "STX",
+        "score": 0.027316,
+        "tier": 2,
+        "entry_price": 860.66,
+        "allocated": 102.4,
+        "shares": 0.118976,
+        "vol_20d": 0.9603
+      },
+      {
+        "ticker": "MRNA",
+        "score": 0.026089,
+        "tier": 2,
+        "entry_price": 67.01,
+        "allocated": 98.44,
+        "shares": 1.469039,
+        "vol_20d": 0.9541
+      },
+      {
+        "ticker": "LCID",
+        "score": 0.023244,
+        "tier": 2,
+        "entry_price": 5.51,
+        "allocated": 88.79,
+        "shares": 16.114274,
+        "vol_20d": 0.9425
+      },
+      {
+        "ticker": "TER",
+        "score": 0.020044,
+        "tier": 3,
+        "entry_price": 341.11,
+        "allocated": 50.0,
+        "shares": 0.14658,
+        "vol_20d": 1.1393
+      },
+      {
+        "ticker": "AEM",
+        "score": 0.019962,
+        "tier": 3,
+        "entry_price": 143.51,
+        "allocated": 92.62,
+        "shares": 0.645387,
+        "vol_20d": 0.4311
+      },
+      {
+        "ticker": "ORCL",
+        "score": 0.019688,
+        "tier": 3,
+        "entry_price": 131.54,
+        "allocated": 87.2,
+        "shares": 0.662882,
+        "vol_20d": 0.4516
+      },
+      {
+        "ticker": "APP",
+        "score": 0.018865,
+        "tier": 3,
+        "entry_price": 442.85,
+        "allocated": 50.0,
+        "shares": 0.112905,
+        "vol_20d": 0.8344
+      },
+      {
+        "ticker": "LITE",
+        "score": 0.018598,
+        "tier": 3,
+        "entry_price": 768.15,
+        "allocated": 50.0,
+        "shares": 0.065091,
+        "vol_20d": 0.8422
+      }
+    ]
+  },
+  "all_predictions": [
+    {
+      "ticker": "ARM",
+      "score": 0.655364,
+      "stance": "BUY",
+      "entry_price": 298.99
+    },
+    {
+      "ticker": "SNDK",
+      "score": 0.265786,
+      "stance": "BUY",
+      "entry_price": 1673.97
+    },
+    {
+      "ticker": "HPE",
+      "score": 0.156778,
+      "stance": "BUY",
+      "entry_price": 47.24
+    },
+    {
+      "ticker": "TEAM",
+      "score": 0.140324,
+      "stance": "BUY",
+      "entry_price": 96.16
+    },
+    {
+      "ticker": "DELL",
+      "score": 0.138219,
+      "stance": "BUY",
+      "entry_price": 427.11
+    },
+    {
+      "ticker": "SNOW",
+      "score": 0.104379,
+      "stance": "BUY",
+      "entry_price": 268.65
+    },
+    {
+      "ticker": "SMCI",
+      "score": 0.068259,
+      "stance": "BUY",
+      "entry_price": 27.66
+    },
+    {
+      "ticker": "MU",
+      "score": 0.064455,
+      "stance": "BUY",
+      "entry_price": 937.0
+    },
+    {
+      "ticker": "ENTG",
+      "score": 0.041348,
+      "stance": "BUY",
+      "entry_price": 136.27
+    },
+    {
+      "ticker": "INTC",
+      "score": 0.040816,
+      "stance": "BUY",
+      "entry_price": 103.12
+    },
+    {
+      "ticker": "IREN",
+      "score": 0.032043,
+      "stance": "BUY",
+      "entry_price": 38.98
+    },
+    {
+      "ticker": "MRVL",
+      "score": 0.028059,
+      "stance": "BUY",
+      "entry_price": 217.53
+    },
+    {
+      "ticker": "STX",
+      "score": 0.027316,
+      "stance": "BUY",
+      "entry_price": 860.66
+    },
+    {
+      "ticker": "MRNA",
+      "score": 0.026089,
+      "stance": "BUY",
+      "entry_price": 67.01
+    },
+    {
+      "ticker": "LCID",
+      "score": 0.023244,
+      "stance": "BUY",
+      "entry_price": 5.51
+    },
+    {
+      "ticker": "TER",
+      "score": 0.020044,
+      "stance": "BUY",
+      "entry_price": 341.11
+    },
+    {
+      "ticker": "AEM",
+      "score": 0.019962,
+      "stance": "BUY",
+      "entry_price": 143.51
+    },
+    {
+      "ticker": "ORCL",
+      "score": 0.019688,
+      "stance": "BUY",
+      "entry_price": 131.54
+    },
+    {
+      "ticker": "APP",
+      "score": 0.018865,
+      "stance": "BUY",
+      "entry_price": 442.85
+    },
+    {
+      "ticker": "LITE",
+      "score": 0.018598,
+      "stance": "BUY",
+      "entry_price": 768.15
+    },
+    {
+      "ticker": "KGC",
+      "score": 0.018259,
+      "stance": "BUY",
+      "entry_price": 23.48
+    },
+    {
+      "ticker": "NEM",
+      "score": 0.017977,
+      "stance": "BUY",
+      "entry_price": 93.1
+    },
+    {
+      "ticker": "STRL",
+      "score": 0.017749,
+      "stance": "BUY",
+      "entry_price": 660.04
+    },
+    {
+      "ticker": "ASML",
+      "score": 0.017401,
+      "stance": "BUY",
+      "entry_price": 1726.04
+    },
+    {
+      "ticker": "CAT",
+      "score": 0.017401,
+      "stance": "BUY",
+      "entry_price": 931.47
+    },
+    {
+      "ticker": "TOELY",
+      "score": 0.017128,
+      "stance": "BUY",
+      "entry_price": 218.25
+    },
+    {
+      "ticker": "AMD",
+      "score": 0.016837,
+      "stance": "BUY",
+      "entry_price": 534.39
+    },
+    {
+      "ticker": "FNV",
+      "score": 0.016174,
+      "stance": "BUY",
+      "entry_price": 200.49
+    },
+    {
+      "ticker": "DDOG",
+      "score": 0.016169,
+      "stance": "BUY",
+      "entry_price": 260.24
+    },
+    {
+      "ticker": "NOW",
+      "score": 0.015879,
+      "stance": "BUY",
+      "entry_price": 111.26
+    },
+    {
+      "ticker": "AMAT",
+      "score": 0.015382,
+      "stance": "BUY",
+      "entry_price": 575.39
+    },
+    {
+      "ticker": "CRWV",
+      "score": 0.015038,
+      "stance": "BUY",
+      "entry_price": 83.31
+    },
+    {
+      "ticker": "NBIS",
+      "score": 0.014949,
+      "stance": "BUY",
+      "entry_price": 210.51
+    },
+    {
+      "ticker": "LRCX",
+      "score": 0.014867,
+      "stance": "BUY",
+      "entry_price": 329.92
+    },
+    {
+      "ticker": "HUM",
+      "score": 0.014384,
+      "stance": "BUY",
+      "entry_price": 406.0
+    },
+    {
+      "ticker": "COIN",
+      "score": 0.014206,
+      "stance": "BUY",
+      "entry_price": 157.37
+    },
+    {
+      "ticker": "FCX",
+      "score": 0.014175,
+      "stance": "BUY",
+      "entry_price": 59.97
+    },
+    {
+      "ticker": "STLD",
+      "score": 0.014038,
+      "stance": "BUY",
+      "entry_price": 234.14
+    },
+    {
+      "ticker": "MCHP",
+      "score": 0.013805,
+      "stance": "BUY",
+      "entry_price": 84.23
+    },
+    {
+      "ticker": "QCOM",
+      "score": 0.013607,
+      "stance": "BUY",
+      "entry_price": 183.98
+    },
+    {
+      "ticker": "TSM",
+      "score": 0.012943,
+      "stance": "BUY",
+      "entry_price": 421.58
+    },
+    {
+      "ticker": "ALB",
+      "score": 0.011966,
+      "stance": "BUY",
+      "entry_price": 125.79
+    },
+    {
+      "ticker": "NXPI",
+      "score": 0.011805,
+      "stance": "BUY",
+      "entry_price": 278.39
+    },
+    {
+      "ticker": "RL",
+      "score": 0.011805,
+      "stance": "BUY",
+      "entry_price": 374.49
+    },
+    {
+      "ticker": "KLAC",
+      "score": 0.011794,
+      "stance": "BUY",
+      "entry_price": 222.25
+    },
+    {
+      "ticker": "DOW",
+      "score": 0.011786,
+      "stance": "BUY",
+      "entry_price": 30.37
+    },
+    {
+      "ticker": "SQNS",
+      "score": 0.01159,
+      "stance": "BUY",
+      "entry_price": 3.03
+    },
+    {
+      "ticker": "GEV",
+      "score": 0.011419,
+      "stance": "BUY",
+      "entry_price": 1042.6
+    },
+    {
+      "ticker": "CORT",
+      "score": 0.011415,
+      "stance": "BUY",
+      "entry_price": 85.9
+    },
+    {
+      "ticker": "TXN",
+      "score": 0.011363,
+      "stance": "BUY",
+      "entry_price": 298.57
+    },
+    {
+      "ticker": "SWKS",
+      "score": 0.011252,
+      "stance": "BUY",
+      "entry_price": 58.24
+    },
+    {
+      "ticker": "CSCO",
+      "score": 0.010996,
+      "stance": "BUY",
+      "entry_price": 119.25
+    },
+    {
+      "ticker": "PWR",
+      "score": 0.010642,
+      "stance": "BUY",
+      "entry_price": 646.7
+    },
+    {
+      "ticker": "FTNT",
+      "score": 0.010569,
+      "stance": "BUY",
+      "entry_price": 160.62
+    },
+    {
+      "ticker": "STZ",
+      "score": 0.010407,
+      "stance": "BUY",
+      "entry_price": 134.51
+    },
+    {
+      "ticker": "IFF",
+      "score": 0.010331,
+      "stance": "BUY",
+      "entry_price": 75.1
+    },
+    {
+      "ticker": "ADI",
+      "score": 0.010223,
+      "stance": "BUY",
+      "entry_price": 386.01
+    },
+    {
+      "ticker": "GOOGL",
+      "score": 0.010151,
+      "stance": "BUY",
+      "entry_price": 352.51
+    },
+    {
+      "ticker": "RBLX",
+      "score": 0.009875,
+      "stance": "BUY",
+      "entry_price": 55.03
+    },
+    {
+      "ticker": "CMI",
+      "score": 0.009781,
+      "stance": "BUY",
+      "entry_price": 664.39
+    },
+    {
+      "ticker": "ETN",
+      "score": 0.009781,
+      "stance": "BUY",
+      "entry_price": 402.85
+    },
+    {
+      "ticker": "GOOG",
+      "score": 0.009583,
+      "stance": "BUY",
+      "entry_price": 350.67
+    },
+    {
+      "ticker": "LULU",
+      "score": 0.009577,
+      "stance": "BUY",
+      "entry_price": 120.3
+    },
+    {
+      "ticker": "TW",
+      "score": 0.009577,
+      "stance": "BUY",
+      "entry_price": 99.68
+    },
+    {
+      "ticker": "ZS",
+      "score": 0.009575,
+      "stance": "BUY",
+      "entry_price": 141.82
+    },
+    {
+      "ticker": "HIMS",
+      "score": 0.009416,
+      "stance": "BUY",
+      "entry_price": 34.38
+    },
+    {
+      "ticker": "ETSY",
+      "score": 0.009264,
+      "stance": "BUY",
+      "entry_price": 80.53
+    },
+    {
+      "ticker": "HOOD",
+      "score": 0.009264,
+      "stance": "BUY",
+      "entry_price": 109.86
+    },
+    {
+      "ticker": "IBM",
+      "score": 0.009264,
+      "stance": "BUY",
+      "entry_price": 290.23
+    },
+    {
+      "ticker": "NTAP",
+      "score": 0.009264,
+      "stance": "BUY",
+      "entry_price": 163.93
+    },
+    {
+      "ticker": "WDAY",
+      "score": 0.009264,
+      "stance": "BUY",
+      "entry_price": 144.87
+    },
+    {
+      "ticker": "CVNA",
+      "score": 0.008896,
+      "stance": "BUY",
+      "entry_price": 64.99
+    },
+    {
+      "ticker": "SNAP",
+      "score": 0.00887,
+      "stance": "BUY",
+      "entry_price": 4.66
+    },
+    {
+      "ticker": "SBET",
+      "score": 0.008718,
+      "stance": "BUY",
+      "entry_price": 5.42
+    },
+    {
+      "ticker": "CHTR",
+      "score": 0.008697,
+      "stance": "BUY",
+      "entry_price": 131.37
+    },
+    {
+      "ticker": "NFLX",
+      "score": 0.008536,
+      "stance": "BUY",
+      "entry_price": 73.83
+    },
+    {
+      "ticker": "URI",
+      "score": 0.008527,
+      "stance": "BUY",
+      "entry_price": 1085.34
+    },
+    {
+      "ticker": "TSLA",
+      "score": 0.008521,
+      "stance": "BUY",
+      "entry_price": 394.76
+    },
+    {
+      "ticker": "OKTA",
+      "score": 0.008482,
+      "stance": "BUY",
+      "entry_price": 139.53
+    },
+    {
+      "ticker": "TWLO",
+      "score": 0.008427,
+      "stance": "BUY",
+      "entry_price": 218.24
+    },
+    {
+      "ticker": "WHR",
+      "score": 0.008385,
+      "stance": "BUY",
+      "entry_price": 38.85
+    },
+    {
+      "ticker": "QRVO",
+      "score": 0.008254,
+      "stance": "BUY",
+      "entry_price": 84.35
+    },
+    {
+      "ticker": "CNC",
+      "score": 0.008252,
+      "stance": "BUY",
+      "entry_price": 68.29
+    },
+    {
+      "ticker": "A",
+      "score": 0.007979,
+      "stance": "BUY",
+      "entry_price": 134.04
+    },
+    {
+      "ticker": "CVLT",
+      "score": 0.007834,
+      "stance": "BUY",
+      "entry_price": 148.65
+    },
+    {
+      "ticker": "AAL",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 16.31
+    },
+    {
+      "ticker": "ANET",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 181.15
+    },
+    {
+      "ticker": "DASH",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 189.57
+    },
+    {
+      "ticker": "DBX",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 29.58
+    },
+    {
+      "ticker": "DOCU",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 49.87
+    },
+    {
+      "ticker": "EAT",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 189.27
+    },
+    {
+      "ticker": "EXPE",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 265.63
+    },
+    {
+      "ticker": "HPQ",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 24.77
+    },
+    {
+      "ticker": "IQV",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 207.55
+    },
+    {
+      "ticker": "META",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 656.73
+    },
+    {
+      "ticker": "MTD",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 1299.53
+    },
+    {
+      "ticker": "NET",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 269.53
+    },
+    {
+      "ticker": "NTNX",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 55.22
+    },
+    {
+      "ticker": "PINS",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 22.6
+    },
+    {
+      "ticker": "ROKU",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 142.34
+    },
+    {
+      "ticker": "SHOP",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 124.74
+    },
+    {
+      "ticker": "U",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 30.68
+    },
+    {
+      "ticker": "UAL",
+      "score": 0.007682,
+      "stance": "BUY",
+      "entry_price": 121.16
+    },
+    {
+      "ticker": "SHECY",
+      "score": 0.007634,
+      "stance": "BUY",
+      "entry_price": 22.59
+    },
+    {
+      "ticker": "GFS",
+      "score": 0.007531,
+      "stance": "BUY",
+      "entry_price": 63.94
+    },
+    {
+      "ticker": "CF",
+      "score": 0.007461,
+      "stance": "BUY",
+      "entry_price": 120.92
+    },
+    {
+      "ticker": "APTV",
+      "score": 0.007401,
+      "stance": "BUY",
+      "entry_price": 59.23
+    },
+    {
+      "ticker": "F",
+      "score": 0.007371,
+      "stance": "BUY",
+      "entry_price": 13.85
+    },
+    {
+      "ticker": "LUV",
+      "score": 0.007236,
+      "stance": "BUY",
+      "entry_price": 47.92
+    },
+    {
+      "ticker": "BSX",
+      "score": 0.007137,
+      "stance": "BUY",
+      "entry_price": 44.65
+    },
+    {
+      "ticker": "AVGO",
+      "score": 0.00694,
+      "stance": "BUY",
+      "entry_price": 384.05
+    },
+    {
+      "ticker": "BABA",
+      "score": 0.006803,
+      "stance": "BUY",
+      "entry_price": 112.35
+    },
+    {
+      "ticker": "SFM",
+      "score": 0.00672,
+      "stance": "BUY",
+      "entry_price": 79.67
+    },
+    {
+      "ticker": "CME",
+      "score": 0.006624,
+      "stance": "BUY",
+      "entry_price": 245.1
+    },
+    {
+      "ticker": "ALGN",
+      "score": 0.006568,
+      "stance": "BUY",
+      "entry_price": 180.59
+    },
+    {
+      "ticker": "MDB",
+      "score": 0.006568,
+      "stance": "BUY",
+      "entry_price": 337.97
+    },
+    {
+      "ticker": "LYFT",
+      "score": 0.006234,
+      "stance": "BUY",
+      "entry_price": 15.67
+    },
+    {
+      "ticker": "GE",
+      "score": 0.006053,
+      "stance": "BUY",
+      "entry_price": 353.42
+    },
+    {
+      "ticker": "SPMO",
+      "score": 0.005979,
+      "stance": "BUY",
+      "entry_price": 149.73
+    },
+    {
+      "ticker": "MOS",
+      "score": 0.005894,
+      "stance": "BUY",
+      "entry_price": 22.31
+    },
+    {
+      "ticker": "BCS",
+      "score": 0.005719,
+      "stance": "BUY",
+      "entry_price": 27.29
+    },
+    {
+      "ticker": "SNPS",
+      "score": 0.005701,
+      "stance": "BUY",
+      "entry_price": 433.82
+    },
+    {
+      "ticker": "INTU",
+      "score": 0.005695,
+      "stance": "BUY",
+      "entry_price": 289.76
+    },
+    {
+      "ticker": "CRWD",
+      "score": 0.00556,
+      "stance": "BUY",
+      "entry_price": 187.91
+    },
+    {
+      "ticker": "NOC",
+      "score": 0.005558,
+      "stance": "BUY",
+      "entry_price": 541.82
+    },
+    {
+      "ticker": "RDDT",
+      "score": 0.005447,
+      "stance": "BUY",
+      "entry_price": 200.93
+    },
+    {
+      "ticker": "DD",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 132.66
+    },
+    {
+      "ticker": "DLR",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 177.92
+    },
+    {
+      "ticker": "DOV",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 214.27
+    },
+    {
+      "ticker": "EMR",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 135.38
+    },
+    {
+      "ticker": "EQIX",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 1039.53
+    },
+    {
+      "ticker": "HLT",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 322.45
+    },
+    {
+      "ticker": "MAR",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 362.87
+    },
+    {
+      "ticker": "ROST",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 219.46
+    },
+    {
+      "ticker": "TJX",
+      "score": 0.005281,
+      "stance": "BUY",
+      "entry_price": 150.53
+    },
+    {
+      "ticker": "DIS",
+      "score": 0.005037,
+      "stance": "BUY",
+      "entry_price": 96.0
+    },
+    {
+      "ticker": "GM",
+      "score": 0.005037,
+      "stance": "BUY",
+      "entry_price": 76.72
+    },
+    {
+      "ticker": "IRM",
+      "score": 0.005037,
+      "stance": "BUY",
+      "entry_price": 122.37
+    },
+    {
+      "ticker": "CBOE",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 277.13
+    },
+    {
+      "ticker": "CMG",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 36.63
+    },
+    {
+      "ticker": "DAL",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 86.19
+    },
+    {
+      "ticker": "ELV",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 425.17
+    },
+    {
+      "ticker": "EXEL",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 56.04
+    },
+    {
+      "ticker": "GPN",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 76.85
+    },
+    {
+      "ticker": "INCY",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 114.23
+    },
+    {
+      "ticker": "MPC",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 296.88
+    },
+    {
+      "ticker": "NBIX",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 174.1
+    },
+    {
+      "ticker": "PSX",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 198.29
+    },
+    {
+      "ticker": "SPOT",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 479.84
+    },
+    {
+      "ticker": "VLO",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 295.79
+    },
+    {
+      "ticker": "WST",
+      "score": 0.004986,
+      "stance": "BUY",
+      "entry_price": 359.7
+    },
+    {
+      "ticker": "ZM",
+      "score": 0.004949,
+      "stance": "BUY",
+      "entry_price": 91.88
+    },
+    {
+      "ticker": "AME",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 232.1
+    },
+    {
+      "ticker": "C",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 140.71
+    },
+    {
+      "ticker": "FDX",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 313.74
+    },
+    {
+      "ticker": "GS",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 1045.91
+    },
+    {
+      "ticker": "HON",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 222.25
+    },
+    {
+      "ticker": "MLM",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 569.35
+    },
+    {
+      "ticker": "MMM",
+      "score": 0.004839,
+      "stance": "BUY",
+      "entry_price": 157.7
+    },
+    {
+      "ticker": "LLY",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 1181.87
+    },
+    {
+      "ticker": "NVO",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 49.28
+    },
+    {
+      "ticker": "ODFL",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 232.9
+    },
+    {
+      "ticker": "SYK",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 331.45
+    },
+    {
+      "ticker": "TMO",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 528.51
+    },
+    {
+      "ticker": "UPS",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 112.89
+    },
+    {
+      "ticker": "ZBH",
+      "score": 0.004653,
+      "stance": "BUY",
+      "entry_price": 94.08
+    },
+    {
+      "ticker": "LOW",
+      "score": 0.00456,
+      "stance": "BUY",
+      "entry_price": 207.7
+    },
+    {
+      "ticker": "DHI",
+      "score": 0.004428,
+      "stance": "BUY",
+      "entry_price": 148.85
+    },
+    {
+      "ticker": "LEN",
+      "score": 0.004428,
+      "stance": "BUY",
+      "entry_price": 82.84
+    },
+    {
+      "ticker": "APLD",
+      "score": 0.004373,
+      "stance": "BUY",
+      "entry_price": 28.84
+    },
+    {
+      "ticker": "DXCM",
+      "score": 0.004231,
+      "stance": "BUY",
+      "entry_price": 76.35
+    },
+    {
+      "ticker": "PPG",
+      "score": 0.004213,
+      "stance": "BUY",
+      "entry_price": 113.84
+    },
+    {
+      "ticker": "ROK",
+      "score": 0.004213,
+      "stance": "BUY",
+      "entry_price": 460.45
+    },
+    {
+      "ticker": "RMD",
+      "score": 0.004039,
+      "stance": "BUY",
+      "entry_price": 198.5
+    },
+    {
+      "ticker": "CMCSA",
+      "score": 0.004007,
+      "stance": "BUY",
+      "entry_price": 23.97
+    },
+    {
+      "ticker": "LMT",
+      "score": 0.003813,
+      "stance": "BUY",
+      "entry_price": 520.68
+    },
+    {
+      "ticker": "BA",
+      "score": 0.003649,
+      "stance": "BUY",
+      "entry_price": 215.51
+    },
+    {
+      "ticker": "PLTR",
+      "score": 0.003432,
+      "stance": "BUY",
+      "entry_price": 130.04
+    },
+    {
+      "ticker": "T",
+      "score": 0.003298,
+      "stance": "BUY",
+      "entry_price": 21.55
+    },
+    {
+      "ticker": "Z",
+      "score": 0.002341,
+      "stance": "HOLD",
+      "entry_price": 32.19
+    },
+    {
+      "ticker": "MNDY",
+      "score": 0.002261,
+      "stance": "HOLD",
+      "entry_price": 86.84
+    },
+    {
+      "ticker": "AZO",
+      "score": 0.002232,
+      "stance": "HOLD",
+      "entry_price": 3078.98
+    },
+    {
+      "ticker": "ICE",
+      "score": 0.002232,
+      "stance": "HOLD",
+      "entry_price": 137.67
+    },
+    {
+      "ticker": "ISRG",
+      "score": 0.002232,
+      "stance": "HOLD",
+      "entry_price": 407.12
+    },
+    {
+      "ticker": "AJG",
+      "score": 0.002147,
+      "stance": "HOLD",
+      "entry_price": 261.23
+    },
+    {
+      "ticker": "ALSN",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 115.98
+    },
+    {
+      "ticker": "AMT",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 169.5
+    },
+    {
+      "ticker": "BKR",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 57.66
+    },
+    {
+      "ticker": "BLK",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 1031.5601
+    },
+    {
+      "ticker": "CARR",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 68.61
+    },
+    {
+      "ticker": "CCI",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 79.84
+    },
+    {
+      "ticker": "CDNS",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 377.92
+    },
+    {
+      "ticker": "COST",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 926.43
+    },
+    {
+      "ticker": "IWM",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 293.48
+    },
+    {
+      "ticker": "JCI",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 143.93
+    },
+    {
+      "ticker": "MS",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 221.09
+    },
+    {
+      "ticker": "NUE",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 233.0
+    },
+    {
+      "ticker": "NVDA",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 203.53
+    },
+    {
+      "ticker": "PFE",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 24.48
+    },
+    {
+      "ticker": "QQQ",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 711.74
+    },
+    {
+      "ticker": "VMC",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 292.78
+    },
+    {
+      "ticker": "VZ",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 42.68
+    },
+    {
+      "ticker": "WMT",
+      "score": 0.002068,
+      "stance": "HOLD",
+      "entry_price": 114.78
+    },
+    {
+      "ticker": "ADBE",
+      "score": 0.00185,
+      "stance": "HOLD",
+      "entry_price": 230.61
+    },
+    {
+      "ticker": "BIIB",
+      "score": 0.00185,
+      "stance": "HOLD",
+      "entry_price": 209.03
+    },
+    {
+      "ticker": "MKKGY",
+      "score": 0.00185,
+      "stance": "HOLD",
+      "entry_price": 31.75
+    },
+    {
+      "ticker": "TGT",
+      "score": 0.00185,
+      "stance": "HOLD",
+      "entry_price": 134.77
+    },
+    {
+      "ticker": "TTWO",
+      "score": 0.00185,
+      "stance": "HOLD",
+      "entry_price": 244.1
+    },
+    {
+      "ticker": "FOXA",
+      "score": 0.001587,
+      "stance": "HOLD",
+      "entry_price": 55.9
+    },
+    {
+      "ticker": "SBAC",
+      "score": 0.001514,
+      "stance": "HOLD",
+      "entry_price": 187.1
+    },
+    {
+      "ticker": "SLB",
+      "score": 0.001514,
+      "stance": "HOLD",
+      "entry_price": 47.36
+    },
+    {
+      "ticker": "PHM",
+      "score": 0.001473,
+      "stance": "HOLD",
+      "entry_price": 123.75
+    },
+    {
+      "ticker": "UTHR",
+      "score": 0.001441,
+      "stance": "HOLD",
+      "entry_price": 535.57
+    },
+    {
+      "ticker": "CLX",
+      "score": 0.001321,
+      "stance": "HOLD",
+      "entry_price": 95.05
+    },
+    {
+      "ticker": "NVR",
+      "score": 0.001321,
+      "stance": "HOLD",
+      "entry_price": 6437.9902
+    },
+    {
+      "ticker": "WBD",
+      "score": 0.001181,
+      "stance": "HOLD",
+      "entry_price": 27.09
+    },
+    {
+      "ticker": "ALL",
+      "score": 0.000879,
+      "stance": "HOLD",
+      "entry_price": 256.45
+    },
+    {
+      "ticker": "BKNG",
+      "score": 0.000879,
+      "stance": "HOLD",
+      "entry_price": 175.8
+    },
+    {
+      "ticker": "CRM",
+      "score": 0.000879,
+      "stance": "HOLD",
+      "entry_price": 171.22
+    },
+    {
+      "ticker": "IR",
+      "score": 0.000879,
+      "stance": "HOLD",
+      "entry_price": 78.56
+    },
+    {
+      "ticker": "PGR",
+      "score": 0.000879,
+      "stance": "HOLD",
+      "entry_price": 234.48
+    },
+    {
+      "ticker": "DE",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 585.64
+    },
+    {
+      "ticker": "EXR",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 145.32
+    },
+    {
+      "ticker": "HAL",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 35.21
+    },
+    {
+      "ticker": "KMI",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 32.24
+    },
+    {
+      "ticker": "PEP",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 138.49
+    },
+    {
+      "ticker": "PH",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 951.26
+    },
+    {
+      "ticker": "PLD",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 142.16
+    },
+    {
+      "ticker": "WMB",
+      "score": 0.000805,
+      "stance": "HOLD",
+      "entry_price": 74.46
+    },
+    {
+      "ticker": "FIS",
+      "score": 0.000447,
+      "stance": "HOLD",
+      "entry_price": 41.93
+    },
+    {
+      "ticker": "NDAQ",
+      "score": 0.000407,
+      "stance": "HOLD",
+      "entry_price": 89.21
+    },
+    {
+      "ticker": "NKE",
+      "score": 0.000407,
+      "stance": "HOLD",
+      "entry_price": 43.76
+    },
+    {
+      "ticker": "SPGI",
+      "score": 0.000407,
+      "stance": "HOLD",
+      "entry_price": 437.84
+    },
+    {
+      "ticker": "AON",
+      "score": 3.6e-05,
+      "stance": "HOLD",
+      "entry_price": 367.35
+    },
+    {
+      "ticker": "GWW",
+      "score": 3.6e-05,
+      "stance": "HOLD",
+      "entry_price": 1391.6801
+    },
+    {
+      "ticker": "HD",
+      "score": 3.6e-05,
+      "stance": "HOLD",
+      "entry_price": 337.11
+    },
+    {
+      "ticker": "PEG",
+      "score": -0.000164,
+      "stance": "HOLD",
+      "entry_price": 80.89
+    },
+    {
+      "ticker": "AAPL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 317.31
+    },
+    {
+      "ticker": "ABBV",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 248.0
+    },
+    {
+      "ticker": "ABNB",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 146.33
+    },
+    {
+      "ticker": "ABT",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 92.11
+    },
+    {
+      "ticker": "ADM",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 82.04
+    },
+    {
+      "ticker": "AEE",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 113.43
+    },
+    {
+      "ticker": "AEP",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 135.63
+    },
+    {
+      "ticker": "AFL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 123.3
+    },
+    {
+      "ticker": "AIG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 79.9
+    },
+    {
+      "ticker": "AMGN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 360.45
+    },
+    {
+      "ticker": "AMZN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 247.31
+    },
+    {
+      "ticker": "APD",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 301.96
+    },
+    {
+      "ticker": "AVB",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 194.53
+    },
+    {
+      "ticker": "AWK",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 131.53
+    },
+    {
+      "ticker": "AXP",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 354.43
+    },
+    {
+      "ticker": "BAC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 59.5
+    },
+    {
+      "ticker": "BDX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 153.83
+    },
+    {
+      "ticker": "BMY",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 59.34
+    },
+    {
+      "ticker": "CHD",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 97.16
+    },
+    {
+      "ticker": "CI",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 304.5
+    },
+    {
+      "ticker": "CL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 93.21
+    },
+    {
+      "ticker": "COF",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 203.02
+    },
+    {
+      "ticker": "COP",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 112.85
+    },
+    {
+      "ticker": "CSX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 49.64
+    },
+    {
+      "ticker": "CVS",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 105.9
+    },
+    {
+      "ticker": "CVX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 182.2
+    },
+    {
+      "ticker": "D",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 70.8
+    },
+    {
+      "ticker": "DHR",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 200.16
+    },
+    {
+      "ticker": "DIA",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 524.47
+    },
+    {
+      "ticker": "DTE",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 150.64
+    },
+    {
+      "ticker": "DUK",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 126.86
+    },
+    {
+      "ticker": "DVN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 43.73
+    },
+    {
+      "ticker": "EA",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 206.35
+    },
+    {
+      "ticker": "ECL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 271.85
+    },
+    {
+      "ticker": "ED",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 111.82
+    },
+    {
+      "ticker": "EIX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 75.97
+    },
+    {
+      "ticker": "EOG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 139.61
+    },
+    {
+      "ticker": "EQR",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 69.72
+    },
+    {
+      "ticker": "ES",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 74.86
+    },
+    {
+      "ticker": "EW",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 91.79
+    },
+    {
+      "ticker": "EXC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 47.09
+    },
+    {
+      "ticker": "FANG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 191.6
+    },
+    {
+      "ticker": "FAST",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 47.05
+    },
+    {
+      "ticker": "GD",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 372.78
+    },
+    {
+      "ticker": "GILD",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 131.4
+    },
+    {
+      "ticker": "GIS",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 36.6
+    },
+    {
+      "ticker": "GRMN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 243.61
+    },
+    {
+      "ticker": "HSY",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 175.24
+    },
+    {
+      "ticker": "IDXX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 564.21
+    },
+    {
+      "ticker": "ITW",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 271.5
+    },
+    {
+      "ticker": "JNJ",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 257.77
+    },
+    {
+      "ticker": "JPM",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 334.53
+    },
+    {
+      "ticker": "KDP",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 31.25
+    },
+    {
+      "ticker": "KHC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 25.23
+    },
+    {
+      "ticker": "KMB",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 110.18
+    },
+    {
+      "ticker": "KO",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 84.25
+    },
+    {
+      "ticker": "LIN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 524.06
+    },
+    {
+      "ticker": "LNG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 263.29
+    },
+    {
+      "ticker": "MA",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 537.7
+    },
+    {
+      "ticker": "MCD",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 272.61
+    },
+    {
+      "ticker": "MCO",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 495.72
+    },
+    {
+      "ticker": "MDLZ",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 59.86
+    },
+    {
+      "ticker": "MDT",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 83.57
+    },
+    {
+      "ticker": "MET",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 93.03
+    },
+    {
+      "ticker": "MKC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 53.75
+    },
+    {
+      "ticker": "MO",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 71.87
+    },
+    {
+      "ticker": "MRK",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 124.03
+    },
+    {
+      "ticker": "MSCI",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 620.23
+    },
+    {
+      "ticker": "MSFT",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 390.99
+    },
+    {
+      "ticker": "NEE",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 88.38
+    },
+    {
+      "ticker": "NGG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 83.28
+    },
+    {
+      "ticker": "NSC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 327.59
+    },
+    {
+      "ticker": "NVS",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 153.37
+    },
+    {
+      "ticker": "O",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 64.17
+    },
+    {
+      "ticker": "OKE",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 92.19
+    },
+    {
+      "ticker": "OMC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 82.55
+    },
+    {
+      "ticker": "ORLY",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 87.28
+    },
+    {
+      "ticker": "OTIS",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 73.42
+    },
+    {
+      "ticker": "OXY",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 54.81
+    },
+    {
+      "ticker": "PCAR",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 124.26
+    },
+    {
+      "ticker": "PCG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 17.37
+    },
+    {
+      "ticker": "PG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 148.37
+    },
+    {
+      "ticker": "PM",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 180.19
+    },
+    {
+      "ticker": "PNC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 252.85
+    },
+    {
+      "ticker": "PPL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 36.07
+    },
+    {
+      "ticker": "PRU",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 116.17
+    },
+    {
+      "ticker": "PSA",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 321.86
+    },
+    {
+      "ticker": "PYPL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 47.65
+    },
+    {
+      "ticker": "REGN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 663.09
+    },
+    {
+      "ticker": "RSG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 223.38
+    },
+    {
+      "ticker": "RTX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 196.39
+    },
+    {
+      "ticker": "SBUX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 107.34
+    },
+    {
+      "ticker": "SCHW",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 102.38
+    },
+    {
+      "ticker": "SHW",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 328.97
+    },
+    {
+      "ticker": "SO",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 96.47
+    },
+    {
+      "ticker": "SPG",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 219.49
+    },
+    {
+      "ticker": "SPY",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 749.17
+    },
+    {
+      "ticker": "SRE",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 94.41
+    },
+    {
+      "ticker": "STT",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 178.17
+    },
+    {
+      "ticker": "SYY",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 83.46
+    },
+    {
+      "ticker": "TFC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 51.95
+    },
+    {
+      "ticker": "TMUS",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 188.41
+    },
+    {
+      "ticker": "TRGP",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 279.4
+    },
+    {
+      "ticker": "TRV",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 341.51
+    },
+    {
+      "ticker": "UBER",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 74.26
+    },
+    {
+      "ticker": "UNH",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 429.09
+    },
+    {
+      "ticker": "UNP",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 289.13
+    },
+    {
+      "ticker": "USB",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 62.34
+    },
+    {
+      "ticker": "V",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 357.75
+    },
+    {
+      "ticker": "VICI",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 26.4
+    },
+    {
+      "ticker": "VRSN",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 270.31
+    },
+    {
+      "ticker": "VRTX",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 480.25
+    },
+    {
+      "ticker": "WEC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 115.87
+    },
+    {
+      "ticker": "WELL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 234.55
+    },
+    {
+      "ticker": "WFC",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 87.67
+    },
+    {
+      "ticker": "WM",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 236.71
+    },
+    {
+      "ticker": "XEL",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 80.48
+    },
+    {
+      "ticker": "XOM",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 144.51
+    },
+    {
+      "ticker": "YUM",
+      "score": -0.000261,
+      "stance": "HOLD",
+      "entry_price": 161.68
+    },
+    {
+      "ticker": "PANW",
+      "score": -0.000301,
+      "stance": "HOLD",
+      "entry_price": 330.3
+    },
+    {
+      "ticker": "BE",
+      "score": -0.003675,
+      "stance": "SELL",
+      "entry_price": 233.49
+    },
+    {
+      "ticker": "SUMCF",
+      "score": -0.009498,
+      "stance": "SELL",
+      "entry_price": 32.72
+    },
+    {
+      "ticker": "WDC",
+      "score": -0.010639,
+      "stance": "SELL",
+      "entry_price": 555.55
+    },
+    {
+      "ticker": "DUOL",
+      "score": -0.011727,
+      "stance": "SELL",
+      "entry_price": 132.34
+    },
+    {
+      "ticker": "HUBS",
+      "score": -0.069871,
+      "stance": "SELL",
+      "entry_price": 217.59
+    },
+    {
+      "ticker": "RIVN",
+      "score": -0.102564,
+      "stance": "SELL",
+      "entry_price": 17.31
+    },
+    {
+      "ticker": "ON",
+      "score": -0.121311,
+      "stance": "SELL",
+      "entry_price": 90.37
+    }
+  ]
+}
