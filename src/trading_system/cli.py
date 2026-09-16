@@ -11,6 +11,7 @@ from .backtesting.slippage import CostModel
 from .config import get_config
 from .decision import analyze_symbol, analyze_all
 from .decision.explain import explain_report, DEEPSEEK_DEFAULT_MODEL
+from .ingestion.llm_config import llm_api_key, llm_provider
 from .features import build_feature_matrix
 from .ingestion import ingest_universe, fetch_news, compute_apprehension_scores
 from .models.shap_analysis import compute_shap_summary
@@ -1462,7 +1463,7 @@ def analyze_all_cmd(
 @app.command()
 def explain(
     report: str = typer.Argument(..., help="Path to a reports/decisions/<TICKER>_<stamp>.md file"),
-    model: str = typer.Option(DEEPSEEK_DEFAULT_MODEL, "--model", help="DeepSeek model name"),
+    model: str = typer.Option(DEEPSEEK_DEFAULT_MODEL, "--model", help="LLM model name (provider set by LLM_BASE_URL)"),
 ):
     """Explain a decision report in plain English using DeepSeek V4."""
     from pathlib import Path
@@ -1484,7 +1485,7 @@ def explain(
             raise typer.Exit(1)
 
     rprint(f"[bold]Explaining:[/bold] {p.name}  [dim](model={model})[/dim]\n")
-    text = explain_report(p, api_key=os.environ.get("DEEPSEEK_API_KEY"), model=model)
+    text = explain_report(p, api_key=llm_api_key(), model=model)
     rprint(text)
 
 
@@ -2330,6 +2331,65 @@ def _render_command_directory() -> str:
             lines.append(f"| `ts {name}` | {desc} |")
         lines.append("")
     return "\n".join(lines)
+
+
+@app.command("wf-backtest")
+def wf_backtest(
+    config: str = "configs/default.yaml",
+    alphas: str = typer.Option("momentum,xgb63", help="comma-separated alpha names"),
+    exec_alpha: str = typer.Option("xgb63", "--exec-alpha",
+                                   help="which alpha the execution variants use"),
+    oos_start: str = typer.Option("2005-01-01", help="first evaluated date"),
+    stage: str = typer.Option("all", help="scores | backtest | rl | report | all"),
+    updates: int = typer.Option(120, help="PPO updates for the rl stage"),
+):
+    """Strictly-causal walk-forward research: scores -> backtest -> RL -> report.
+
+    Unlike ``ts backtest``, nothing here is scored by a model that saw the
+    future: at every rebalance the alpha is refit only on data whose labels had
+    already completed, and the book pays per-name spread and square-root impact
+    with a participation cap. See ``src/trading_system/research/``.
+    """
+    import subprocess
+    import sys as _sys
+
+    root = get_config(config).project_root
+    script = root / "scripts" / "wf_research.py"
+    stages = (["scores", "backtest", "rl", "report"] if stage == "all" else [stage])
+    for st in stages:
+        cmd = [_sys.executable, str(script), st]
+        if st == "scores":
+            cmd += ["--alphas", alphas]
+        elif st == "backtest":
+            cmd += ["--alphas", alphas, "--exec-alpha", exec_alpha]
+        elif st == "rl":
+            cmd += ["--alpha", exec_alpha, "--updates", str(updates)]
+        rprint(f"[cyan]{' '.join(cmd)}[/cyan]")
+        rc = subprocess.call(cmd, cwd=str(root))
+        if rc != 0:
+            raise typer.Exit(rc)
+
+
+@app.command("bias-check")
+def bias_check(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
+    """Measure this universe's survivorship bias against a real index product.
+
+    Compares an equal weight of today's universe to the equal-weight S&P 500
+    ETF (RSP), which held whatever was in the index at the time — including the
+    names that later failed. The gap is return the backtests get for free.
+    """
+    from trading_system.research.bias import estimate_survivorship_bias
+    from trading_system.research.runner import passive_benchmarks
+    from trading_system.research.wfbacktest import build_panel
+
+    cfg = get_config(config).use_universe(universe)
+    panel = build_panel(pl.read_parquet(cfg.path("data_bronze") / "ohlcv_daily.parquet"))
+    pb = passive_benchmarks(panel, list(panel.dates))
+    est = estimate_survivorship_bias(pb["universe_ew"], list(panel.dates))
+    if est is None:
+        rprint("[yellow]could not fetch the reference index — check the network[/yellow]")
+        raise typer.Exit(1)
+    rprint(est.render())
 
 
 @app.command()

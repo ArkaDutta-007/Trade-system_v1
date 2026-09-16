@@ -739,3 +739,61 @@ This MVP avoids:
 
 Add those only after the vectorized loop, the leakage tests, and 3-6 months of
 paper trading look healthy.
+
+## V5 — causal walk-forward, cross-asset alpha, RL execution
+
+Regenerate the full write-up with results at any time:
+`python scripts/wf_research.py report` → `reports/research/REPORT.md`.
+
+The model validation in V3.8 (purged CPCV, leakage gate, deflated ICIR) was
+already honest about *models*. V5 makes the system honest about *money*, and the
+answer changed.
+
+**A strictly-causal simulator** ([`research/wfbacktest.py`](src/trading_system/research/wfbacktest.py)).
+The old P&L came from CPCV out-of-sample predictions, and CPCV trains on blocks
+*after* the test block — right for an IC distribution, wrong for P&L. Here the
+model is refit on a schedule using only completed labels, scores the
+cross-section on the decision date, and trades the next day. The alpha model is
+injected, so GBMs, the attention model and an RL policy are measured identically.
+
+**Per-name costs** ([`research/costs.py`](src/trading_system/research/costs.py)) —
+Abdi–Ranaldo spreads estimated from each name's own daily bars, square-root
+market impact, and a participation cap that refuses oversized orders and reports
+the shortfall. A cost ladder (1×/2×/3×) shows how much each conclusion depends on
+the cost model.
+
+**Robustness that prices the search** ([`research/stats.py`](src/trading_system/research/stats.py)) —
+deflated Sharpe, PBO via CSCV, stationary bootstrap intervals, and Hansen's SPA
+test, computed across the whole suite rather than per configuration.
+
+**Survivorship bias measured, not asserted** ([`research/bias.py`](src/trading_system/research/bias.py),
+`ts bias-check`). An equal weight of today's universe returns 18.1%/yr (Sharpe
+0.93) over 2005–2026; the equal-weight S&P 500 ETF, which held what the index
+actually held, returns 10.0% (Sharpe 0.57). **+8 points of CAGR is unearned.**
+Compare strategies to `universe_ew`, never to SPY.
+
+**Cross-sectional attention** ([`models/cross_attn.py`](src/trading_system/models/cross_attn.py)) —
+every other model here is *own-asset*. This one lets each name see the rest of
+the day's cross-section, which is the one deep architecture with published
+evidence of beating trees on this problem (Kelly et al., NBER w33351). Kept
+small (~21k parameters) because that paper's out-of-sample gains flatten there.
+
+**RL for execution, not stock picking** ([`rl/`](src/trading_system/rl/)) — the
+agent sets four bounded scalars per rebalance (deploy, trade rate, no-trade band,
+concentration) and must beat the Gârleanu–Pedersen closed form for the same
+problem, not a full-rebalance strawman. It does not: PPO reaches Sharpe 1.198
+against GP's 1.225 (paired-bootstrap difference −0.026, 95% CI [−0.251, +0.231]),
+earning 12 points more a year by taking a −67% drawdown instead of −43%. The
+harness is built to return that answer, and it did.
+
+```bash
+ts bias-check -u liquid                          # what the universe gives you free
+ts wf-backtest --alphas momentum,xgb63 --stage all
+python scripts/wf_research.py backtest --exec-alpha xgb63    # stages run separately
+```
+
+**Headline result.** Over 21.7 causal years, Gârleanu–Pedersen partial trading
+lifts Sharpe 0.862 → 0.995 and cuts turnover 57% with no model change — the
+largest single improvement found. But 12-1 momentum reaches 0.938 and the
+equal-weight universe 0.924, and an SPA test across the 15 learned
+configurations gives **p = 0.287**: the ML edge over momentum is not established.
