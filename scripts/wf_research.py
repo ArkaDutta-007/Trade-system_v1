@@ -85,6 +85,17 @@ ALPHAS = {
     "ens63": (lambda: EnsembleAlpha(("xgb", "lgbm"), horizon=63, n_seeds=2), 63),
     "xattn63": (lambda: CrossAttnAlpha(CrossAttnConfig(epochs=30, verbose=True), n_seeds=3), 63),
     "xattn252": (lambda: CrossAttnAlpha(CrossAttnConfig(epochs=30, verbose=True), n_seeds=3), 252),
+    # End-to-end variant: instead of maximising per-date IC and hoping it turns
+    # into money, blend in a differentiable after-cost long-short P&L term with
+    # a turnover penalty, so the network is optimising (a surrogate for) the
+    # thing the book is actually paid on. This is the "predict-then-optimise vs
+    # end-to-end" question, and the published answer is that it only pays when
+    # the cost term is in the objective — a transformer trained this way held
+    # ~0.02 daily turnover and kept its Sharpe at 10bp costs, while an LSTM
+    # trained without it turned over 0.17 and went negative.
+    "xattn63_e2e": (lambda: CrossAttnAlpha(
+        CrossAttnConfig(epochs=30, verbose=True, sharpe_weight=0.3,
+                        turnover_penalty=20.0, top_frac=0.10), n_seeds=3), 63),
 }
 
 
@@ -220,6 +231,24 @@ def stage_backtest(args):
         variants.append(Variant("blend_horizons|gp35", blend_factory,
                                 base_config(horizon=63, partial_trade_rate=0.35),
                                 notes=note + ", partial trading"))
+
+    # Cross-family blend: own-asset (GBM) + cross-asset (attention) at the same
+    # horizon. This is the cell the AIPM result actually predicts, and it is a
+    # different claim from the horizon blend above. Kelly et al. find their MLP
+    # and their transformer carry significant alpha *against each other*, so the
+    # two model families are complements; if that holds here the blend beats
+    # both parents, and if it does not, the attention model is not adding
+    # information the trees were missing.
+    fam_parts = [a for a in ("xgb63", "xattn63") if a in available]
+    if len(fam_parts) == 2:
+        fs = blended_scores(panel, fam_parts)
+        fnote = f"rank blend of {'+'.join(fam_parts)}"
+        fam_factory = lambda: PrecomputedAlpha(fs, panel, "blend_fam")  # noqa: E731
+        variants.append(Variant("blend_families|full", fam_factory,
+                                base_config(horizon=63), notes=fnote))
+        variants.append(Variant("blend_families|gp35", fam_factory,
+                                base_config(horizon=63, partial_trade_rate=0.35),
+                                notes=fnote + ", partial trading"))
 
     # execution policies, all on the single chosen alpha
     exec_alpha = args.exec_alpha if args.exec_alpha in want else want[0]
