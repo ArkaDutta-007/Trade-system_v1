@@ -8,8 +8,11 @@
 #   ~/trade-ops/logs/daily-YYYY-MM-DD.log    (full pipeline stderr/stdout)
 set -uo pipefail  # deliberately no -e: every step is best-effort and recorded
 
-REPO="/home/ad2688/Desktop/Trade-system_v1"
-OPS="/home/ad2688/trade-ops"
+# Machine-independent: code lives in <repo>/ops, live state in $TS_OPS
+# (~/trade-ops on the RIT box). Same precedence as ops/paths.py.
+REPO="${TS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+OPS="${TS_OPS:-$HOME/trade-ops}"
+CODE="$REPO/ops"
 TODAY="$(date +%F)"
 DIGEST="$OPS/briefs/digest-$TODAY.md"
 LOG="$OPS/logs/daily-$TODAY.log"
@@ -87,7 +90,7 @@ flags_step() {  # flags_step <tries> <delay-secs>
     echo '```'
   } >> "$DIGEST"
   for (( i=1; i<=tries; i++ )); do
-    out="$(timeout 300 ts flags --config /home/ad2688/trade-ops/flags/local_config.yaml --refresh 2>> "$LOG")"
+    out="$(timeout 300 ts flags --config $OPS/flags/local_config.yaml --refresh 2>> "$LOG")"
     if ! grep -qiE 'Too Many Requests|Rate limited|lookup failed' <<<"$out"; then
       break
     fi
@@ -102,7 +105,7 @@ cp -f "$DIGEST" "$OPS/briefs/latest.md"   # publish early; refreshed per step be
 echo "## Pipeline run" >> "$DIGEST"
 # Self-test the out-of-repo tooling first: a broken helper should be a
 # visible line in the brief, not a silently wrong number downstream.
-heavy_step "trade-ops self-test (pytest)" 600 /home/ad2688/trade-ops/run_tests.sh
+heavy_step "trade-ops self-test (pytest)" 600 $CODE/run_tests.sh
 heavy_step "ts daily (ingest→quality→features→predict→paper-trade→future-update)" 5400 ts daily
 heavy_step "ts ledger --resolve (score matured predictions)" 900 ts ledger --resolve
 # ts daily rebuilds gold features on the CORE universe (69 cols), but the
@@ -115,38 +118,47 @@ heavy_step "ts features -u liquid --deep (rebuild gold to match models_store)" 7
 # Japanese ADRs (MKKGY/SHECY/TOELY) post their bar hours before US names, so
 # the matrix can end on a date with 3 of 362 tickers; every pick step scores
 # date.max() and dies ("no complete feature rows"). Trim that sparse tail.
-heavy_step "Trim sparse trailing dates (ADR timezone guard)" 300 python3 /home/ad2688/trade-ops/bin/trim-sparse-dates
+heavy_step "Trim sparse trailing dates (ADR timezone guard)" 300 python3 $CODE/bin/trim-sparse-dates
 
 # Derive ALL five flags from live data before the board is rendered, so the
 # brief never ships a hand-typed override that went stale months ago (F and C
 # sat at as_of 2026-06-10 for three months). Writes OUTSIDE the repo; the
 # tracked configs/flag_overrides.yaml is never touched.
-heavy_step "Auto-derive flags (O/F/I/S/C)" 600 python3 /home/ad2688/trade-ops/flags/auto_flags.py
+heavy_step "Auto-derive flags (O/F/I/S/C)" 600 python3 $CODE/flags/auto_flags.py
 flags_step 4 45
-digest_step "Top long-horizon picks (ts picks --horizon 252 --top 10 -u liquid)" 900 ts picks --horizon 252 --top 10 -u liquid
 digest_step "BUY signals today (ts signals --stance BUY --top 10)" 600 ts signals --stance BUY --top 10
 digest_step "Future-predict sessions — MTM P&L + accuracy (ts future-status)" 600 ts future-status
 digest_step "Paper portfolio (ts paper-status)" 600 ts paper-status
 # ML model P&L: backtest of the deployed model's OOS predictions (top-20
 # equal-weight, after costs) + trailing-63d decay check. Predictions are
 # refreshed by the Saturday retrain (~/trade-ops/weekly_retrain.sh).
-digest_step "ML model backtest (deployed ensemble, after costs)" 400 python3 /home/ad2688/trade-ops/research/daily_ml_backtest.py
+digest_step "ML model backtest (deployed ensemble, after costs)" 400 python3 $CODE/research/daily_ml_backtest.py
+# Survivorship bias, measured not assumed (lab research 2026-09-15): equal
+# weight of TODAY's universe vs RSP, a real survivorship-free index product.
+# Every backtest CAGR above is inflated by roughly this much.
+digest_step "Survivorship bias check (ts bias-check) — context for every backtest number" 300 ts bias-check -u liquid
 
-# Picks v2: quality-gated (price/liquidity/vol), risk-adjusted (score/vol^0.5)
-# and theme-diversified. Raw `ts picks` above ranks on unadjusted score, which
-# measurably prefers volatile illiquid names (corr(score,vol)=+0.22,
-# corr(score,liquidity)=-0.19) — see ~/trade-ops/portfolio/picks_v2.py.
-digest_step "Top picks v2 (gated + diversified)" 900 python3 /home/ad2688/trade-ops/portfolio/picks_v2.py --top 10
+# THE picks for the brief: quality-gated (price/liquidity/vol), James-Stein
+# shrunk, demeaned risk-adjusted, theme-capped, HRP x conviction weighted.
+# --compact = phone-width card. The brief agent is told to use ONLY this section.
+digest_step "🎯 TOP PICKS — use THIS section for the brief" 900 python3 $CODE/portfolio/picks_v2.py --top 8 --compact
+digest_step "Top picks v2 — full table (weights, vol, liquidity)" 900 python3 $CODE/portfolio/picks_v2.py --top 10
+
+# Raw model ranking, UNFILTERED. Kept as a diagnostic only: it ranks on raw
+# forecast score, which measurably prefers volatile illiquid names
+# (corr(score,vol)=+0.22, corr(score,$vol)=-0.19) and routinely surfaces $1
+# stocks trading $90k/day. Never use it for the brief.
+digest_step "Raw model ranking (DIAGNOSTIC — unfiltered, do NOT use for picks)" 900 ts picks --horizon 252 --top 10 -u liquid
 
 # Competing $10k paper books (spy / ml_raw / ml_v2 / momentum / blend).
 # Rebalance is monthly and self-guarding, so calling it daily is safe.
-heavy_step "Dummy portfolios rebalance+mark" 1200 python3 /home/ad2688/trade-ops/portfolio/portfolios.py --rebalance --mark
-digest_step "Dummy portfolios — long-run scoreboard" 300 python3 /home/ad2688/trade-ops/portfolio/portfolios.py --report
+heavy_step "Dummy portfolios rebalance+mark" 1200 python3 $CODE/portfolio/portfolios.py --rebalance --mark
+digest_step "Dummy portfolios — long-run scoreboard" 300 python3 $CODE/portfolio/portfolios.py --report
 
 # Playbook briefing needs the broker snapshot, which is gitignored and may not
 # exist on this machine yet — scp "portfolio and watchlist.json" from the laptop.
 if [[ -f "$REPO/portfolio and watchlist.json" ]]; then
-  digest_step "Playbook morning briefing (ts brief)" 600 ts brief --config /home/ad2688/trade-ops/flags/local_config.yaml
+  digest_step "Playbook morning briefing (ts brief)" 600 ts brief --config $OPS/flags/local_config.yaml
 else
   {
     echo

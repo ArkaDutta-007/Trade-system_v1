@@ -17,6 +17,16 @@ Books
                  sleeve that beat the ML model risk-adjusted in backtests
                  (Sharpe 1.21 vs 1.03)
   blend          50% ml_v2 + 50% momentum, the diversified-across-methods book
+  ml_v2_gp       THE RESEARCH WINNER, live (added 2026-09-16). Replicates
+                 `xgb63|gp35` from reports/research/REPORT.md: the 63-day
+                 forecaster (not 252d), top-20 with a 10% cap, run through
+                 picks_v2's gates/shrink/risk-adjust/theme caps, and executed
+                 with Gârleanu-Pedersen PARTIAL trading — each month the book
+                 moves only 35% of the way from its current weights toward the
+                 target. On 21.7 causal years that execution change alone took
+                 Sharpe 0.862 → 0.995 and cut turnover 57%. Uses the repo's
+                 research.execution.GarleanuPedersenPolicy with signal_decay=0,
+                 which is exactly the form the simulator scored.
 
 Design decisions that matter
   * MONTHLY rebalance (not daily). The 2026-07 research showed 3x costs halve
@@ -48,14 +58,25 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import polars as pl  # noqa: E402
 
-BOOKS_DIR = Path(__file__).parent / "books"
+# Live state, not code: lives under ops_root() (~/trade-ops on the RIT box),
+# never inside the tracked tree. paths.py documents the precedence.
+BOOKS_DIR = ops_root() / "portfolio" / "books"
 BOOKS_DIR.mkdir(parents=True, exist_ok=True)
 
 START_CASH = 10_000.0
 N_HOLD = 10
 COST_BPS = 4.0
 IMPACT_BPS = 10.0
-BOOKS = ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend"]
+BOOKS = ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend", "ml_v2_gp"]
+
+# ml_v2_gp — the research winner's configuration (reports/research/REPORT.md,
+# variant xgb63|gp35). Kept as a SEPARATE book so the five that have been
+# tracking since 2026-09-08 stay an unbroken forward test.
+GP_HORIZON = 63           # days: the horizon whose ICIR (3.40) beat 252d's (3.03)
+GP_TOP = 20               # research book width; top-10 scored 0.866 vs 0.995
+GP_MAX_W = 0.10           # research single-name cap
+GP_TRADE_RATE = 0.35      # move 35% of the way toward target each rebalance
+# (no signal-decay shrink: the simulator that produced the 0.995 result did not apply one)
 
 
 # ── price helpers ───────────────────────────────────────────────────────────
@@ -100,6 +121,30 @@ def select(book: str, n: int = N_HOLD) -> list[str]:
         b = [t for t in select("momentum", n) if t not in a][:n - len(a)]
         return a + b
     raise ValueError(book)
+
+
+def select_weighted(book: str) -> dict[str, float]:
+    """Target WEIGHTS (not just names) — needed for partial trading."""
+    if book != "ml_v2_gp":
+        raise ValueError(book)
+    from picks_v2 import build
+    plan = build(GP_TOP, GP_HORIZON)
+    w = {p["ticker"]: float(p.get("weight") or 0.0) for p in plan["picks"]}
+    tot = sum(w.values()) or 1.0
+    w = {t: v / tot for t, v in w.items()}
+    # research cap is 10%; picks_v2's default is 20% — clip and renormalise
+    for _ in range(50):
+        over = {t: v for t, v in w.items() if v > GP_MAX_W}
+        if not over:
+            break
+        excess = sum(v - GP_MAX_W for v in over.values())
+        for t in over:
+            w[t] = GP_MAX_W
+        free = {t: v for t, v in w.items() if t not in over}
+        fs = sum(free.values()) or 1.0
+        for t in free:
+            w[t] += excess * free[t] / fs
+    return w
 
 
 # ── book state ──────────────────────────────────────────────────────────────
@@ -154,6 +199,51 @@ def rebalance_book(b: dict, targets: list[str], px: dict[str, float], d) -> None
                         "turnover_frac": round(turn_frac, 4), "cost": round(cost, 2)})
 
 
+def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float], d) -> None:
+    """Gârleanu-Pedersen partial trading: new_w = cur_w + rate * (target_w - cur_w).
+
+    Costs are charged on the turnover actually traded, same model as the other
+    books, so the comparison is only about execution — not about cost
+    assumptions.
+    """
+    import numpy as np
+
+    eq = equity(b, px)
+    if eq <= 0:
+        return
+    names = sorted({t for t in target_w if px.get(t)} | {t for t in b["holdings"] if px.get(t)})
+    if not names:
+        return
+    cur = np.array([b["holdings"].get(t, 0.0) * px[t] / eq for t in names])
+    tgt = np.array([target_w.get(t, 0.0) for t in names])
+    # The PLAIN form, exactly as research/wfbacktest.py line ~432 applies it:
+    #     new = cur + rate * (target - cur)
+    # NOT research.execution.GarleanuPedersenPolicy.step(): that method
+    # renormalises the result to sum 1, which from all-cash rescales a 35 % move
+    # into 100 % deployment and makes "partial trading" a no-op at seeding. The
+    # simulator that scored Sharpe 0.995 (and reported mean deploy 0.81) uses
+    # the un-normalised form and leaves the remainder in cash. Replicate THAT.
+    new = cur + GP_TRADE_RATE * (tgt - cur)
+    new = np.clip(new, 0.0, None)
+    turn_frac = float(np.abs(new - cur).sum())
+    cost = eq * ((COST_BPS * turn_frac) + IMPACT_BPS * turn_frac ** 1.5) / 10_000.0
+    eq_after = eq - cost
+    b["holdings"] = {t: float(new[i] * eq_after / px[t]) for i, t in enumerate(names) if new[i] > 1e-6}
+    b["cash"] = float(eq_after * max(0.0, 1.0 - new.sum()))
+    b["last_rebalance"] = str(d)
+    b["trades"].append({"date": str(d), "targets": [t for t in names if target_w.get(t, 0) > 0],
+                        "turnover_frac": round(turn_frac, 4), "cost": round(cost, 2),
+                        "policy": f"GP partial rate={GP_TRADE_RATE}"})
+
+
+def _rebalance(b: dict, name: str, p: dict[str, float], d) -> None:
+    """Dispatch: the GP book trades toward weights; the others equal-weight names."""
+    if name == "ml_v2_gp":
+        rebalance_book_gp(b, select_weighted(name), p, d)
+    else:
+        rebalance_book(b, select(name), p, d)
+
+
 def do_init(px: pl.DataFrame) -> None:
     d = latest_date(px)
     p = prices_on(px, d)
@@ -163,7 +253,7 @@ def do_init(px: pl.DataFrame) -> None:
             print(f"  {name}: exists (created {b['created']}) — untouched")
             continue
         b["created"] = str(d)
-        rebalance_book(b, select(name), p, d)
+        _rebalance(b, name, p, d)
         b["equity_log"] = [{"date": str(d), "equity": round(equity(b, p), 2)}]
         save_book(b)
         print(f"  {name}: seeded ${START_CASH:,.0f} → {list(b['holdings'])[:6]}"
@@ -198,7 +288,7 @@ def do_rebalance(px: pl.DataFrame, force: bool = False) -> None:
             cur = d if isinstance(d, date) else datetime.fromisoformat(str(d)).date()
             if (cur.year, cur.month) == (prev.year, prev.month):
                 continue                     # already rebalanced this month
-        rebalance_book(b, select(name), p, d)
+        _rebalance(b, name, p, d)
         save_book(b)
         print(f"  rebalanced {name} → {list(b['holdings'])[:6]}")
 

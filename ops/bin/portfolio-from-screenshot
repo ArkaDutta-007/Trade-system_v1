@@ -40,9 +40,12 @@ from pathlib import Path
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 VISION_MODEL = os.environ.get("VISION_MODEL", "gemma4:31b-cloud")
-REPO = Path(os.environ.get("TRADE_REPO", "/home/ad2688/Desktop/Trade-system_v1"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import repo_root, ops_root  # noqa: E402
+
+REPO = repo_root()
 PORTFOLIO = REPO / "portfolio and watchlist.json"
-BACKUP_DIR = Path.home() / "trade-ops/private/backups"
+BACKUP_DIR = ops_root() / "private" / "backups"
 TS = REPO / "venv/bin/ts"
 
 EXTRACT_PROMPT = (
@@ -309,7 +312,7 @@ def main() -> int:
     print(f"✅ portfolio updated · backup {bak}")
 
     report = f"# Portfolio update — {date.today()}\n\n{hdr}\n\n{changes}\n\n" + decisions_report(diff)
-    tgt = a.report or (Path.home() / f"trade-ops/briefs/portfolio-decisions-{date.today()}.md")
+    tgt = a.report or (ops_root() / "briefs" / f"portfolio-decisions-{date.today()}.md")
     tgt.write_text(report)
     print(f"📝 decisions → {tgt}\n")
     print(report)

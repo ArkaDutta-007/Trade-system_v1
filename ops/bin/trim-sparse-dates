@@ -20,7 +20,10 @@ import sys
 from pathlib import Path
 import polars as pl
 
-PATH = Path("/home/ad2688/Desktop/Trade-system_v1/data/gold/features.parquet")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import repo_root  # noqa: E402
+
+PATH = repo_root() / "data/gold/features.parquet"
 MIN_FRAC = 0.5
 
 

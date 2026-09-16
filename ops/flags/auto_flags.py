@@ -48,8 +48,10 @@ REPO = add_repo_to_path()
 import polars as pl  # noqa: E402
 
 HERE = Path(__file__).parent
-OUT_YAML = HERE / "auto_overrides.yaml"
-STATE_JSON = HERE / "flag_state.json"      # yesterday's colours, for hysteresis
+STATE_DIR = ops_root() / "flags"                 # ~/trade-ops/flags on the RIT box
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+OUT_YAML = STATE_DIR / "auto_overrides.yaml"   # <- local_config.yaml points here
+STATE_JSON = STATE_DIR / "flag_state.json"      # yesterday's colours, for hysteresis
 HYST = 0.25                                 # score margin required to flip
 
 # Bump whenever a flag's SCORING FORMULA changes. Hysteresis deliberately holds
@@ -166,7 +168,7 @@ def fred(sid: str):
 
 
 # ── the five flags ──────────────────────────────────────────────────────────
-BRENT_CACHE = HERE / "brent_cache.parquet"
+BRENT_CACHE = STATE_DIR / "brent_cache.parquet"
 
 
 def brent_series(n: int = 500) -> np.ndarray:

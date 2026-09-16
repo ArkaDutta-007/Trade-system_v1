@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from paths import add_repo_to_path, ops_root  # noqa: E402
 
 REPO = add_repo_to_path()
-CACHE = Path(__file__).parent / "sectors.json"
+CACHE = ops_root() / "portfolio" / "sectors.json"   # state, not code
 
 # Coarse "theme" grouping — what actually drives correlated drawdowns in this
 # book. Yahoo's sector labels are too coarse in one direction (everything AI is

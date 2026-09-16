@@ -28,7 +28,12 @@ from ..ingestion.llm_config import llm_api_key, llm_base_url, llm_model
 logger = get_logger(__name__)
 
 # Provider-agnostic endpoint (see ingestion/llm_config.py).
-DEEPSEEK_BASE_URL = llm_base_url()
+# NOTE: resolved lazily at the call site, not here. cli.py imports this module
+# before get_config() loads .env, so a module-level llm_base_url() froze the
+# DeepSeek default and every narration 401'd against api.deepseek.com with the
+# Qwen key (435 wasted round-trips per run, 2026-09-16). The names are kept for
+# back-compat; callers should prefer llm_base_url() / llm_model() directly.
+DEEPSEEK_BASE_URL = llm_base_url()      # default only; see note above
 DEEPSEEK_DEFAULT_MODEL = llm_model()
 
 # Stable prefix (cache-friendly). Asks for a tight, decision-useful structure
@@ -102,10 +107,11 @@ def _compact_decision(decision: dict) -> dict:
 def explain_decision(
     decision: dict,
     api_key: str | None = None,
-    model: str = DEEPSEEK_DEFAULT_MODEL,
+    model: str | None = None,   # None -> llm_model() at call time
     router: LLMRouter | None = None,
 ) -> str:
     """Narrate a decision dict (compact JSON path). Returns text or error string."""
+    model = model or llm_model()   # resolve after .env is loaded, not at import
     payload_json = json.dumps(_compact_decision(decision), default=str)
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -124,12 +130,13 @@ def explain_decision(
 def explain_report(
     report_path: str | Path,
     api_key: str | None = None,
-    model: str = DEEPSEEK_DEFAULT_MODEL,
+    model: str | None = None,   # None -> llm_model() at call time
 ) -> str:
     """Explain a decision report. Prefers the compact JSON sidecar over markdown.
 
     Backward-compatible entry point for the ``ts explain`` CLI.
     """
+    model = model or llm_model()   # resolve after .env is loaded, not at import
     api_key = api_key or llm_api_key()
     report_path = Path(report_path)
 
@@ -163,7 +170,7 @@ def explain_report(
     }
     try:
         resp = requests.post(
-            DEEPSEEK_BASE_URL,
+            llm_base_url(),
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload, timeout=40,
         )

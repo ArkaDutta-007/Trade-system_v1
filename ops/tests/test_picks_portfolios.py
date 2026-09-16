@@ -163,3 +163,66 @@ def test_persisted_books_are_valid_json_with_required_keys():
         for k in ("name", "cash", "holdings", "equity_log", "trades"):
             assert k in b, f"{name} missing {k}"
         assert b["cash"] >= -1e-9, f"{name} has negative cash"
+
+
+# ── ml_v2_gp: Gârleanu-Pedersen partial-trading book (added 2026-09-16) ─────
+def test_gp_book_is_registered_and_separate():
+    """Research winner runs as a SIXTH book; the original five are untouched."""
+    assert "ml_v2_gp" in pf.BOOKS
+    assert pf.BOOKS[:5] == ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend"]
+
+
+def test_gp_rebalance_moves_only_trade_rate_of_the_gap():
+    """From all-cash, one GP step deploys exactly trade_rate of the target."""
+    b = {"name": "ml_v2_gp", "cash": 10_000.0, "holdings": {}, "equity_log": [],
+         "trades": [], "last_rebalance": None, "created": "2020-01-01"}
+    px = {"AAA": 10.0, "BBB": 20.0}
+    pf.rebalance_book_gp(b, {"AAA": 0.5, "BBB": 0.5}, px, "2020-01-02")
+    eq = pf.equity(b, px)
+    invested = sum(q * px[t] for t, q in b["holdings"].items())
+    assert invested / eq == pytest.approx(pf.GP_TRADE_RATE, rel=1e-6)
+    assert b["cash"] / eq == pytest.approx(1 - pf.GP_TRADE_RATE, rel=1e-6)
+    assert b["trades"][-1]["turnover_frac"] == pytest.approx(pf.GP_TRADE_RATE, rel=1e-6)
+
+
+def test_gp_rebalance_converges_toward_target_and_charges_less_than_full():
+    """Repeated steps approach full deployment; turnover per step shrinks."""
+    b = {"name": "ml_v2_gp", "cash": 10_000.0, "holdings": {}, "equity_log": [],
+         "trades": [], "last_rebalance": None, "created": "2020-01-01"}
+    px = {"AAA": 10.0, "BBB": 20.0}
+    tgt = {"AAA": 0.5, "BBB": 0.5}
+    turns = []
+    for i in range(8):
+        pf.rebalance_book_gp(b, tgt, px, f"2020-0{i+1}-02")
+        turns.append(b["trades"][-1]["turnover_frac"])
+    eq = pf.equity(b, px)
+    invested = sum(q * px[t] for t, q in b["holdings"].items())
+    assert invested / eq > 0.95                          # ~97% after 8 steps
+    assert all(turns[i] > turns[i + 1] for i in range(len(turns) - 1))  # decaying
+    full_rebalance_cost = 10_000 * (pf.COST_BPS * 1.0 + pf.IMPACT_BPS) / 10_000
+    assert b["trades"][0]["cost"] < full_rebalance_cost  # first step cheaper than going all-in
+
+
+def test_gp_rebalance_exits_dropped_names():
+    """A name the model dropped to 0 must be traded out, not held forever."""
+    b = {"name": "ml_v2_gp", "cash": 0.0, "holdings": {"OLD": 500.0}, "equity_log": [],
+         "trades": [], "last_rebalance": None, "created": "2020-01-01"}
+    px = {"OLD": 10.0, "NEW": 10.0}
+    for i in range(12):
+        pf.rebalance_book_gp(b, {"NEW": 1.0}, px, f"2020-{i+1:02d}-02")
+    assert b["holdings"].get("OLD", 0.0) * px["OLD"] / pf.equity(b, px) < 0.01
+
+
+def test_gp_cap_renormalise_respects_ten_percent():
+    w = {f"T{i}": (0.5 if i == 0 else 0.5 / 19) for i in range(20)}
+    # replicate select_weighted's cap loop on a synthetic weight dict
+    for _ in range(50):
+        over = {t: v for t, v in w.items() if v > pf.GP_MAX_W}
+        if not over:
+            break
+        ex = sum(v - pf.GP_MAX_W for v in over.values())
+        for t in over: w[t] = pf.GP_MAX_W
+        free = {t: v for t, v in w.items() if t not in over}; fs = sum(free.values())
+        for t in free: w[t] += ex * free[t] / fs
+    assert max(w.values()) <= pf.GP_MAX_W + 1e-9
+    assert sum(w.values()) == pytest.approx(1.0)

@@ -12,21 +12,25 @@
 # Heavy (1-3 h) — which is why it's weekly and on a Saturday, not in the
 # 05:15 weekday window.
 set -uo pipefail
-REPO="/home/ad2688/Desktop/Trade-system_v1"
-LOG="/home/ad2688/trade-ops/logs/retrain-$(date +%F).log"
+# Machine-independent: code lives in <repo>/ops, live state in $TS_OPS
+# (~/trade-ops on the RIT box). Same precedence as ops/paths.py.
+REPO="${TS_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+OPS="${TS_OPS:-$HOME/trade-ops}"
+CODE="$REPO/ops"
+LOG="$OPS/logs/retrain-$(date +%F).log"
 
 cd "$REPO" || exit 1
 # shellcheck disable=SC1091
 source venv/bin/activate
 
 echo "=== weekly retrain start $(date -Is) ===" >> "$LOG"
-timeout 14400 python3 /home/ad2688/trade-ops/research/deploy.py >> "$LOG" 2>&1
+timeout 14400 python3 $CODE/research/deploy.py >> "$LOG" 2>&1
 RC=$?
 echo "=== weekly retrain done rc=$RC $(date -Is) ===" >> "$LOG"
 
 # quick post-deploy sanity: newest registry entry + a one-line backtest health
 tail -3 "$LOG"
 ls -t "$REPO/reports/models" | head -3
-timeout 300 python3 /home/ad2688/trade-ops/research/daily_ml_backtest.py | head -4
-find /home/ad2688/trade-ops/logs -name 'retrain-*.log' -mtime +60 -delete 2>/dev/null
+timeout 300 python3 $CODE/research/daily_ml_backtest.py | head -4
+find $OPS/logs -name 'retrain-*.log' -mtime +60 -delete 2>/dev/null
 exit $RC

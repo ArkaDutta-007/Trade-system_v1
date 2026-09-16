@@ -10,7 +10,7 @@ from .backtesting import compute_metrics, run_vectorized_backtest, summarize
 from .backtesting.slippage import CostModel
 from .config import get_config
 from .decision import analyze_symbol, analyze_all
-from .decision.explain import explain_report, DEEPSEEK_DEFAULT_MODEL
+from .decision.explain import explain_report
 from .ingestion.llm_config import llm_api_key, llm_provider
 from .features import build_feature_matrix
 from .ingestion import ingest_universe, fetch_news, compute_apprehension_scores
@@ -1463,7 +1463,7 @@ def analyze_all_cmd(
 @app.command()
 def explain(
     report: str = typer.Argument(..., help="Path to a reports/decisions/<TICKER>_<stamp>.md file"),
-    model: str = typer.Option(DEEPSEEK_DEFAULT_MODEL, "--model", help="LLM model name (provider set by LLM_BASE_URL)"),
+    model: str | None = typer.Option(None, "--model", help="LLM model name (default: LLM_MODEL from .env; provider set by LLM_BASE_URL)"),
 ):
     """Explain a decision report in plain English using DeepSeek V4."""
     from pathlib import Path

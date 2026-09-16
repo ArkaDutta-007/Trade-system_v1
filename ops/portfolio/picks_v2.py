@@ -286,6 +286,47 @@ def render(plan: dict) -> str:
     return "\n".join(L)
 
 
+THEME_EMOJI = {
+    "ai_semi": "🔬", "ai_cloud": "☁️", "crypto": "🪙", "megacap": "🏛️",
+    "ev_story": "🔋", "technology": "💻", "healthcare": "🧬", "financial": "🏦",
+    "industrials": "🏭", "energy": "🛢️", "basic_materials": "⛏️",
+    "consumer": "🛍️", "communication": "📡", "utilities": "⚡", "real_estate": "🏠",
+}
+
+
+def _emoji(theme: str) -> str:
+    for k, v in THEME_EMOJI.items():
+        if theme.startswith(k):
+            return v
+    return "•"
+
+
+def render_compact(plan: dict, top: int = 5) -> str:
+    """Phone-width card for the morning brief / Telegram.
+
+    One line per name, no wide table: bold ticker, price, weight, theme emoji,
+    and the timing verdict as a single glyph — 🟢 accumulate / 🟡 scale in /
+    🔴 wait. Designed to survive Telegram's Markdown and a 40-char viewport.
+    """
+    verdict = {"pullback — accumulate": "🟢 accumulate",
+               "neutral — scale in":   "🟡 scale in",
+               "extended — wait":      "🔴 wait"}
+    L = [f"🎯 *Top picks* · {plan['horizon']//21}m horizon · as of {plan['as_of']}",
+         "_gated · risk-adjusted · diversified · HRP-weighted_", ""]
+    for i, p in enumerate(plan["picks"][:top], 1):
+        rsi = p.get("rsi_14") or 50; gap = p.get("sma_gap_50") or 0
+        t = ("extended — wait" if rsi > 65 or gap > 0.10
+             else "pullback — accumulate" if rsi < 40 or gap < -0.05
+             else "neutral — scale in")
+        wt = (p.get("weight") or 0) * 100
+        L.append(f"{i}. *{p['ticker']}*  ${p['close']:,.0f}  ·  {wt:.0f}%  "
+                 f"{_emoji(p['theme'])} {p['theme'].replace('_',' ')[:14]}  ·  {verdict[t]}")
+    n = plan.get("effective_n")
+    themes = len({p["theme"] for p in plan["picks"]})
+    L += ["", f"_{len(plan['picks'])} names · {themes} themes · effective N {n}_"]
+    return "\n".join(L)
+
+
 def compare(top_n: int = 10) -> str:
     feats, _ = latest_features()
     meta = load_sectors()
@@ -309,12 +350,13 @@ def main() -> int:
     ap.add_argument("--horizon", type=int, default=252)
     ap.add_argument("--json", type=Path)
     ap.add_argument("--compare", action="store_true")
+    ap.add_argument("--compact", action="store_true", help="phone-width card for the brief")
     a = ap.parse_args()
     if a.compare:
         print(compare(a.top))
         return 0
     plan = build(a.top, a.horizon)
-    print(render(plan))
+    print(render_compact(plan, a.top) if a.compact else render(plan))
     if a.json:
         a.json.write_text(json.dumps(plan, indent=2, default=str))
     return 0

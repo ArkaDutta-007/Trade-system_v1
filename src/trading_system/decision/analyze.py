@@ -34,8 +34,8 @@ from .groundings import (
     model_grounding,
 )
 from .report import write_decision_report
-from .explain import explain_report, DEEPSEEK_DEFAULT_MODEL
-from ..ingestion.llm_config import llm_api_key
+from .explain import explain_report
+from ..ingestion.llm_config import llm_api_key, llm_provider
 
 logger = get_logger(__name__)
 
@@ -475,17 +475,17 @@ def analyze_symbol(
         # ---- DeepSeek AI narration (auto-appended to the report) ----
         api_key = llm_api_key()
         if api_key:
-            logger.info(f"Requesting DeepSeek narration for {ticker}…")
+            logger.info(f"Requesting {llm_provider()} narration for {ticker}…")
             try:
                 from .explain import explain_decision
-                narration = explain_decision(asdict(result), api_key=api_key, model=DEEPSEEK_DEFAULT_MODEL)
+                narration = explain_decision(asdict(result), api_key=api_key)   # model resolved lazily inside
                 # Append narration section to the markdown file
                 separator = "\n\n---\n\n## 🤖 AI Analysis (DeepSeek)\n\n"
                 with open(md_path, "a") as f:
                     f.write(separator + narration + "\n")
-                logger.info(f"DeepSeek narration appended to {md_path.name}")
+                logger.info(f"{llm_provider()} narration appended to {md_path.name}")
             except Exception as e:
-                logger.warning(f"DeepSeek narration failed (non-fatal): {e}")
+                logger.warning(f"{llm_provider()} narration failed (non-fatal): {e}")
         else:
             logger.debug("LLM_API_KEY not set — skipping AI narration")
     else:

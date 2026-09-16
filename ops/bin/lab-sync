@@ -4,6 +4,8 @@
 #   lab-sync                 # list projects available on the lab server
 #   lab-sync HAUNT_steer     # sync one project (incremental, resumable)
 #   lab-sync HAUNT_steer -n  # dry-run: show what WOULD change, transfer nothing
+#   lab-sync X --mirror      # exact mirror (deletes local-only files)
+#   lab-sync X --include-huge  # also pull files >1 GB (default skips them)
 #
 # Uses the ed25519 key installed 2026-09-08, so it never prompts. Deliberately
 # does NOT pass --delete: local-only files are left alone. Run with --mirror if
@@ -15,13 +17,17 @@ DEST=/home/ad2688/Desktop/Works_ongoing
 
 proj="${1:-}"
 shift 2>/dev/null || true
-dry=""; mirror=""
+dry=""; mirror=""; maxsize="--max-size=1G"
 for a in "$@"; do
   case "$a" in
-    -n|--dry-run) dry="--dry-run" ;;
-    --mirror)     mirror="--delete" ;;
+    -n|--dry-run)   dry="--dry-run" ;;
+    --mirror)       mirror="--delete" ;;
+    --include-huge) maxsize="" ;;     # pull files >1G too (harvest arrays etc.)
   esac
 done
+# Files over 1 GB are skipped by default: HAUNT_steer alone carries 226 GB of
+# regenerable activation harvests (7 GB .npy each) — more than this disk has
+# free. Pass --include-huge only after checking df -h.
 
 if [[ -z "$proj" ]]; then
   echo "Projects on $LAB:$REMOTE_ROOT —"
@@ -39,13 +45,14 @@ fi
 
 mkdir -p "$DEST"
 echo "syncing $proj  ($LAB:$REMOTE_ROOT/$proj → $DEST/)${dry:+  [DRY RUN]}${mirror:+  [MIRROR]}"
-rsync -az --partial --human-readable --info=stats2 $dry $mirror \
+rsync -az --partial --human-readable --info=stats2 $dry $mirror $maxsize \
   "$LAB:$REMOTE_ROOT/$proj" "$DEST/" 2>&1 \
   | grep -E "Number of regular files transferred|Total transferred file size|deleting " | head -20
 
 if [[ -z "$dry" ]]; then
+  sizef=$([[ -n "$maxsize" ]] && echo "-not -size +1G" || echo "")
   miss=$(comm -23 \
-    <(ssh -o BatchMode=yes "$LAB" "cd $REMOTE_ROOT/$proj && find . -type f | sort") \
+    <(ssh -o BatchMode=yes "$LAB" "cd $REMOTE_ROOT/$proj && find . -type f $sizef | sort") \
     <(cd "$DEST/$proj" && find . -type f | sort) | wc -l)
   echo "verify: $miss remote file(s) missing locally  $([[ $miss -eq 0 ]] && echo '✅' || echo '⚠')"
   echo "local size: $(du -sh "$DEST/$proj" | cut -f1)"

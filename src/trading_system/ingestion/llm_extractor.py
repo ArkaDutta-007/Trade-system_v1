@@ -26,7 +26,7 @@ logger = get_logger(__name__)
 # Cloud LLM endpoint — OpenAI-completions shape, provider set by env.
 # See ingestion/llm_config.py: LLM_BASE_URL / LLM_MODEL / LLM_API_KEY, falling
 # back to DeepSeek's defaults so an existing .env keeps working.
-DEEPSEEK_BASE_URL = llm_base_url()
+DEEPSEEK_BASE_URL = llm_base_url()      # default only — call sites use llm_base_url() lazily (see explain.py note)
 DEEPSEEK_DEFAULT_MODEL = llm_model()
 DEEPSEEK_REASONING_MODEL = os.environ.get("LLM_REASONING_MODEL", "deepseek-reasoner")
 
@@ -106,7 +106,7 @@ class LLMRouter:
     deepseek_api_key: str | None = field(
         default_factory=llm_api_key
     )
-    deepseek_model: str = DEEPSEEK_DEFAULT_MODEL
+    deepseek_model: str = field(default_factory=llm_model)   # resolved at construction, not import
     ollama: OllamaClient = field(default_factory=OllamaClient)
     _active_backend: str = field(default="unknown", init=False, repr=False)
     # rolling token accounting so we can see disk-cache effectiveness
@@ -190,7 +190,7 @@ class LLMRouter:
                 payload["response_format"] = {"type": "json_object"}
             try:
                 resp = requests.post(
-                    DEEPSEEK_BASE_URL,
+                    llm_base_url(),
                     headers={
                         "Authorization": f"Bearer {self.deepseek_api_key}",
                         "Content-Type": "application/json",
@@ -265,7 +265,7 @@ def enrich_event(
     ticker: str,
     headline: str,
     api_key: str | None = None,
-    model: str = DEEPSEEK_DEFAULT_MODEL,
+    model: str | None = None,   # None -> llm_model() at call time
     router: LLMRouter | None = None,
 ) -> dict[str, Any] | None:
     """Extract structured event fields from a single headline.
@@ -275,6 +275,7 @@ def enrich_event(
 
     Returns a dict with the enriched fields, or None if LLM unavailable.
     """
+    model = model or llm_model()   # resolve after .env is loaded, not at import
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": _USER_TMPL.format(
@@ -307,7 +308,7 @@ def enrich_event(
 
     try:
         resp = requests.post(
-            DEEPSEEK_BASE_URL,
+            llm_base_url(),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -326,7 +327,7 @@ def enrich_event(
 def batch_enrich_events(
     rows: list[dict[str, Any]],
     api_key: str | None = None,
-    model: str = DEEPSEEK_DEFAULT_MODEL,
+    model: str | None = None,   # None -> llm_model() at call time
     router: LLMRouter | None = None,
 ) -> list[dict[str, Any]]:
     """Enrich a list of raw event rows in-place.
@@ -337,6 +338,7 @@ def batch_enrich_events(
 
     V2: accepts an optional LLMRouter for DeepSeek-with-Ollama-fallback.
     """
+    model = model or llm_model()   # resolve after .env is loaded, not at import
     from ..features.sentiment import naive_sentiment
 
     # Determine if LLM is available
@@ -414,7 +416,7 @@ def compute_apprehension_scores(
     as_of_date: "date | None" = None,
     days: int = 7,
     api_key: str | None = None,
-    model: str = DEEPSEEK_DEFAULT_MODEL,
+    model: str | None = None,   # None -> llm_model() at call time
     router: LLMRouter | None = None,
 ) -> "pl.DataFrame":
     """Compute one apprehension score per ticker using LLM or rule-based fallback.
@@ -442,6 +444,7 @@ def compute_apprehension_scores(
         apprehension_score (pl.Float64), outlook (pl.Utf8),
         apprehension_drivers (pl.List[pl.Utf8])
     """
+    model = model or llm_model()   # resolve after .env is loaded, not at import
     import polars as pl
     from datetime import date as _date, timedelta
 
