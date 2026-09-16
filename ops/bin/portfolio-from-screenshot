@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Turn a Fidelity portfolio screenshot into an updated portfolio state + trade
+decisions.
+
+Flow:
+  1. OCR the screenshot with a vision LLM (default gemma4:31b-cloud via the
+     local Ollama gateway) into a strict holdings JSON.
+  2. Validate, then MERGE into the gitignored, private
+     "portfolio and watchlist.json" (the playbook's source of truth) — the
+     screenshot is treated as *current truth* for positions/prices, while
+     cost-basis is inherited from the prior file when the shot doesn't show it.
+     The old file is backed up (chmod 600) under ~/trade-ops/private/backups/
+     first, so any mis-parse is one `cp` away from being undone.
+  3. Emit buy/sell/hold + future-prediction decisions (ts brief + ts picks).
+
+Usage:
+    portfolio-from-screenshot <image> [--apply] [--json OUT] [--report OUT]
+
+Safety:
+  * Nothing is written to the portfolio file unless extraction passes validation
+    AND --apply is given (dry-run by default: prints the parsed diff only).
+  * The portfolio file and every backup are chmod 600; backups live in a 700 dir.
+  * Holdings values are never written to any shared log.
+
+Privacy note: gemma4:31b-cloud is an Ollama *cloud* model, so the image bytes
+leave the box for OCR. Set VISION_MODEL to a locally-pulled vision model
+(e.g. llama3.2-vision) for fully on-device parsing.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import date
+from pathlib import Path
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+VISION_MODEL = os.environ.get("VISION_MODEL", "gemma4:31b-cloud")
+REPO = Path(os.environ.get("TRADE_REPO", "/home/ad2688/Desktop/Trade-system_v1"))
+PORTFOLIO = REPO / "portfolio and watchlist.json"
+BACKUP_DIR = Path.home() / "trade-ops/private/backups"
+TS = REPO / "venv/bin/ts"
+
+EXTRACT_PROMPT = (
+    "You are reading a screenshot of a Fidelity brokerage account 'Positions' "
+    "screen. Extract EVERY row. Return ONLY minified JSON, no prose, no code "
+    "fence, shaped exactly:\n"
+    '{"holdings":[{"symbol":str,"quantity":number,"last_price":number,'
+    '"current_value":number,"average_cost":number|null,'
+    '"total_gain_loss":number|null,"total_gain_loss_pct":number|null}],'
+    '"cash":[{"symbol":str,"name":str,"value":number}]}\n'
+    "Rules: money-market/sweep rows (SPAXX, FDRXX, CORE, 'Cash') go in `cash`, "
+    "not holdings. Numbers are plain (no $ or commas or % signs). Percent values "
+    "keep their sign (a loss is negative). If a field is not visible use null. "
+    "Do not invent tickers or rows that are not clearly legible."
+)
+
+
+def die(msg: str, code: int = 1) -> "None":
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def ollama_vision(image_path: Path) -> str:
+    import urllib.request
+
+    b64 = base64.b64encode(image_path.read_bytes()).decode()
+    payload = {
+        "model": VISION_MODEL,
+        "stream": False,
+        "prompt": EXTRACT_PROMPT,
+        "images": [b64],
+        "options": {"temperature": 0},
+    }
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/generate",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return json.load(r).get("response", "")
+    except Exception as e:  # noqa: BLE001
+        die(f"vision call to {VISION_MODEL} failed: {e!r}")
+
+
+def parse_json_blob(text: str) -> dict:
+    """Pull the first JSON object out of a possibly fenced LLM response."""
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?", "", t).strip()
+    t = re.sub(r"```$", "", t).strip()
+    start = t.find("{")
+    end = t.rfind("}")
+    if start == -1 or end == -1:
+        die(f"no JSON object in model output:\n{text[:400]}")
+    try:
+        return json.loads(t[start : end + 1])
+    except json.JSONDecodeError as e:
+        die(f"could not parse model JSON ({e}):\n{text[:400]}")
+
+
+_TICKER = re.compile(r"^[A-Z][A-Z.\-]{0,6}$")
+
+
+def _num(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).replace("$", "").replace(",", "").replace("%", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def validate(parsed: dict) -> tuple[list, list]:
+    holds = parsed.get("holdings") or []
+    cash = parsed.get("cash") or []
+    clean_h = []
+    for h in holds:
+        sym = str(h.get("symbol", "")).upper().strip()
+        qty = _num(h.get("quantity"))
+        val = _num(h.get("current_value"))
+        if not _TICKER.match(sym) or qty is None or val is None:
+            continue  # skip illegible / malformed rows rather than corrupt state
+        clean_h.append(
+            {
+                "symbol": sym,
+                "quantity": qty,
+                "last_price": _num(h.get("last_price")),
+                "current_value": val,
+                "average_cost": _num(h.get("average_cost")),
+                "total_gain_loss": _num(h.get("total_gain_loss")),
+                "total_gain_loss_pct": _num(h.get("total_gain_loss_pct")),
+            }
+        )
+    clean_c = []
+    for c in cash:
+        sym = str(c.get("symbol", "")).upper().strip()
+        val = _num(c.get("value"))
+        if sym and val is not None:
+            clean_c.append({"symbol": sym, "name": c.get("name", sym), "value": val})
+    if not clean_h:
+        die("extraction produced zero valid holdings — refusing to touch the "
+            "portfolio file. Re-shoot the screenshot (clear, un-cropped).")
+    return clean_h, clean_c
+
+
+def merge(existing: dict, new_h: list, new_c: list) -> tuple[dict, dict]:
+    """Overlay parsed positions onto the existing file, inheriting cost-basis."""
+    prev = {h["symbol"]: h for h in existing.get("holdings", [])}
+    acct = ""
+    accts = {h.get("account") for h in existing.get("holdings", []) if h.get("account")}
+    if len(accts) == 1:
+        acct = next(iter(accts))
+
+    merged = []
+    for h in new_h:
+        base = dict(prev.get(h["symbol"], {}))
+        avg = h["average_cost"] if h["average_cost"] is not None else base.get("average_cost")
+        cbt = base.get("cost_basis_total")
+        if h["average_cost"] is not None:
+            cbt = round(h["average_cost"] * h["quantity"], 2)  # basis follows shown avg cost
+        elif avg is not None:
+            cbt = round(avg * h["quantity"], 2)
+        lp = h["last_price"] if h["last_price"] is not None else (
+            round(h["current_value"] / h["quantity"], 2) if h["quantity"] else base.get("last_price")
+        )
+        row = {
+            "account": base.get("account", acct or "SCREENSHOT"),
+            "symbol": h["symbol"],
+            "name": base.get("name", h["symbol"]),
+            "type": base.get("type", "equity"),
+            "status": "held",
+            "quantity": h["quantity"],
+            "last_price": lp,
+            "current_value": h["current_value"],
+            "cost_basis_total": cbt,
+            "average_cost": avg,
+            "total_gain_loss": h["total_gain_loss"],
+            "total_gain_loss_pct": h["total_gain_loss_pct"],
+        }
+        merged.append(row)
+
+    out = dict(existing)
+    out["holdings"] = merged
+    if new_c:
+        out["cash_and_other"] = [
+            {"account": acct or "SCREENSHOT", "symbol": c["symbol"],
+             "name": c["name"], "type": "money_market", "value": c["value"]}
+            for c in new_c
+        ]
+    md = dict(out.get("metadata", {}))
+    md["generated"] = date.today().isoformat()
+    md["source"] = f"telegram screenshot via {VISION_MODEL}"
+    out["metadata"] = md
+    summ = dict(out.get("summary", {}))
+    summ["holdings_count"] = len(merged)
+    out["summary"] = summ
+
+    # diff for the human
+    new_syms = {h["symbol"] for h in new_h}
+    diff = {
+        "added": sorted(new_syms - set(prev)),
+        "removed": sorted(set(prev) - new_syms),
+        "kept": sorted(new_syms & set(prev)),
+        "total_value": round(sum(h["current_value"] for h in merged), 2),
+        "cash_value": round(sum(c["value"] for c in new_c), 2) if new_c else None,
+    }
+    return out, diff
+
+
+def run_ts(args: list, timeout: int) -> str:
+    try:
+        p = subprocess.run(
+            [str(TS), *args], cwd=REPO, capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "COLUMNS": "160"},
+        )
+        return p.stdout or p.stderr
+    except Exception as e:  # noqa: BLE001
+        return f"[ts {' '.join(args)} failed: {e}]"
+
+
+def decisions_report(diff: dict) -> str:
+    """Concise buy/sell/hold + future picks, built from the updated file."""
+    held = [h for h in diff["kept"] + diff["added"]]
+    lines = ["## 📊 Decisions\n"]
+    flags = run_ts(["flags"], 120)
+    m = re.search(r"COMPOSITE:.*", flags)
+    lines.append(f"**Regime:** {m.group(0) if m else 'see brief'}\n")
+
+    sig = run_ts(["signals", "--stance", "ALL"], 300)
+    lines.append("**Your positions (model stance):**")
+    for sym in sorted(held):
+        row = next((ln for ln in sig.splitlines()
+                    if re.search(rf"[│|]\s*{re.escape(sym)}\s*[│|]", ln)), None)
+        if row:
+            cells = [c.strip() for c in re.split(r"[│|]", row) if c.strip()]
+            stance = cells[1] if len(cells) > 1 else "?"
+            lines.append(f"  • {sym:<6} {stance}")
+        else:
+            lines.append(f"  • {sym:<6} (no model signal — off-universe)")
+    picks = run_ts(["picks", "--horizon", "252", "--top", "10", "-u", "liquid"], 900)
+    pick_syms = re.findall(r"[│|]\s*\d+\s*[│|]\s*([A-Z]{1,6})\s*[│|]", picks)
+    if pick_syms:
+        lines.append("\n**Future picks (12m):** " + ", ".join(pick_syms[:10]))
+        new_ideas = [s for s in pick_syms if s not in set(held)]
+        if new_ideas:
+            lines.append("**Not currently held:** " + ", ".join(new_ideas[:10]))
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("image", type=Path, nargs="?",
+                    help="screenshot to OCR with the vision model")
+    ap.add_argument("--from-json", type=Path,
+                    help="skip vision; read pre-extracted {holdings,cash} JSON "
+                         "(e.g. produced by the agent's own vision)")
+    ap.add_argument("--apply", action="store_true", help="write the portfolio file (else dry-run)")
+    ap.add_argument("--json", type=Path, help="also write merged portfolio JSON here")
+    ap.add_argument("--report", type=Path, help="write the decision report here")
+    a = ap.parse_args()
+
+    if not PORTFOLIO.exists():
+        die(f"portfolio file missing: {PORTFOLIO}")
+
+    if a.from_json:
+        try:
+            parsed = json.loads(a.from_json.read_text())
+        except Exception as e:  # noqa: BLE001
+            die(f"could not read --from-json {a.from_json}: {e}")
+    else:
+        if not a.image or not a.image.exists():
+            die("provide an existing <image> or --from-json <file>")
+        parsed = parse_json_blob(ollama_vision(a.image))
+    new_h, new_c = validate(parsed)
+    existing = json.loads(PORTFOLIO.read_text())
+    merged, diff = merge(existing, new_h, new_c)
+
+    hdr = (f"📸 Parsed {len(new_h)} holdings"
+           + (f" + {len(new_c)} cash rows" if new_c else "")
+           + f" · total ${diff['total_value']:,.0f}"
+           + (f" · cash ${diff['cash_value']:,.0f}" if diff["cash_value"] else ""))
+    changes = (f"changes: +{diff['added'] or '—'}  −{diff['removed'] or '—'}  "
+               f"(kept {len(diff['kept'])})")
+    print(hdr)
+    print(changes)
+
+    if not a.apply:
+        print("\n[dry-run] re-run with --apply to write the portfolio file.")
+        if a.json:
+            a.json.write_text(json.dumps(merged, indent=2))
+        return 0
+
+    # backup then write (chmod 600)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = date.today().isoformat() + "-" + str(int(__import__("time").time()))
+    bak = BACKUP_DIR / f"portfolio-{stamp}.json"
+    bak.write_text(PORTFOLIO.read_text())
+    bak.chmod(0o600)
+    PORTFOLIO.write_text(json.dumps(merged, indent=2))
+    PORTFOLIO.chmod(0o600)
+    print(f"✅ portfolio updated · backup {bak}")
+
+    report = f"# Portfolio update — {date.today()}\n\n{hdr}\n\n{changes}\n\n" + decisions_report(diff)
+    tgt = a.report or (Path.home() / f"trade-ops/briefs/portfolio-decisions-{date.today()}.md")
+    tgt.write_text(report)
+    print(f"📝 decisions → {tgt}\n")
+    print(report)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

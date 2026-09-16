@@ -38,6 +38,7 @@ backtest:
   commission_bps: 1.0          # 1 basis point
   slippage_bps: 2.0            # 2 basis points
   spread_bps: 1.0
+  impact_coeff_bps: 10.0       # sqrt market impact (0 = legacy flat costs)
   signal_delay_days: 1         # signal at t executes at t+1 open
   long_only: true
   max_gross_exposure: 1.0
@@ -52,10 +53,18 @@ model:
   type: lightgbm
   target: forward_return_5d
   horizon_days: 5
+  # "base14" (legacy technical set) | "wide" (all numeric gold features minus
+  # identifiers/levels/targets) | explicit list of column names.
+  feature_columns: wide
+  # Predict within-date relative return instead of absolute (research only —
+  # the ±0.5% decision thresholds assume an absolute score; see train.py).
+  xsec_neutralize: false
   walk_forward:
     train_years: 4
     test_years: 1
     step_years: 1
+    purge_days: 5      # drop last N trading days of train (labels overlap test)
+    embargo_days: 5    # skip first N trading days of test
   params:
     num_leaves: 63
     learning_rate: 0.05

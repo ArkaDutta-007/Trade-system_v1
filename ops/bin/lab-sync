@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Pull a project from the RIT lab server into ~/Desktop/Works_ongoing/.
+#
+#   lab-sync                 # list projects available on the lab server
+#   lab-sync HAUNT_steer     # sync one project (incremental, resumable)
+#   lab-sync HAUNT_steer -n  # dry-run: show what WOULD change, transfer nothing
+#
+# Uses the ed25519 key installed 2026-09-08, so it never prompts. Deliberately
+# does NOT pass --delete: local-only files are left alone. Run with --mirror if
+# you truly want the local copy to match the server exactly.
+set -uo pipefail
+LAB=lab
+REMOTE_ROOT=/home/ad2688/Research
+DEST=/home/ad2688/Desktop/Works_ongoing
+
+proj="${1:-}"
+shift 2>/dev/null || true
+dry=""; mirror=""
+for a in "$@"; do
+  case "$a" in
+    -n|--dry-run) dry="--dry-run" ;;
+    --mirror)     mirror="--delete" ;;
+  esac
+done
+
+if [[ -z "$proj" ]]; then
+  echo "Projects on $LAB:$REMOTE_ROOT —"
+  ssh -o BatchMode=yes "$LAB" "cd $REMOTE_ROOT && du -sh */ 2>/dev/null | sort -rh" \
+    | sed 's/^/  /'
+  echo
+  echo "Usage: lab-sync <project> [-n] [--mirror]"
+  exit 0
+fi
+
+if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$LAB" "test -d $REMOTE_ROOT/$proj"; then
+  echo "error: $REMOTE_ROOT/$proj not found on $LAB" >&2
+  exit 1
+fi
+
+mkdir -p "$DEST"
+echo "syncing $proj  ($LAB:$REMOTE_ROOT/$proj → $DEST/)${dry:+  [DRY RUN]}${mirror:+  [MIRROR]}"
+rsync -az --partial --human-readable --info=stats2 $dry $mirror \
+  "$LAB:$REMOTE_ROOT/$proj" "$DEST/" 2>&1 \
+  | grep -E "Number of regular files transferred|Total transferred file size|deleting " | head -20
+
+if [[ -z "$dry" ]]; then
+  miss=$(comm -23 \
+    <(ssh -o BatchMode=yes "$LAB" "cd $REMOTE_ROOT/$proj && find . -type f | sort") \
+    <(cd "$DEST/$proj" && find . -type f | sort) | wc -l)
+  echo "verify: $miss remote file(s) missing locally  $([[ $miss -eq 0 ]] && echo '✅' || echo '⚠')"
+  echo "local size: $(du -sh "$DEST/$proj" | cut -f1)"
+fi

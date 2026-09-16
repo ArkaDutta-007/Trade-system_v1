@@ -1,8 +1,10 @@
 """Walk-forward training using a comprehensive 14-model ensemble.
 
 For each test window:
-  - train on years strictly before the window
-  - validate on a held-out slice inside the training window
+  - train on years strictly before the window, PURGED so no training label's
+    forward window overlaps the test period (López de Prado purge + embargo)
+  - validate on the LAST `val_fraction` of training DATES (temporal split —
+    never row order, which mixes dates and leaks)
   - fit 14 base learners + 3 ensemble variants (blend, stack-ridge, stack-lgbm)
   - compute IC/MAE/R² comparative metrics per model
   - predict the test window using the best ensemble
@@ -30,6 +32,11 @@ class FeatureSpec:
     target: str = "forward_return_5d"
     drop_na: bool = True
     extra_drop: list[str] = field(default_factory=lambda: ["forward_return_20d"])
+    # Predict the within-date relative return instead of the absolute return.
+    # Strips market beta from the label — typically raises rank IC — but the
+    # score is then RELATIVE: decision thresholds must switch to ranks, not
+    # absolute ±0.5% cutoffs. Leave False for the live-threshold pipeline.
+    xsec_neutralize: bool = False
 
 
 def _make_xy(df: pl.DataFrame, spec: FeatureSpec) -> tuple[np.ndarray, np.ndarray, pl.DataFrame]:
@@ -37,6 +44,11 @@ def _make_xy(df: pl.DataFrame, spec: FeatureSpec) -> tuple[np.ndarray, np.ndarra
     sub = df.select([c for c in keep if c in df.columns])
     if spec.drop_na:
         sub = sub.drop_nulls(subset=[spec.target] + spec.feature_columns)
+    if spec.xsec_neutralize:
+        sub = sub.with_columns(
+            (pl.col(spec.target) - pl.col(spec.target).mean().over("date"))
+            .alias(spec.target)
+        )
     X = sub.select(spec.feature_columns).to_numpy().astype(np.float64)
     y = sub[spec.target].to_numpy().astype(np.float64)
     return X, y, sub
@@ -64,9 +76,12 @@ def train_walk_forward(
     test_years: int = 1,
     step_years: int = 1,
     params: dict | None = None,  # kept for back-compat, unused by ensemble
-    val_fraction: float = 0.2,   # fraction of train window used for validation
+    val_fraction: float = 0.2,   # fraction of train DATES used for validation
+    purge_days: int = 5,         # trading days dropped from the end of train
+                                 # (their forward labels overlap the test window)
+    embargo_days: int = 5,       # trading days skipped at the start of test
 ) -> tuple[list, pl.DataFrame, pl.DataFrame]:
-    """Run walk-forward ensemble training.
+    """Run walk-forward ensemble training with purge + embargo.
 
     Returns
     -------
@@ -82,23 +97,37 @@ def train_walk_forward(
     for fold_i, (tr_start, tr_end, te_end) in enumerate(
         _windows(dates, train_years, test_years, step_years)
     ):
-        train_df = features.filter((pl.col("date") >= tr_start) & (pl.col("date") < tr_end))
-        test_df = features.filter((pl.col("date") >= tr_end) & (pl.col("date") < te_end))
-        if train_df.is_empty() or test_df.is_empty():
+        # Purge: drop the last `purge_days` trading days of the train window —
+        # their forward_return labels are computed from prices inside the test
+        # window. Embargo: skip the first `embargo_days` of the test window.
+        tr_dates = [d for d in dates if tr_start <= d < tr_end]
+        te_dates = [d for d in dates if tr_end <= d < te_end]
+        if purge_days:
+            tr_dates = tr_dates[:-purge_days]
+        if embargo_days:
+            te_dates = te_dates[embargo_days:]
+        if len(tr_dates) < 60 or not te_dates:
             continue
 
-        X_all, y_all, _ = _make_xy(train_df, spec)
+        # Temporal validation split: last `val_fraction` of train DATES.
+        vsplit = max(1, int(len(tr_dates) * (1 - val_fraction)))
+        fit_dates, val_dates = tr_dates[:vsplit], tr_dates[vsplit:]
+
+        train_df = features.filter(pl.col("date").is_in(fit_dates))
+        val_df = features.filter(pl.col("date").is_in(val_dates))
+        test_df = features.filter(pl.col("date").is_in(te_dates))
+        if train_df.is_empty() or val_df.is_empty() or test_df.is_empty():
+            continue
+
+        X_tr, y_tr, _ = _make_xy(train_df, spec)
+        X_val, y_val, _ = _make_xy(val_df, spec)
         X_te, y_te, test_meta = _make_xy(test_df, spec)
-        if len(X_all) < 20 or len(X_te) == 0:
+        if len(X_tr) < 20 or len(X_te) == 0:
             continue
-
-        # Split train into train/val
-        split = max(10, int(len(X_all) * (1 - val_fraction)))
-        X_tr, y_tr = X_all[:split], y_all[:split]
-        X_val, y_val = X_all[split:], y_all[split:]
 
         logger.info(
-            f"Fold {fold_i} {tr_start}->{tr_end}->{te_end}: "
+            f"Fold {fold_i} {tr_start}->{tr_end}->{te_end} "
+            f"(purge={purge_days}td embargo={embargo_days}td): "
             f"train={len(X_tr)}, val={len(X_val)}, test={len(X_te)}"
         )
 

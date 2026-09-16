@@ -1,0 +1,13 @@
+--- a/src/trading_system/backtesting/vectorized.py
++++ b/src/trading_system/backtesting/vectorized.py
+@@ -87,7 +87,9 @@
+     turnover[0] = np.abs(W[0]).sum()
+     turnover[1:] = np.abs(W[1:] - W[:-1]).sum(axis=1)
+ 
+-    cost_drag = turnover * (cost.total_bps / 10_000.0)
++    # Flat costs + optional square-root market impact (see CostModel).
++    cost_drag = (turnover * cost.total_bps
++                 + getattr(cost, "impact_coeff_bps", 0.0) * turnover ** 1.5) / 10_000.0
+     net_ret = gross_ret - cost_drag
+     equity = initial_cash * np.cumprod(1.0 + net_ret)
+ 

@@ -1,1 +1,3 @@
 {"prediction_id": "2c33d4670dab", "resolved_at": "2026-07-10T09:22:23+00:00", "matured_on": "2026-07-09", "terminal_price": 29.2, "realized_return": 0.07908, "forecast_return": 0.00702, "hit": true, "in_band": true}
+{"prediction_id": "b96f6c6e9593", "resolved_at": "2026-07-28T09:44:07+00:00", "matured_on": "2026-07-27", "terminal_price": 95.87, "realized_return": 0.28374, "forecast_return": 0.04861, "hit": true, "in_band": true}
+{"prediction_id": "10d86f4b62d8", "resolved_at": "2026-08-03T09:44:51+00:00", "matured_on": "2026-07-31", "terminal_price": 28.4, "realized_return": 0.02712, "forecast_return": 0.0528, "hit": true, "in_band": true}

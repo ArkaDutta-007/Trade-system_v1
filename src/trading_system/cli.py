@@ -297,20 +297,34 @@ def backtest(
     config: str = "configs/default.yaml",
     universe: str = UNIVERSE_OPT,
 ):
-    """Backtest a named strategy on the gold features."""
-    if strategy not in STRATS:
-        raise typer.BadParameter(f"Unknown strategy: {strategy}. Options: {list(STRATS)}")
+    """Backtest a named strategy on the gold features.
+
+    ``ml_ranker`` backtests the trained model itself: it loads the walk-forward
+    OOS predictions written by ``ts train`` (data/gold/predictions.parquet) and
+    trades top-k by score — the model's actual equity curve, not just its IC.
+    """
+    if strategy != "ml_ranker" and strategy not in STRATS:
+        raise typer.BadParameter(
+            f"Unknown strategy: {strategy}. Options: {list(STRATS) + ['ml_ranker']}")
     cfg = get_config(config).use_universe(universe)
     ohlcv = pl.read_parquet(cfg.path("data_bronze") / "ohlcv_daily.parquet")
     feats_path = cfg.path("data_gold") / "features.parquet"
     feat = pl.read_parquet(feats_path) if feats_path.exists() else build_feature_matrix(ohlcv)
 
-    strat = STRATS[strategy]()
+    if strategy == "ml_ranker":
+        preds_path = cfg.path("data_gold") / "predictions.parquet"
+        if not preds_path.exists():
+            raise typer.BadParameter(
+                "ml_ranker needs data/gold/predictions.parquet — run `ts train` first.")
+        strat = MLRankerStrategy(predictions=pl.read_parquet(preds_path))
+    else:
+        strat = STRATS[strategy]()
     weights = strat.generate_signals(feat)
     cost = CostModel(
         commission_bps=cfg["backtest"]["commission_bps"],
         slippage_bps=cfg["backtest"]["slippage_bps"],
         spread_bps=cfg["backtest"]["spread_bps"],
+        impact_coeff_bps=cfg["backtest"].get("impact_coeff_bps", 0.0),
     )
     res = run_vectorized_backtest(
         ohlcv, weights, cost=cost,
@@ -340,14 +354,33 @@ def train(config: str = "configs/default.yaml"):
 
     cfg = get_config(config)
     feat = pl.read_parquet(cfg.path("data_gold") / "features.parquet")
+
+    _BASE14 = [
+        "mom_5d", "mom_20d", "mom_60d", "mom_120d", "mom_12m1m",
+        "vol_20d", "vol_60d", "rsi_14", "rel_vol_20",
+        "sma_gap_50", "sma_gap_200", "breakout_20", "dd_from_high_60",
+        "excess_ret_1d",
+    ]
+    # Columns that must never be features: identifiers, raw price/level fields
+    # (non-stationary), and the forward-return targets.
+    _NON_FEATURES = {
+        "date", "ticker", "open", "high", "low", "close", "adj_close", "volume",
+        "forward_return_5d", "forward_return_20d",
+        "sma_10", "sma_20", "sma_50", "sma_200", "atr_14",
+        "avg_dollar_volume_20", "bench_ret_1d",
+    }
+    feat_cfg = cfg["model"].get("feature_columns", "base14")
+    if feat_cfg == "wide":
+        cols = [c for c, dt in zip(feat.columns, feat.dtypes)
+                if c not in _NON_FEATURES and dt.is_numeric()]
+    elif isinstance(feat_cfg, list):
+        cols = feat_cfg
+    else:
+        cols = _BASE14
     spec = FeatureSpec(
-        feature_columns=[
-            "mom_5d", "mom_20d", "mom_60d", "mom_120d", "mom_12m1m",
-            "vol_20d", "vol_60d", "rsi_14", "rel_vol_20",
-            "sma_gap_50", "sma_gap_200", "breakout_20", "dd_from_high_60",
-            "excess_ret_1d",
-        ],
+        feature_columns=cols,
         target=cfg["model"]["target"],
+        xsec_neutralize=bool(cfg["model"].get("xsec_neutralize", False)),
     )
     spec.feature_columns = [c for c in spec.feature_columns if c in feat.columns]
     wf = cfg["model"]["walk_forward"]
@@ -357,6 +390,8 @@ def train(config: str = "configs/default.yaml"):
         train_years=wf["train_years"],
         test_years=wf["test_years"],
         step_years=wf["step_years"],
+        purge_days=wf.get("purge_days", 5),
+        embargo_days=wf.get("embargo_days", 5),
     )
 
     # Save OOS predictions
