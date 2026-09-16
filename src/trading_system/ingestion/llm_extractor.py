@@ -1,11 +1,13 @@
-"""DeepSeek-powered structured extraction from news/SEC headlines.
+"""LLM-powered structured extraction from news/SEC headlines.
 
-V2: Adds OllamaClient and LLMRouter for local-fallback support.
-Primary: DeepSeek V4 cloud API.
-Fallback: Ollama local server (deepseek-r1, llama3, etc.).
+Primary: any OpenAI-completions-shaped cloud endpoint (DeepSeek, Qwen/DashScope,
+OpenAI, ...), configured through ``LLM_API_KEY`` / ``LLM_BASE_URL`` /
+``LLM_MODEL`` — see :mod:`trading_system.ingestion.llm_config`.
+Fallback: a local or Ollama-cloud model via ``OLLAMA_HOST`` / ``OLLAMA_MODEL``.
+With no LLM at all, functions fall back to rule-based naive_sentiment().
 
-Set DEEPSEEK_API_KEY and optionally OLLAMA_HOST / OLLAMA_MODEL in env.
-Without any LLM key, functions fall back to rule-based naive_sentiment().
+The ``DEEPSEEK_*`` module constants are kept as names for backward
+compatibility; their values now come from the env-driven resolver.
 """
 from __future__ import annotations
 
@@ -17,13 +19,16 @@ from typing import Any
 import requests
 
 from ..utils import get_logger
+from .llm_config import llm_api_key, llm_base_url, llm_model, llm_provider
 
 logger = get_logger(__name__)
 
-# DeepSeek public API — OpenAI-compatible format.
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"   # latest V4 chat (fastest / cheapest)
-DEEPSEEK_REASONING_MODEL = "deepseek-reasoner"  # R1-class — highest capability
+# Cloud LLM endpoint — OpenAI-completions shape, provider set by env.
+# See ingestion/llm_config.py: LLM_BASE_URL / LLM_MODEL / LLM_API_KEY, falling
+# back to DeepSeek's defaults so an existing .env keeps working.
+DEEPSEEK_BASE_URL = llm_base_url()
+DEEPSEEK_DEFAULT_MODEL = llm_model()
+DEEPSEEK_REASONING_MODEL = os.environ.get("LLM_REASONING_MODEL", "deepseek-reasoner")
 
 # ---------------------------------------------------------------------------
 # V2: OllamaClient — calls a local Ollama server
@@ -84,20 +89,22 @@ class OllamaClient:
 
 @dataclass
 class LLMRouter:
-    """Routes LLM calls: tries DeepSeek cloud first, falls back to Ollama.
+    """Routes LLM calls: tries the configured cloud endpoint, falls back to Ollama.
 
     Usage::
 
         router = LLMRouter()  # picks up env vars automatically
         text = router.complete(messages=[...])
 
-    The router automatically falls back to Ollama if:
-      - DEEPSEEK_API_KEY is not set
-      - DeepSeek API returns an HTTP error or times out
+    Falls back to Ollama when no key is configured (``LLM_API_KEY``, or the
+    legacy ``DEEPSEEK_API_KEY``) or when the cloud call errors or times out.  A
+    key exported anywhere the process can see it — ``.env``, ``~/.bashrc``, a
+    systemd unit — counts as configured, which is the first thing to check
+    before concluding the router is misbehaving.
     """
 
     deepseek_api_key: str | None = field(
-        default_factory=lambda: os.environ.get("DEEPSEEK_API_KEY")
+        default_factory=llm_api_key
     )
     deepseek_model: str = DEEPSEEK_DEFAULT_MODEL
     ollama: OllamaClient = field(default_factory=OllamaClient)
@@ -109,9 +116,17 @@ class LLMRouter:
 
     @property
     def backend(self) -> str:
-        """Returns 'deepseek', 'ollama', or 'none' depending on what's available."""
+        """The provider label, 'ollama', or 'none' — whichever is available.
+
+        The label used to be the literal string ``"deepseek"`` whatever endpoint
+        was configured, which made a misconfigured run hard to read: an expired
+        key still reported a cloud backend, so every call went out, 402'd and
+        fell back per ticker.  It now names the actual provider
+        (``deepseek`` / ``qwen`` / ``openai`` / ``custom``), so the log says
+        where calls are going.
+        """
         if self.deepseek_api_key:
-            return "deepseek"
+            return llm_provider()
         if self.ollama.is_available():
             return "ollama"
         return "none"
@@ -184,7 +199,7 @@ class LLMRouter:
                     timeout=30,
                 )
                 resp.raise_for_status()
-                self._active_backend = "deepseek"
+                self._active_backend = llm_provider()
                 data = resp.json()
                 usage = data.get("usage", {}) or {}
                 # DeepSeek reports disk-cache hits/misses so we can verify the
@@ -278,7 +293,7 @@ def enrich_event(
         return None
 
     # Legacy direct DeepSeek path (backward compat)
-    api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = api_key or llm_api_key()
     if not api_key:
         return None
 
@@ -327,7 +342,7 @@ def batch_enrich_events(
     # Determine if LLM is available
     _router = router
     if _router is None:
-        api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+        api_key = api_key or llm_api_key()
         use_llm = bool(api_key)
         if not use_llm:
             logger.info("No LLM available — using rule-based sentiment fallback.")
@@ -441,7 +456,7 @@ def compute_apprehension_scores(
     if events is None or events.is_empty():
         return _EMPTY
 
-    api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = api_key or llm_api_key()
     today = as_of_date or _date.today()
     cutoff = today - timedelta(days=days)
 

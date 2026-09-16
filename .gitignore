@@ -27,3 +27,9 @@ reports/*
 
 *.duckdb
 *.duckdb.wal
+logs/
+
+# Working notes kept out of git on purpose: machine-specific paths, session
+# state, and findings that belong to the operator rather than the repo.
+HANDOFF.md
+docs/RESEARCH_V5.md

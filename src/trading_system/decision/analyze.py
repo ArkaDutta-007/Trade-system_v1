@@ -35,6 +35,7 @@ from .groundings import (
 )
 from .report import write_decision_report
 from .explain import explain_report, DEEPSEEK_DEFAULT_MODEL
+from ..ingestion.llm_config import llm_api_key
 
 logger = get_logger(__name__)
 
@@ -472,7 +473,7 @@ def analyze_symbol(
         json_path.write_text(_json.dumps(asdict(result), indent=2, default=str))
 
         # ---- DeepSeek AI narration (auto-appended to the report) ----
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        api_key = llm_api_key()
         if api_key:
             logger.info(f"Requesting DeepSeek narration for {ticker}…")
             try:
@@ -486,7 +487,7 @@ def analyze_symbol(
             except Exception as e:
                 logger.warning(f"DeepSeek narration failed (non-fatal): {e}")
         else:
-            logger.debug("DEEPSEEK_API_KEY not set — skipping AI narration")
+            logger.debug("LLM_API_KEY not set — skipping AI narration")
     else:
         result.decision_payload = asdict(result)
 

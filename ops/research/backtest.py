@@ -24,15 +24,17 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path("/home/ad2688/Desktop/Trade-system_v1")
-sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import add_repo_to_path, ops_root  # noqa: E402
+
+REPO = add_repo_to_path()
 
 import polars as pl  # noqa: E402
 from scipy import stats  # noqa: E402
 from trading_system.backtesting import compute_metrics, run_vectorized_backtest  # noqa: E402
 from trading_system.backtesting.slippage import CostModel  # noqa: E402
 
-OUT = Path.home() / "trade-ops/research/out"
+OUT = ops_root() / "research" / "out"
 TOP_K = 20
 CAP = 0.10
 ANN = 252

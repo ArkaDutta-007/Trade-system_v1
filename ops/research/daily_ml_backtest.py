@@ -16,8 +16,10 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path("/home/ad2688/Desktop/Trade-system_v1")
-sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import add_repo_to_path, ops_root  # noqa: E402
+
+REPO = add_repo_to_path()
 sys.path.insert(0, str(Path(__file__).parent))
 
 import polars as pl  # noqa: E402

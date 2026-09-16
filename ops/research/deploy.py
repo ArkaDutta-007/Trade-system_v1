@@ -26,8 +26,10 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path("/home/ad2688/Desktop/Trade-system_v1")
-sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import add_repo_to_path, ops_root  # noqa: E402
+
+REPO = add_repo_to_path()
 
 import polars as pl  # noqa: E402
 from trading_system.models.ensemble import EnsembleModel  # noqa: E402
@@ -36,7 +38,7 @@ from trading_system.models.model_registry import save_model  # noqa: E402
 sys.path.insert(0, str(Path(__file__).parent))
 from harness import BASE14, HORIZON_TD, EMBARGO_TD, TARGET, folds, wide_columns  # noqa: E402
 
-OUT = Path.home() / "trade-ops/research/out"
+OUT = ops_root() / "research" / "out"
 REGISTRY = REPO / "reports/models"
 
 

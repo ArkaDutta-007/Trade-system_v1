@@ -29,15 +29,17 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path("/home/ad2688/Desktop/Trade-system_v1")
-sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import add_repo_to_path, ops_root  # noqa: E402
+
+REPO = add_repo_to_path()
 
 import polars as pl  # noqa: E402  (repo venv)
 from scipy import stats  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
-OUT = Path.home() / "trade-ops/research/out"
+OUT = ops_root() / "research" / "out"
 OUT.mkdir(parents=True, exist_ok=True)
 
 TARGET = "forward_return_5d"

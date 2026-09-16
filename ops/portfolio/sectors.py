@@ -17,7 +17,10 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path("/home/ad2688/Desktop/Trade-system_v1")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import add_repo_to_path, ops_root  # noqa: E402
+
+REPO = add_repo_to_path()
 CACHE = Path(__file__).parent / "sectors.json"
 
 # Coarse "theme" grouping — what actually drives correlated drawdowns in this

@@ -23,11 +23,13 @@ import requests
 
 from ..ingestion.llm_extractor import LLMRouter
 from ..utils import get_logger
+from ..ingestion.llm_config import llm_api_key, llm_base_url, llm_model
 
 logger = get_logger(__name__)
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+# Provider-agnostic endpoint (see ingestion/llm_config.py).
+DEEPSEEK_BASE_URL = llm_base_url()
+DEEPSEEK_DEFAULT_MODEL = llm_model()
 
 # Stable prefix (cache-friendly). Asks for a tight, decision-useful structure
 # instead of free-form 450-word prose — cheaper AND more actionable.
@@ -110,11 +112,11 @@ def explain_decision(
         {"role": "user", "content": f"Decision JSON:\n{payload_json}"},
     ]
     _router = router or LLMRouter(
-        deepseek_api_key=api_key or os.environ.get("DEEPSEEK_API_KEY"),
+        deepseek_api_key=api_key or llm_api_key(),
         deepseek_model=model,
     )
     if _router.backend == "none":
-        return "No LLM backend available (set DEEPSEEK_API_KEY or run Ollama)."
+        return "No LLM backend available (set LLM_API_KEY or run Ollama)."
     out = _router.complete(messages, temperature=0.3, max_tokens=420)
     return out or "LLM returned no content."
 
@@ -128,7 +130,7 @@ def explain_report(
 
     Backward-compatible entry point for the ``ts explain`` CLI.
     """
-    api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+    api_key = api_key or llm_api_key()
     report_path = Path(report_path)
 
     # Prefer the JSON sidecar (compact, cache-friendly path)
