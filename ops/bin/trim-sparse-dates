@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Drop trailing dates with too few tickers from the gold feature matrix.
+
+WHY: `forecast_scores_latest` (and therefore `ts picks` / `ts signals` /
+picks_v2 / signals_v3) scores `features["date"].max()`. Japanese ADRs
+(MKKGY, SHECY, TOELY) post their daily bar hours before US names because Tokyo
+closes first, so the matrix can end on a date holding 3 of 362 tickers. max()
+lands there, finds no complete row, and every downstream pick step dies:
+"no complete feature rows for the latest date" (2026-09-15 validation run).
+
+This trims any TRAILING date whose ticker coverage is below MIN_FRAC of the
+median daily coverage. It only ever removes the sparse tail — never interior
+dates — and rewrites the (gitignored) parquet in place with a backup.
+
+The real fix belongs in the repo: pick the last date with adequate coverage
+inside forecast_scores_latest. Documented in HANDOFF.md.
+"""
+from __future__ import annotations
+import sys
+from pathlib import Path
+import polars as pl
+
+PATH = Path("/home/ad2688/Desktop/Trade-system_v1/data/gold/features.parquet")
+MIN_FRAC = 0.5
+
+
+def main() -> int:
+    if not PATH.exists():
+        print("no features.parquet"); return 0
+    f = pl.read_parquet(PATH)
+    counts = (f.group_by("date").agg(pl.len().alias("n")).sort("date"))
+    median_n = float(counts["n"].median())
+    threshold = MIN_FRAC * median_n
+    rows = counts.to_dicts()
+    drop = []
+    for r in reversed(rows):              # walk back from the newest date
+        if r["n"] < threshold:
+            drop.append(r["date"])
+        else:
+            break                          # first healthy date: stop
+    if not drop:
+        print(f"features.parquet OK: latest {rows[-1]['date']} has {rows[-1]['n']} tickers "
+              f"(median {median_n:.0f})")
+        return 0
+    bak = PATH.with_suffix(".parquet.pre-trim")
+    PATH.replace(bak)
+    trimmed = f.filter(~pl.col("date").is_in(drop))
+    trimmed.write_parquet(PATH, compression="zstd")
+    detail = ", ".join(f"{d} ({next(r['n'] for r in rows if r['date']==d)} tickers)" for d in drop)
+    print(f"trimmed {len(drop)} sparse trailing date(s): {detail}; "
+          f"latest is now {trimmed['date'].max()} (backup: {bak.name})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

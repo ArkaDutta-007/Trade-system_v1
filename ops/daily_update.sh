@@ -112,6 +112,10 @@ heavy_step "ts ledger --resolve (score matured predictions)" 900 ts ledger --res
 # last so the gold matrix matches the models for picks and for the dashboard.
 heavy_step "ts ingest -u liquid" 1800 ts ingest -u liquid
 heavy_step "ts features -u liquid --deep (rebuild gold to match models_store)" 7200 ts features -u liquid --deep
+# Japanese ADRs (MKKGY/SHECY/TOELY) post their bar hours before US names, so
+# the matrix can end on a date with 3 of 362 tickers; every pick step scores
+# date.max() and dies ("no complete feature rows"). Trim that sparse tail.
+heavy_step "Trim sparse trailing dates (ADR timezone guard)" 300 python3 /home/ad2688/trade-ops/bin/trim-sparse-dates
 
 # Derive ALL five flags from live data before the board is rendered, so the
 # brief never ships a hand-typed override that went stale months ago (F and C
