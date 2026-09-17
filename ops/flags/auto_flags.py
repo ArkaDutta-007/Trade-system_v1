@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -171,11 +172,18 @@ def fred(sid: str):
 BRENT_CACHE = STATE_DIR / "brent_cache.parquet"
 
 
+# Cache TTL for Brent. Kept short (45 min) because the flags now refresh hourly
+# and O is the only flag with a HARD RAIL — above $105 the playbook goes
+# defensives-only — so an oil move must not sit behind a stale cache. FRED
+# series keep their own 12h TTL: macro prints are daily/monthly, not intraday.
+BRENT_TTL_S = int(os.environ.get("BRENT_TTL_S", 45 * 60))
+
+
 def brent_series(n: int = 500) -> np.ndarray:
     """Brent front-month. Not in the local bronze panel (equities only), so it
     is fetched from yfinance and cached for 6h — one small request per day."""
     import time
-    if BRENT_CACHE.exists() and (time.time() - BRENT_CACHE.stat().st_mtime) < 6 * 3600:
+    if BRENT_CACHE.exists() and (time.time() - BRENT_CACHE.stat().st_mtime) < BRENT_TTL_S:
         return pl.read_parquet(BRENT_CACHE)["close"].to_numpy().astype(float)[-n:]
     try:
         import yfinance as yf
