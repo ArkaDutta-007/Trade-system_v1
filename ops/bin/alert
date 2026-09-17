@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Send an ops alert email to Arka ONLY, via the hardened trade-ops send-email
+# helper (which enforces the recipient allowlist + briefs/-only body files).
+# Usage: alert "Subject" ["body text"]     (body may also be piped on stdin)
+#
+# DE-DUPLICATION (added 2026-09-17). The heartbeat is an LLM: on 2026-09-16/17
+# it decided every hour that a missing daily-email log was a failure — the
+# email job has been intentionally disabled since 2026-09-08 — and sent 13
+# identical alerts. Prompt rules alone could not stop it, because the heartbeat
+# runs inside a session that had already accumulated its own earlier alerts and
+# was pattern-matching on them.
+#
+# So the CHANNEL enforces the rule instead: one email per issue per day. The
+# fingerprint is the subject with volatile parts stripped (digits, times,
+# ordinals like "sixth"), so "…(6th alert)" and "…(7th alert)" collapse to one.
+# A suppressed alert is still written to briefs/ and logged, so nothing is lost
+# — it simply does not become another email.
+#
+#   ALERT_FORCE=1 alert "..."   bypass de-duplication (deliberate re-send)
+set -uo pipefail
+SUBJECT="${1:?usage: alert <subject> [body]}"
+shift || true
+BODY_TEXT="${*:-}"
+if [[ -z "$BODY_TEXT" && ! -t 0 ]]; then
+  BODY_TEXT="$(cat)"
+fi
+BRIEFS="$HOME/trade-ops/briefs"
+LOG="$HOME/ops/logs/alerts-$(date +%Y-%m).log"
+SEEN_DIR="$HOME/trade-ops/private/alert-sent/$(date +%Y%m%d)"
+mkdir -p "$BRIEFS" "$SEEN_DIR" "$(dirname "$LOG")"
+
+F="$BRIEFS/alert-$(date +%Y%m%d-%H%M%S)-$$.md"
+{
+  echo "# Ops alert — $(date -Is) — $(hostname)"
+  echo
+  echo '```'
+  echo "${BODY_TEXT:-'(no details provided)'}"
+  echo '```'
+} > "$F"
+
+# fingerprint: lowercase subject, drop digits and ordinal words, squeeze space
+FP=$(printf '%s' "$SUBJECT" \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed -E 's/[0-9]+//g; s/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|st|nd|rd|th)\b//g' \
+  | tr -cd 'a-z ' | tr -s ' ' | sed 's/^ //; s/ $//' \
+  | md5sum | cut -c1-16)
+MARK="$SEEN_DIR/$FP"
+
+if [[ -e "$MARK" && "${ALERT_FORCE:-0}" != "1" ]]; then
+  n=$(( $(cat "$MARK" 2>/dev/null || echo 1) + 1 ))
+  echo "$n" > "$MARK"
+  echo "$(date -Is) SUPPRESSED (dup #$n today, fp=$FP) $SUBJECT — details in $F" >> "$LOG"
+  # keep the newest details on disk; do not email again today
+  exit 0
+fi
+echo 1 > "$MARK"
+echo "$(date -Is) SENT (fp=$FP) $SUBJECT" >> "$LOG"
+find "$HOME/trade-ops/private/alert-sent" -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null
+exec "$HOME/trade-ops/bin/send-email" "$SUBJECT" "$F" "arkadutta.cg@gmail.com"

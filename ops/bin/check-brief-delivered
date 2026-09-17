@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Deterministic check the heartbeat calls instead of guessing from log files.
+# Prints exactly one line: "OK ..." or "PROBLEM ...". Exit 0 either way.
+#
+# Delivery path since 2026-09-16: the trade-morning-brief cron composes the
+# brief on qwen3-max and the runner DELIVERS it to the Telegram group
+# (-5412027506). Email is DISABLED by Arka's request (2026-09-08) — a missing
+# ~/trade-ops/logs/email-*.log is expected and must never be alerted.
+set -uo pipefail
+TODAY=$(date +%F)
+BRIEF_ID="24c1850a-768c-42a7-ad16-c83451a822b8"
+BRIEF="$HOME/trade-ops/briefs/brief-$TODAY.md"
+DIGEST="$HOME/trade-ops/briefs/latest.md"
+
+# weekends / before 08:15: nothing is due yet
+dow=$(date +%u); hm=$(date +%H%M)
+if (( dow > 5 )); then echo "OK weekend — no brief due"; exit 0; fi
+if (( 10#$hm < 815 )); then echo "OK before 08:15 — brief not due yet"; exit 0; fi
+
+# 1. digest fresh?
+if ! grep -q "morning digest — $TODAY" "$DIGEST" 2>/dev/null; then
+  echo "PROBLEM digest ($DIGEST) is not dated $TODAY — daily pipeline (05:15) failed or did not run"; exit 0
+fi
+# 2. brief composed?
+if [[ ! -s "$BRIEF" ]]; then
+  echo "PROBLEM brief file $BRIEF missing — 07:45 brief agent did not run or failed"; exit 0
+fi
+# 3. delivered to Telegram? (the cron runner records deliveryStatus)
+rec=$(openclaw cron runs --id "$BRIEF_ID" --limit 1 2>/dev/null | python3 -c '
+import json,sys,datetime
+try:
+    e=json.load(sys.stdin)["entries"][0]
+    d=datetime.datetime.fromtimestamp(e.get("ts",0)/1000).strftime("%Y-%m-%d")
+    print(d, e.get("deliveryStatus"), e.get("action"), (e.get("error") or "")[:80])
+except Exception as ex: print("parse-error", ex)')
+set -- $rec
+if [[ "${1:-}" != "$TODAY" ]]; then
+  echo "PROBLEM brief cron has no run dated $TODAY (last: ${1:-none})"; exit 0
+fi
+if [[ "${2:-}" != "delivered" ]]; then
+  echo "PROBLEM brief composed but Telegram delivery status is '${2:-none}' (${4:-})"; exit 0
+fi
+echo "OK digest $TODAY · brief composed · delivered to Telegram (email intentionally disabled)"
