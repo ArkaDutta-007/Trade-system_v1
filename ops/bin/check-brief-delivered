@@ -2,10 +2,13 @@
 # Deterministic check the heartbeat calls instead of guessing from log files.
 # Prints exactly one line: "OK ..." or "PROBLEM ...". Exit 0 either way.
 #
-# Delivery path since 2026-09-16: the trade-morning-brief cron composes the
-# brief on qwen3-max and the runner DELIVERS it to the Telegram group
-# (-5412027506). Email is DISABLED by Arka's request (2026-09-08) — a missing
-# ~/trade-ops/logs/email-*.log is expected and must never be alerted.
+# Delivery paths:
+#   DAILY  — the trade-morning-brief cron composes on qwen3-max and the runner
+#            delivers to the Telegram group (-5412027506). Mon-Fri.
+#   WEEKLY — trade-brief-email mails the same brief to Arka + Om, MONDAYS 08:00
+#            (re-enabled 2026-09-17). On any other weekday a missing
+#            ~/trade-ops/logs/email-*.log is EXPECTED and must never be alerted
+#            — that stale expectation produced 13 false alerts on 09-16/17.
 set -uo pipefail
 TODAY=$(date +%F)
 BRIEF_ID="24c1850a-768c-42a7-ad16-c83451a822b8"
@@ -40,4 +43,15 @@ fi
 if [[ "${2:-}" != "delivered" ]]; then
   echo "PROBLEM brief composed but Telegram delivery status is '${2:-none}' (${4:-})"; exit 0
 fi
-echo "OK digest $TODAY · brief composed · delivered to Telegram (email intentionally disabled)"
+# 4. Monday only: the weekly email to Arka + Om should have gone out by 08:15
+if (( dow == 1 )); then
+  elog="$HOME/trade-ops/logs/email-$TODAY.log"
+  if [[ ! -s "$elog" ]]; then
+    echo "PROBLEM weekly email (Mon 08:00, Arka+Om) left no $elog — trade-brief-email did not run"; exit 0
+  fi
+  if ! grep -q "rc=0" "$elog"; then
+    echo "PROBLEM weekly email failed: $(tail -1 "$elog")"; exit 0
+  fi
+  echo "OK digest $TODAY · brief composed · delivered to Telegram · weekly email sent to Arka+Om"; exit 0
+fi
+echo "OK digest $TODAY · brief composed · delivered to Telegram (weekly email is Mondays only)"
