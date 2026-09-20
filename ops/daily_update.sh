@@ -106,6 +106,12 @@ echo "## Pipeline run" >> "$DIGEST"
 # Self-test the out-of-repo tooling first: a broken helper should be a
 # visible line in the brief, not a silently wrong number downstream.
 heavy_step "trade-ops self-test (pytest)" 600 $CODE/run_tests.sh
+# Massive (ex-Polygon) EOD feed: one grouped call brings yesterday's bar for the
+# WHOLE market, plus recent splits/dividends and tagged news. Bounded to
+# data.massive.update_max_calls (40 ≈ 8 min at the free 5 req/min). With no
+# MASSIVE_API_KEY it prints a note and exits 0; `ts daily`/`ts ingest` then
+# fall back to yfinance on their own (data.source: auto).
+heavy_step "ts massive update (EOD bars + corp actions + news, 5 req/min)" 2400 ts massive update -u liquid
 heavy_step "ts daily (ingest→quality→features→predict→paper-trade→future-update)" 5400 ts daily
 heavy_step "ts ledger --resolve (score matured predictions)" 900 ts ledger --resolve
 # ts daily rebuilds gold features on the CORE universe (69 cols), but the

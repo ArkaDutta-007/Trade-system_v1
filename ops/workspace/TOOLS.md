@@ -65,6 +65,16 @@ What Arka says → what you run:
   ET) into ~/trade-ops/flags/auto_overrides.yaml — OUTSIDE the repo, so the
   tracked configs/flag_overrides.yaml is never touched. Never hand-edit the
   auto file; it is regenerated every morning.
+- "massive status / is the Massive feed ok" → `~/ops/bin/ts-run massive status`
+  Massive (ex-Polygon) is the EOD price feed since 2026-09-19: whole-market bars
+  for the last 2 years + splits/dividends/fundamentals/tagged news, capped at
+  **5 requests/min** (enforced client-side; never work around it). Needs
+  `MASSIVE_API_KEY` in the repo .env — until Arka adds it the pipeline silently
+  uses yfinance (`data.source: auto`). "backfill massive" →
+  `~/ops/bin/ts-run --timeout 30000 massive backfill -u liquid` (≈6 h, resumable,
+  safe to re-run; writes only gitignored data/). Daily top-up runs inside the
+  05:15 pipeline (`ts massive update`). Never run backfill and update at once
+  in two shells — they share the 5/min budget and just wait on each other.
 - "are the tools healthy / run the tests" → `~/Desktop/Trade-system_v1/ops/run_tests.sh`
   (52 unit tests; also runs first in the daily pipeline).
 - "retrain the model now"         → `~/ops/bin/run-with-alert trade-weekly-retrain ~/Desktop/Trade-system_v1/ops/weekly_retrain.sh`

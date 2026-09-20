@@ -47,10 +47,11 @@ def ingest(
     config: str = "configs/default.yaml",
     universe: str = UNIVERSE_OPT,
     workers: int = typer.Option(8, help="concurrent fetch workers (TS_INGEST_WORKERS)"),
+    source: str = typer.Option("", help="yfinance | massive | auto (default: data.source in config)"),
 ):
     """Ingest the configured universe to bronze parquet (threaded, with progress)."""
     cfg = get_config(config).use_universe(universe)
-    out = ingest_universe(cfg, workers=workers)
+    out = ingest_universe(cfg, workers=workers, source=source or None)
     rprint(f"[green]Wrote {out}[/green]")
 
     # Fetch news and append to silver/events.parquet
@@ -220,6 +221,151 @@ def backfill_news(
     df.write_parquet(out, compression="zstd")
     rprint(f"[green]Wrote {df.height:,} ticker-days ({df['ticker'].n_unique()} tickers, "
            f"{df['date'].min()} → {df['date'].max()}) → {out}[/green]")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ts massive … — Massive (ex-Polygon.io) whole-market EOD + reference data
+# ─────────────────────────────────────────────────────────────────────────────
+massive_app = typer.Typer(add_completion=False, help="Massive (ex-Polygon) API: whole-market EOD bars, "
+                          "corporate actions, fundamentals, news. Free tier = 5 req/min, 2y history.")
+app.add_typer(massive_app, name="massive")
+
+
+def _massive_store(config: str, universe: str):
+    from .ingestion.massive import MassiveStore
+    cfg = get_config(config).use_universe(universe)
+    return cfg, MassiveStore.from_config(cfg)
+
+
+@massive_app.command("status")
+def massive_status(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
+                   quiet: bool = typer.Option(False, help="exit code only: 0 = configured")):
+    """Show key presence, cached grouped days, bronze tables and today's call budget."""
+    from .ingestion.massive import is_configured
+    if quiet:
+        raise typer.Exit(code=0 if is_configured() else 1)
+    cfg, store = _massive_store(config, universe)
+    st = store.status()
+    rprint(f"[bold]Massive[/bold] key: {'[green]set[/green]' if st['configured'] else '[red]MISSING — add MASSIVE_API_KEY to .env[/red]'}"
+           f" · calls today: {st['calls_today']} (budget 5/min ≈ 7 200/day)")
+    rprint(f"grouped days cached: {st['grouped_days']} ({st['first_day']} → {st['last_day']}) · "
+           f"pending: {st['pending_days']} · window start: {st['history_start']}")
+    for k in ("ohlcv_all", "splits", "dividends", "tickers", "details", "financials", "news"):
+        v = st[k]
+        rprint(f"  {k:<11} " + (f"{v['rows']:>10,} rows · {v['age_h']}h old" if v else "[dim]—[/dim]"))
+    rprint(f"[dim]raw cache: {st['raw_dir']} · bronze: {st['bronze_dir']}[/dim]")
+
+
+@massive_app.command("backfill")
+def massive_backfill(
+    config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
+    what: str = typer.Option("grouped,actions,tickers,details,financials,news",
+                             help="comma list: grouped (all-market EOD), actions (splits+dividends), tickers, "
+                                  "details (SIC/mcap per universe ticker), financials, news (per universe ticker)"),
+    years: float = typer.Option(2.0, help="history depth (free tier caps at 2)"),
+    max_calls: int = typer.Option(0, help="stop after N network calls (0 = unlimited); resumable"),
+    delisted: bool = typer.Option(False, help="also crawl the delisted-ticker directory (~40 calls)"),
+):
+    """Crawl EVERYTHING the plan allows, resumably, at 5 req/min. Re-runs only do missing work.
+
+    Budget (universe liquid, 374 names): grouped ≈ 520 calls · actions ≈ 50 · tickers ≈ 12
+    · details 374 · financials 374 · news ≈ 400 → ~1 700 calls ≈ 6 h. Leave it in tmux
+    or pass --max-calls to do it in slices; `ts massive update` then keeps it current.
+    """
+    import time as _time
+    from datetime import timedelta
+    from .ingestion.massive import MassiveAuthError
+    cfg, store = _massive_store(config, universe)
+    want = {w.strip() for w in what.split(",") if w.strip()}
+    tickers = list(cfg["universe"]["tickers"])
+    budget = max_calls or None
+    start = store.today - timedelta(days=int(365 * years) - 7)
+    t0 = _time.time()
+
+    def left():
+        return None if budget is None else max(budget - store.client.calls, 0)
+
+    try:
+        if "grouped" in want and (left() is None or left() > 0):
+            pend = len(store.missing_days(start))
+            rprint(f"[cyan]grouped:[/cyan] {pend} business days missing since {start} (≈{pend/5:.0f} min)")
+            done = {"n": 0}
+            def _prog(d, n):
+                done["n"] += 1
+                if done["n"] % 10 == 0 or n == 0:
+                    rprint(f"  {d}: {n:,} bars · {done['n']}/{pend} · {(_time.time()-t0)/60:.1f} min")
+            s = store.crawl_grouped(start, max_calls=left(), progress=_prog)
+            rprint(f"[green]grouped: fetched {s.fetched_days} days ({s.empty_days} holidays/empty), {s.pending_days} pending[/green]")
+        if "actions" in want and (left() is None or left() > 0):
+            n = store.crawl_corporate_actions(start); rprint(f"[green]actions: {n} calls[/green]")
+        if "tickers" in want and (left() is None or left() > 0):
+            n = store.crawl_tickers(include_delisted=delisted); rprint(f"[green]tickers: {n} calls[/green]")
+        if "details" in want and (left() is None or left() > 0):
+            n = store.crawl_details(tickers, max_calls=left()); rprint(f"[green]details: {n} calls[/green]")
+        if "financials" in want and (left() is None or left() > 0):
+            n = store.crawl_financials(tickers, max_calls=left()); rprint(f"[green]financials: {n} calls[/green]")
+        if "news" in want and (left() is None or left() > 0):
+            n = store.crawl_news_backfill(tickers, start, max_calls=left()); rprint(f"[green]news: {n} calls[/green]")
+    except MassiveAuthError as e:
+        rprint(f"[red]auth error: {e}[/red]"); raise typer.Exit(code=2)
+    except KeyboardInterrupt:
+        rprint("[yellow]interrupted — progress is cached; re-run to resume[/yellow]")
+    rprint(f"[dim]{store.client.calls} network calls · {store.client.cache_hits} cache hits · "
+           f"{(_time.time()-t0)/60:.1f} min[/dim]")
+    massive_build(config=config, universe=universe)
+
+
+@massive_app.command("update")
+def massive_update(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
+                   max_calls: int = typer.Option(-1, help="call budget (default data.massive.update_max_calls)"),
+                   strict: bool = typer.Option(False, help="exit non-zero when the key is missing")):
+    """Daily incremental: new grouped days + recent corp actions + market news → rebuild tables."""
+    from .ingestion import massive as M
+    if not M.is_configured():
+        rprint("[yellow]MASSIVE_API_KEY not set — skipping (add it to .env; see `ts massive status`)[/yellow]")
+        raise typer.Exit(code=1 if strict else 0)
+    cfg = get_config(config).use_universe(universe)
+    try:
+        res = M.update(cfg, cfg["universe"]["tickers"], max_calls=None if max_calls < 0 else max_calls,
+                       progress=lambda s: rprint(f"[dim]{s}[/dim]"))
+    except M.MassiveAuthError as e:
+        rprint(f"[red]auth error: {e}[/red]"); raise typer.Exit(code=2)
+    rprint(f"[green]massive update:[/green] {res['calls']} calls · tables {res['tables']} · "
+           f"{res['pending_days']} grouped days still pending")
+
+
+@massive_app.command("build")
+def massive_build(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT):
+    """Rebuild bronze/massive/*.parquet from the local cache only (no network)."""
+    from .ingestion.massive import MassiveNotReady
+    cfg, store = _massive_store(config, universe)
+    try:
+        df = store.build_ohlcv_all()
+        rprint(f"[green]ohlcv_all:[/green] {df.height:,} rows · {df['ticker'].n_unique():,} tickers · "
+               f"{df['date'].min()} → {df['date'].max()}")
+    except MassiveNotReady as e:
+        rprint(f"[yellow]{e}[/yellow]")
+    ref = store.build_reference(cfg["universe"]["tickers"])
+    rprint(f"[green]reference tables:[/green] {ref or 'none cached yet'}")
+
+
+@massive_app.command("universe")
+def massive_universe(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
+                     top: int = typer.Option(600), min_price: float = typer.Option(5.0),
+                     min_dollar_vol: float = typer.Option(20e6, help="trailing-63d median $ volume"),
+                     out: str = typer.Option("configs/universe_massive.yaml")):
+    """Rank the WHOLE market by liquidity → a survivorship-free universe YAML (needs ohlcv_all)."""
+    import yaml
+    from .ingestion.massive import build_liquid_universe
+    cfg, store = _massive_store(config, universe)
+    df = build_liquid_universe(store, min_price=min_price, min_dollar_vol=min_dollar_vol, top=top)
+    doc = {"name": "universe_massive", "benchmark": "SPY",
+           "description": f"Top {top} US common stocks/ADRs by trailing-63d median dollar volume "
+                          f"(≥${min_dollar_vol/1e6:.0f}M/d, ≥${min_price}), from Massive grouped bars as of "
+                          f"{store.today}. Regenerate with `ts massive universe`.",
+           "required": df["ticker"].to_list(), "additions": []}
+    Path(out).write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+    rprint(f"[green]{df.height} tickers → {out}[/green] (median $vol of #{df.height}: ${df['dollar_vol'].min()/1e6:.0f}M)")
 
 
 @app.command("backfill-history")

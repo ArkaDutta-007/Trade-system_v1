@@ -52,7 +52,7 @@ EVENT_SCHEMA = {
 
 # Per-backend baseline confidence: ticker-tagged sources are trusted more than
 # free-text matches, before any LLM enrichment overwrites these.
-_BACKEND_CONFIDENCE = {"finnhub": 0.6, "google_news": 0.45, "newsapi": 0.4}
+_BACKEND_CONFIDENCE = {"finnhub": 0.6, "massive": 0.65, "google_news": 0.45, "newsapi": 0.4}
 
 
 def _empty_events() -> pl.DataFrame:
@@ -89,7 +89,9 @@ def _rows_to_events(articles: list[dict], now: datetime) -> pl.DataFrame:
                 "tickers": [(art.get("ticker") or "UNKNOWN").upper()],
                 "sectors": [],
                 "event_type": "news",
-                "sentiment": naive_sentiment(f"{title} {content[:500]}"),
+                # ticker-tagged backends (Massive insights) may ship a model sentiment; else lexicon
+                "sentiment": (float(art["sentiment"]) if art.get("sentiment") is not None
+                              else naive_sentiment(f"{title} {content[:500]}")),
                 "confidence": _BACKEND_CONFIDENCE.get(backend, 0.45),
                 "novelty": 0.5,
                 "magnitude": 0.0,
@@ -132,6 +134,41 @@ def _backend_newsdata(
         tickers, api_key, max_per_ticker=min(max_per_ticker, 10),
         cache_dir=cache_dir, cache_hours=cache_hours,
     )
+
+
+def _backend_massive(tickers: list[str], days: int, max_per_ticker: int,
+                     cache_dir: Path | None, cache_hours: float) -> list[dict]:
+    """Massive whole-market news (one call per UTC day, cached) filtered to ``tickers``.
+
+    Articles carry per-ticker LLM sentiment ("insights"); we pass it through so
+    ``_rows_to_events`` prefers it over the naive lexicon.  Budget: ≤ ``days``+1
+    cached calls per 6 h for *all* tickers, not one per ticker.
+    """
+    from .massive import is_configured, MassiveStore, flatten_news
+    if not is_configured():
+        return []
+    from ..config import get_config
+    cfg = get_config()
+    store = MassiveStore.from_config(cfg)
+    store.crawl_news_daily(days=min(days, 14))
+    tk = set(tickers)
+    arts: list[dict] = []
+    per: dict[str, int] = {}
+    for i in range(min(days, 14), -1, -1):
+        d = store.today - timedelta(days=i)
+        doc = store.client.cache_read(f"news/daily/{d.isoformat()}", None)
+        if not doc or not doc["results"]:
+            continue
+        df = flatten_news(doc["results"]).filter(pl.col("ticker").is_in(list(tk)))
+        for r in df.sort("published_utc", descending=True).iter_rows(named=True):
+            t = r["ticker"]
+            if per.get(t, 0) >= max_per_ticker:
+                continue
+            per[t] = per.get(t, 0) + 1
+            arts.append({"ticker": t, "title": r["title"] or "", "content": r["description"] or "",
+                         "source_url": r["article_url"] or "", "published_at": r["published_utc"],
+                         "backend": "massive", "sentiment": r["sentiment"]})
+    return arts
 
 
 def _backend_google(tickers: list[str], days: int, max_per_ticker: int) -> list[dict]:
@@ -214,6 +251,8 @@ def fetch_news(
         try:
             if backend == "finnhub":
                 arts = _backend_finnhub(pending, days, max_per_ticker, cache_dir, cache_hours)
+            elif backend == "massive":
+                arts = _backend_massive(pending, days, max_per_ticker, cache_dir, cache_hours)
             elif backend == "newsdata":
                 arts = _backend_newsdata(pending, max_per_ticker, cache_dir, cache_hours)
             elif backend == "google_news":

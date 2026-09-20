@@ -154,8 +154,33 @@ def sanitize_ohlcv(df: pl.DataFrame) -> pl.DataFrame:
     return clean
 
 
-def ingest_universe(cfg: Config, workers: int | None = None) -> Path:
-    """Ingest configured universe and write to bronze parquet. Returns path."""
+def ingest_universe(cfg: Config, workers: int | None = None, source: str | None = None) -> Path:
+    """Ingest configured universe and write to bronze parquet. Returns path.
+
+    ``source`` (or ``TS_DATA_SOURCE`` env, or ``data.source`` in config):
+      * ``yfinance`` — legacy per-ticker scrape, 1995→today;
+      * ``massive``  — Massive (ex-Polygon) grouped EOD bars for the last 2 years,
+        spliced onto yfinance deep history (see ``ingestion.massive``); fails if
+        the Massive cache isn't backfilled;
+      * ``auto`` (default) — ``massive`` when ``MASSIVE_API_KEY`` is set and the
+        cache is ready, else ``yfinance`` with a warning.
+    """
+    source = (source or os.environ.get("TS_DATA_SOURCE") or cfg["data"].get("source") or "auto").lower()
+    if source in ("massive", "auto"):
+        from . import massive
+        if massive.is_configured():
+            try:
+                return massive.ingest_universe_spliced(cfg)
+            except massive.MassiveNotReady as e:
+                if source == "massive":
+                    raise
+                logger.warning(f"massive not ready ({e}) — falling back to yfinance")
+            except Exception as e:
+                if source == "massive":
+                    raise
+                logger.warning(f"massive ingest failed ({e!r}) — falling back to yfinance")
+        elif source == "massive":
+            raise RuntimeError("data.source=massive but MASSIVE_API_KEY is not set")
     tickers = cfg["universe"]["tickers"]
     start = cfg["data"]["start_date"]
     end = cfg["data"].get("end_date")

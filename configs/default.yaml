@@ -31,7 +31,16 @@ playbook:
 data:
   start_date: "1995-01-01"
   end_date: null   # null = today
-  source: yfinance
+  # yfinance | massive | auto.  auto = Massive (ex-Polygon, MASSIVE_API_KEY in .env) for the
+  # last 2 years spliced onto yfinance deep history; falls back to yfinance if not backfilled.
+  source: auto
+  massive:
+    base_url: https://api.massive.com
+    rpm: 5                    # free tier: 5 requests/min — enforced client-side, cross-process
+    history_years: 2          # free-tier depth (grouped EOD bars)
+    include_otc: true         # the universe's ADRs (MKKGY, SHECY, TOELY) trade OTC
+    deep_refresh_days: 7      # how often the yfinance pre-window history cache is refreshed
+    update_max_calls: 40      # budget for the daily `ts massive update` (≈ 8 min at 5/min)
 
 backtest:
   initial_cash: 10000.0
@@ -96,7 +105,7 @@ api_keys:
 
 # News ingestion: backend order + dedup/caching
 news:
-  backends: [finnhub, newsdata, google_news, newsapi]   # tried in order; first non-empty wins per ticker
+  backends: [finnhub, massive, newsdata, google_news]   # tried in order; first non-empty wins per ticker (newsapi key dead 2026-09)
   cache_hours: 6            # disk-cache fetched articles this long
   dedup_cosine: 0.90        # drop near-duplicate headlines above this similarity
   max_per_ticker: 25

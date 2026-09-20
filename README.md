@@ -153,7 +153,8 @@ copy after cloning. The same three steps everywhere — OHLCV, then all deep-his
 signals, then the feature matrix:
 
 ```bash
-ts ingest -u liquid              # daily OHLCV for the universe
+ts massive backfill -u liquid    # optional: Massive/Polygon whole-market EOD + reference (needs MASSIVE_API_KEY; ~6 h at 5 req/min, resumable)
+ts ingest -u liquid              # daily OHLCV for the universe (Massive 2y window ⊕ yfinance deep history, or yfinance alone)
 ts backfill-history -u liquid    # GDELT + SEC + Wikipedia deep-history signals
 ts features -u liquid            # fold everything into gold/features.parquet (+ --deep for heavy maths)
 ts quality                       # sanity gate
@@ -674,7 +675,11 @@ pytest -m integration             # end-to-end (slow)
 
 `run_daily_pipeline()` does, in order:
 
-1. Ingest OHLCV (yfinance)
+1. Ingest OHLCV — `data.source: auto` → Massive (ex-Polygon) grouped EOD bars for
+   the last 2 years spliced onto yfinance deep history when `MASSIVE_API_KEY` is
+   set and `ts massive backfill` has run; otherwise yfinance. See
+   `docs/COMPENDIUM.md` §4 *Massive* for the 5 req/min limiter, the CRSP-style
+   split/dividend adjustment and the `ts massive …` commands.
 2. Run OHLCV quality checks; alert + abort on failure
 3. Build feature matrix (technical + regime + cross-sectional, optional event features)
 4. Generate signals (default: momentum rotation top-k)

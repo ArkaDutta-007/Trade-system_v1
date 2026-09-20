@@ -106,13 +106,48 @@ a live progress bar. `sanitize_ohlcv()` drops today's in-progress bar (null clos
 half-formed range) and any impossible/non-positive OHLC before the bronze write,
 so a few API glitches can't fail the quality gate.
 
+### Massive / ex-Polygon (`massive.py`, V5.1) — whole-market EOD + reference data
+`data.source: auto` (default) makes `ingest_universe` use Massive when
+`MASSIVE_API_KEY` is set *and* the local cache is backfilled, else yfinance.
+The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
+
+* **Cross-process rate limiter** — a file-locked sliding window
+  (`data/raw/massive/.ratelimit.json`) shared by cron and every shell; 429s
+  still back off on `Retry-After`. Budget ≈ 7 200 calls/day.
+* **Grouped daily bars** `/v2/aggs/grouped/…/{date}` — *every* US stock for one
+  date in one call, cached **unadjusted** and forever (immutable truth).
+  Backfill = ~520 calls ≈ 100 min; the daily top-up is 1–3 calls.
+* **Corporate actions** (splits, dividends by month), **ticker directory**,
+  per-ticker **overview** (SIC, market cap, shares), **fundamentals**
+  (`/vX/reference/financials`, every `*.value` leaf flattened) and **tagged news
+  with LLM sentiment** (`/v2/reference/news` insights). Bronze outputs:
+  `data/bronze/massive/{ohlcv_all,splits,dividends,tickers,details,financials,news}.parquet`.
+* **Adjustment maths, CRSP-style, recomputed at build time:**
+  `s_t = ∏_{splits d>t} from/to`, `f_t = ∏_{ex-dates d>t} (1 − cash_d/close_{d−1})`;
+  `close = raw·s_t` (split-adjusted = yfinance *Close*), `adj_close = close·f_t`
+  (= yfinance *Adj Close*), volume ÷ `s_t`.
+* **Splice** — per ticker, yfinance rows before the Massive window are rescaled
+  at the first common date (`recent/deep` ratio for both price and adj series)
+  so `bronze/ohlcv_daily.parquet` is continuous 1995→today; universe names
+  missing from the feed (or with <20 Massive days) stay yfinance-only.
+* **Survivorship-free universes** — `ts massive universe` ranks the *whole*
+  market by trailing-63d median dollar volume (CS/ADRC only, no OTC) into a
+  universe YAML; `ohlcv_all.parquet` keeps delisted names for research.
+
+CLI: `ts massive status | backfill | update | build | universe`; the daily
+pipeline runs `ts massive update -u liquid` before `ts daily`. Tests:
+`tests/unit/test_massive.py` (limiter, cache/TTL, pagination, 429/auth,
+adjustment vs hand calcs, splice continuity, budget caps) — all network-free.
+
 ### News (`news_events.py`) — pluggable backends
 Tried in order; the first that returns rows for a ticker wins (no double-count):
 
 1. **Finnhub** `company-news` — *symbol-tagged* (no false positives), free 60/min.
-2. **NewsData.io** `/latest` — keyword (`"<ticker> stock"`), free ~200 credits/day.
-3. **Google News RSS** — broad free-text breadth + full-article body extraction.
-4. **NewsAPI** — headline fallback.
+2. **Massive** `/v2/reference/news` — symbol-tagged, whole market in ≤ 4 cached
+   calls per 6 h, ships per-ticker LLM sentiment (used instead of the lexicon).
+3. **NewsData.io** `/latest` — keyword (`"<ticker> stock"`), free ~200 credits/day.
+4. **Google News RSS** — broad free-text breadth + full-article body extraction.
+5. **NewsAPI** — headline fallback (key dead since 2026-09; not in the default list).
 
 Articles are disk-cached, and **near-duplicate wire stories are collapsed** by
 token-set Jaccard (`dedup.py`) before scoring. All timestamps coerce to UTC
