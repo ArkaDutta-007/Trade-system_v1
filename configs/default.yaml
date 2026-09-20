@@ -42,6 +42,7 @@ data:
     deep_refresh_days: 7      # how often the yfinance pre-window history cache is refreshed
     update_max_calls: 40      # budget for the daily `ts massive update` (≈ 8 min at 5/min)
     extended_top: 1000        # crawler: top-N US stocks by liquidity get universe-grade depth
+    deep_start: "1970-01-01"  # ohlcv_deep.parquet: yfinance from here (Massive bars are capped at 2y on this plan)
 
 backtest:
   initial_cash: 10000.0

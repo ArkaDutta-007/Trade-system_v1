@@ -379,6 +379,7 @@ def massive_crawl(config: str = "configs/default.yaml", universe: str = UNIVERSE
     store = M.MassiveStore.from_config(cfg)
     m = (cfg.get("data", {}) or {}).get("massive", {}) or {}
     crawler = M.Crawler(store, cfg["universe"]["tickers"], extended_top=int(m.get("extended_top", 1000)),
+                        deep_start=str(m.get("deep_start", "1970-01-01")),
                         log=lambda m: rprint(f"[dim]{_time.strftime('%H:%M:%S')}[/dim] {m}"))
     rprint(f"[dim]{len(store.client.keys)} key(s) → {5 * len(store.client.keys)} req/min · extended top-{crawler.extended_top}[/dim]")
     try:

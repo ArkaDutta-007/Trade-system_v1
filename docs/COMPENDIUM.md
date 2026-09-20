@@ -151,13 +151,22 @@ The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
   backfill (newest first) → 2 directory, holidays, exchanges/types, monthly
   splits/dividends, IPOs, Fed series, short interest/volume → 3 universe depth:
   overview, fundamentals, 2y news backfill + rolling news, ticker events, related
-  companies (30d/7d/60d/1d/30d TTL) → 4 **extended**: the top-`extended_top`
+  companies — **at full depth**: every article Massive has (archive starts
+  2017-04, 1 call/1000, 365d TTL), complete dividend + split histories
+  (per ticker, 180d), short interest since 2017-12 (14d), fundamentals since
+  2009 → 4 **extended**: the top-`extended_top`
   (1000) US stocks/ADRs by trailing-63d dollar volume get the same depth (their
   YAML lands in `bronze/massive/universe_extended.yaml`, refreshed hourly) →
   5 whole market by liquidity rank (45d/14d/30d) → 6 QA: Massive's own adjusted
   series vs our `close` (`adjustment_qa`, in `ts massive status`). A task that
   errors is backed off 6h → 24h → 7d instead of retried; SIGTERM stops after
   the current call; state in `data/raw/massive/crawler_state.json`.
+* **Deep prices** — the plan hard-caps bars at 2 years (a request from 2000
+  returns 2024-09→, verified), so `ohlcv_deep.parquet` (universe + extended,
+  `source` column) is built weekly in a crawler background thread from yfinance
+  since `data.massive.deep_start` (1970) and spliced onto the Massive window
+  with `splice_history`. Paid tiers lift the cap (Starter 5y, Developer 10y,
+  Advanced 20y+); set `history_years` accordingly and the splice shrinks.
 
 CLI: `ts massive status | crawl | backfill | update | build | universe`; the daily
 pipeline runs `ts massive update -u liquid` before `ts daily` (a no-op when the

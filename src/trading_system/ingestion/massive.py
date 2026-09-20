@@ -434,6 +434,23 @@ class MassiveClient:
                          "limit": 1000, "sort": "ex_dividend_date", "order": "asc"},
                         cache_key=f"dividends/{gte.isoformat()}_{lte.isoformat()}", ttl_s=ttl_s)
 
+    def dividends_ticker(self, ticker: str, *, ttl_s: float = 180 * _DAY) -> dict:
+        """Complete dividend history for one ticker (the reference layer is not time-capped)."""
+        return self.get("/v3/reference/dividends",
+                        {"ticker": api_ticker(ticker), "limit": 1000, "sort": "ex_dividend_date", "order": "asc"},
+                        cache_key=f"dividends_ticker/{normalize_ticker(ticker)}", ttl_s=ttl_s, max_pages=5)
+
+    def splits_ticker(self, ticker: str, *, ttl_s: float = 180 * _DAY) -> dict:
+        return self.get("/v3/reference/splits",
+                        {"ticker": api_ticker(ticker), "limit": 1000, "sort": "execution_date", "order": "asc"},
+                        cache_key=f"splits_ticker/{normalize_ticker(ticker)}", ttl_s=ttl_s, max_pages=2)
+
+    def short_interest_ticker(self, ticker: str, *, ttl_s: float = 14 * _DAY) -> dict:
+        """Bi-monthly short interest back to 2017-12."""
+        return self.get("/stocks/v1/short-interest",
+                        {"ticker": api_ticker(ticker), "settlement_date.gte": "2000-01-01", "limit": 50000},
+                        cache_key=f"short_interest_ticker/{normalize_ticker(ticker)}", ttl_s=ttl_s, max_pages=2)
+
     def financials(self, ticker: str, *, ttl_s: float = 7 * _DAY) -> dict:
         return self.get("/vX/reference/financials",
                         {"ticker": api_ticker(ticker), "limit": 100, "sort": "filing_date", "order": "desc"},
@@ -470,7 +487,7 @@ class MassiveClient:
 
     def ipos(self, *, ttl_s: float = _DAY) -> dict:
         return self.get("/vX/reference/ipos", {"limit": 1000, "order": "desc", "sort": "listing_date"},
-                        cache_key="reference/ipos", ttl_s=ttl_s, max_pages=3)
+                        cache_key="reference/ipos", ttl_s=ttl_s, max_pages=10)
 
     def short_interest(self, gte: date, *, ttl_s: float = _DAY) -> dict:
         return self.get("/stocks/v1/short-interest", {"settlement_date.gte": gte.isoformat(), "limit": 50000},
@@ -483,7 +500,7 @@ class MassiveClient:
     def fed(self, series: str, *, ttl_s: float = _DAY) -> dict:
         """``treasury-yields`` | ``inflation`` | ``inflation-expectations`` (Fed data set)."""
         return self.get(f"/fed/v1/{series}", {"limit": 5000, "sort": "date.desc"},
-                        cache_key=f"fed/{series}", ttl_s=ttl_s, max_pages=3)
+                        cache_key=f"fed/{series}", ttl_s=ttl_s, max_pages=10)
 
     def holidays(self, *, ttl_s: float = 7 * _DAY) -> dict:
         return self._whole("/v1/marketstatus/upcoming", "reference/holidays", ttl_s)
@@ -848,6 +865,41 @@ class MassiveStore:
     def financials_path(self) -> Path:    return self.bronze_dir / "financials.parquet"
     @property
     def news_path(self) -> Path:          return self.bronze_dir / "news.parquet"
+    @property
+    def deep_path(self) -> Path:          return self.bronze_dir / "ohlcv_deep.parquet"
+
+    def build_deep_prices(self, tickers: Iterable[str], start: str = "1970-01-01",
+                          fetch: Callable[..., pl.DataFrame] | None = None) -> pl.DataFrame:
+        """Continuous multi-decade daily bars for ``tickers``: yfinance from ``start`` (the plan caps
+        Massive bars at 2y — verified) spliced per ticker onto the Massive window, which is
+        authoritative where it exists. Written to ``ohlcv_deep.parquet`` with a ``source`` column."""
+        if fetch is None:
+            from .market_data import fetch_ohlcv as fetch
+        tickers = list(dict.fromkeys(normalize_ticker(t) for t in tickers))
+        deep = fetch(tickers, start=start, end=None, progress=False)
+        if deep.is_empty():
+            raise RuntimeError("yfinance deep fetch returned nothing")
+        deep = deep.select([c for c in OHLCV_COLS if c in deep.columns])
+        if "adj_close" not in deep.columns:
+            deep = deep.with_columns(pl.col("close").alias("adj_close"))
+        recent = pl.DataFrame()
+        if self.ohlcv_all_path.exists():
+            recent = (pl.read_parquet(self.ohlcv_all_path, columns=OHLCV_COLS)
+                        .filter(pl.col("ticker").is_in(tickers)))
+        out = splice_history(deep, recent)
+        if not recent.is_empty():
+            r0 = recent.group_by("ticker").agg(pl.col("date").min().alias("_r0"))
+            out = (out.join(r0, on="ticker", how="left")
+                      .with_columns(pl.when(pl.col("_r0").is_not_null() & (pl.col("date") >= pl.col("_r0")))
+                                      .then(pl.lit("massive")).otherwise(pl.lit("yfinance")).alias("source"))
+                      .drop("_r0"))
+        else:
+            out = out.with_columns(pl.lit("yfinance").alias("source"))
+        out = out.with_columns(pl.col("volume").round(0).cast(pl.Int64, strict=False)).sort(["ticker", "date"])
+        out.write_parquet(self.deep_path, compression="zstd")
+        logger.info(f"massive: ohlcv_deep {out.height:,} rows · {out['ticker'].n_unique()} tickers · "
+                    f"{out['date'].min()} → {out['date'].max()}")
+        return out
 
     def history_start(self) -> date:
         return self.today - timedelta(days=365 * self.history_years - 7)
@@ -958,6 +1010,13 @@ class MassiveStore:
             self.client.news(ticker=t, gte=gte, cache_key=f"news/ticker/{t}", ttl_s=ttl_s, max_pages=5)
         return self.client.calls - c0
 
+    def crawl_news_deep(self, ticker: str, ttl_s: float = 365 * _DAY, max_pages: int = 60) -> int:
+        """EVERY article Massive has for the ticker (archive starts 2017-04): one call per 1000."""
+        c0 = self.client.calls
+        self.client.news(ticker=ticker, gte=datetime(2000, 1, 1, tzinfo=timezone.utc),
+                         cache_key=f"news/ticker_deep/{ticker}", ttl_s=ttl_s, max_pages=max_pages)
+        return self.client.calls - c0
+
     def crawl_news_recent(self, ticker: str, days: int = 14, ttl_s: float = _DAY) -> int:
         """Rolling per-ticker refresh (last ``days``); merged with the one-off backfill at build time."""
         c0 = self.client.calls
@@ -1008,6 +1067,7 @@ class MassiveStore:
         return have
 
     def build_corporate_actions(self) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """Monthly whole-market windows (2y) ∪ per-ticker full histories (universe/extended)."""
         sp, dv = [], []
         for lo, hi in month_windows(self.history_start() - timedelta(days=31), self.today):
             s = self.client.cache_read(f"splits/{lo.isoformat()}_{hi.isoformat()}", None)
@@ -1016,6 +1076,10 @@ class MassiveStore:
                 sp.append(splits_frame(s["results"]))
             if d:
                 dv.append(dividends_frame(d["results"]))
+        for _, doc in self._docs_in("splits_ticker"):
+            sp.append(splits_frame(doc["results"]))
+        for _, doc in self._docs_in("dividends_ticker"):
+            dv.append(dividends_frame(doc["results"]))
         splits = pl.concat(sp, how="vertical_relaxed").unique(subset=["ticker", "execution_date"]) if sp else splits_frame([])
         divs = pl.concat(dv, how="vertical_relaxed").unique(subset=["ticker", "ex_dividend_date", "cash_amount"]) if dv else dividends_frame([])
         splits.write_parquet(self.splits_path, compression="zstd")
@@ -1108,7 +1172,8 @@ class MassiveStore:
                 write(name, flat_rows(doc["results"]))
         for series, doc in self._docs_in("fed"):
             write(f"fed_{series.replace('-', '_')}", flat_rows(doc["results"]), ["date"])
-        write("short_interest", [r for _, doc in self._docs_in("short_interest") for r in flat_rows(doc["results"])],
+        write("short_interest", [r for folder in ("short_interest", "short_interest_ticker")
+                                 for _, doc in self._docs_in(folder) for r in flat_rows(doc["results"])],
               ["ticker", "settlement_date"])
         write("short_volume", [r for _, doc in self._docs_in("short_volume") for r in flat_rows(doc["results"])],
               ["ticker", "date"])
@@ -1320,7 +1385,9 @@ class Crawler:
     call, writes state and exits 0.
     """
 
-    TTL = {"tickers_active": 7 * _DAY, "tickers_delisted": 30 * _DAY, "holidays": 7 * _DAY,
+    TTL = {"news_deep": 365 * _DAY, "actions_ticker": 180 * _DAY, "short_interest_ticker": 14 * _DAY,
+           "deep_prices": 7 * _DAY,
+           "tickers_active": 7 * _DAY, "tickers_delisted": 30 * _DAY, "holidays": 7 * _DAY,
            "static": 30 * _DAY, "daily": _DAY,
            "actions_current": _DAY, "actions_past": 30 * _DAY, "news_daily_recent": 6 * 3600,
            "details_universe": 30 * _DAY, "financials_universe": 7 * _DAY, "news_universe": _DAY,
@@ -1332,10 +1399,13 @@ class Crawler:
 
     def __init__(self, store: MassiveStore, universe_tickers: Iterable[str], state_path: Path | None = None,
                  rebuild_every_s: float = 900.0, log: Callable[[str], None] | None = None,
-                 extended_top: int = 1000):
+                 extended_top: int = 1000, deep_start: str = "1970-01-01", deep_prices: bool = True):
         self.store = store
         self.universe = [normalize_ticker(t) for t in universe_tickers]
         self.extended_top = int(extended_top)
+        self.deep_start = deep_start
+        self.deep_prices = deep_prices
+        self._deep_thread = None
         self.state_path = state_path or (store.raw_dir / "crawler_state.json")
         self.rebuild_every_s = rebuild_every_s
         self.log = log or (lambda m: logger.info(m))
@@ -1452,6 +1522,9 @@ class Crawler:
     # ---- planning ---------------------------------------------------------------
     def _depth_tasks(self, tier: int, tickers: Iterable[str], *, details_ttl: float, fin_ttl: float,
                      news_recent_ttl: float, backfill: bool, events: bool, start: date):
+        """``backfill=True`` (universe / extended) = full depth: EVERY news article (2017→), complete
+        dividend/split history, short interest (2017→), ticker events, related companies.
+        ``backfill=False`` (rest of market) = overview, fundamentals, rolling 30d news."""
         st, c, T = self.store, self.store.client, self.TTL
         for t in tickers:
             if not self.blocked("details") and self._stale(f"details/{t}", details_ttl):
@@ -1459,16 +1532,49 @@ class Crawler:
             if not self.blocked("financials") and self._stale(f"financials/{t}", fin_ttl):
                 yield Task(tier, f"financials {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.financials(t, ttl_s=0))), "financials")
             if not self.blocked("news"):
-                if backfill and self._stale(f"news/ticker/{t}", T["news_backfill"]):
-                    yield Task(tier, f"news-backfill {t}", self._mark(tier, ref=True)(lambda t=t: st.crawl_news_backfill([t], start, ttl_s=0)), "news")
+                if backfill and self._stale(f"news/ticker_deep/{t}", T["news_deep"]):
+                    yield Task(tier, f"news-deep {t}", self._mark(tier, ref=True)(lambda t=t: st.crawl_news_deep(t, ttl_s=0)), "news")
                 elif self._stale(f"news/ticker_recent/{t}", news_recent_ttl):
                     days = 14 if backfill else 30
                     yield Task(tier, f"news-recent {t}", self._mark(tier, ref=True)(lambda t=t, days=days: st.crawl_news_recent(t, days=days, ttl_s=0)), "news")
+            if backfill:
+                if not self.blocked("dividends") and self._stale(f"dividends_ticker/{t}", T["actions_ticker"]):
+                    yield Task(tier, f"dividends-deep {t}", self._mark(tier, ohlcv=True)(lambda t=t: self._calls(lambda: c.dividends_ticker(t, ttl_s=0))), "dividends")
+                if not self.blocked("splits") and self._stale(f"splits_ticker/{t}", T["actions_ticker"]):
+                    yield Task(tier, f"splits-deep {t}", self._mark(tier, ohlcv=True)(lambda t=t: self._calls(lambda: c.splits_ticker(t, ttl_s=0))), "splits")
+                if not self.blocked("short_interest") and self._stale(f"short_interest_ticker/{t}", T["short_interest_ticker"]):
+                    yield Task(tier, f"short-interest-deep {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.short_interest_ticker(t, ttl_s=0))), "short_interest")
             if events:
                 if not self.blocked("events") and self._stale(f"events/{t}", T["events"]):
                     yield Task(tier, f"events {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.ticker_events(t, ttl_s=0))), "events")
                 if not self.blocked("related") and self._stale(f"related/{t}", T["events"]):
                     yield Task(tier, f"related {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.related_companies(t, ttl_s=0))), "related")
+
+    # ---- deep prices (yfinance, no Massive budget) ------------------------------------
+    def maybe_deep_prices(self, force: bool = False) -> bool:
+        """Weekly, in a background thread so the Massive loop never idles: multi-decade bars for
+        universe + extended (`build_deep_prices`). Returns True when a build was started."""
+        if not self.deep_prices:
+            return False
+        if self._deep_thread is not None and self._deep_thread.is_alive():
+            return False
+        p = self.store.deep_path
+        fresh = p.exists() and (time.time() - p.stat().st_mtime) < self.TTL["deep_prices"]
+        if fresh and not force:
+            return False
+        tickers = self.universe + self.extended_tickers()
+        import threading
+
+        def _run():
+            try:
+                self.log(f"deep prices: yfinance {self.deep_start}→ for {len(tickers)} tickers (background)")
+                df = self.store.build_deep_prices(tickers, start=self.deep_start)
+                self.log(f"deep prices: {df.height:,} rows · {df['ticker'].n_unique()} tickers · {df['date'].min()} → {df['date'].max()}")
+            except Exception as e:
+                logger.warning(f"crawler: deep prices failed: {e}")
+        self._deep_thread = threading.Thread(target=_run, name="massive-deep-prices", daemon=True)
+        self._deep_thread.start()
+        return True
 
     def due_tasks(self):
         st, c, T = self.store, self.store.client, self.TTL
@@ -1614,7 +1720,8 @@ class Crawler:
               "waited_s": round(c.waited_s, 1), "calls_today": self.store.calls_today(),
               "keys": len(c.keys), "keys_live": c.live_keys, "key_calls": c.key_calls,
               "blocked": self.blocked_families(), "extended_top": self.extended_top,
-              "failing": sorted(k for k, v in self._skip_until.items() if v > time.time())[:20]}
+              "failing": sorted(k for k, v in self._skip_until.items() if v > time.time())[:20],
+              "deep_prices_running": bool(self._deep_thread is not None and self._deep_thread.is_alive())}
         try:
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(st, indent=1))
@@ -1662,7 +1769,10 @@ class Crawler:
             except Exception as e:                   # never let one bad payload stop the loop
                 self._note_failure(task, e)
             self.maybe_rebuild()
+            self.maybe_deep_prices()
         self.maybe_rebuild(force=True)
+        if self._deep_thread is not None and self._deep_thread.is_alive():
+            self._deep_thread.join(timeout=600)
         self.write_state(None, idle=True)
         return self.store.client.calls - c0
 

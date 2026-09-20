@@ -487,7 +487,7 @@ def test_build_liquid_universe_ranks_by_dollar_volume(tmp_path):
 def _crawler(tmp_path, session=None, today=None):
     today = today or (datetime.now(timezone.utc).date() - timedelta(days=3))   # all days publish-ready
     st, client, clock = _store(tmp_path, session or FakeSession(), today=today)
-    return M.Crawler(st, ["AAPL", "MSFT"], log=lambda m: None), st, client
+    return M.Crawler(st, ["AAPL", "MSFT"], log=lambda m: None, deep_prices=False), st, client
 
 
 def test_crawler_priority_order_is_tier0_grouped_first(tmp_path):
@@ -544,7 +544,9 @@ def test_crawler_once_drains_then_exits(tmp_path):
         client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
     for key in ["reference/tickers_active", "reference/holidays", "reference/tickers_delisted",
                 "details/AAPL", "details/MSFT", "financials/AAPL", "financials/MSFT",
-                "news/ticker/AAPL", "news/ticker/MSFT", "events/AAPL", "events/MSFT", "related/AAPL", "related/MSFT",
+                "news/ticker_deep/AAPL", "news/ticker_deep/MSFT", "events/AAPL", "events/MSFT", "related/AAPL", "related/MSFT",
+                "dividends_ticker/AAPL", "dividends_ticker/MSFT", "splits_ticker/AAPL", "splits_ticker/MSFT",
+                "short_interest_ticker/AAPL", "short_interest_ticker/MSFT",
                 "news/ticker_recent/AAPL", "news/ticker_recent/MSFT", "aggs_qa/AAPL", "aggs_qa/MSFT",
                 "reference/exchanges", "reference/ticker_types", "reference/ipos",
                 "fed/treasury-yields", "fed/inflation", "fed/inflation-expectations",
@@ -584,9 +586,10 @@ def test_extended_tier_takes_top_n_beyond_universe(tmp_path):
     assert cr.extended_tickers() == ["A1", "A2"]                        # 4 − 2 universe names, by $vol
     t4 = [t for t in cr.due_tasks() if t.tier == 4]
     assert {n.split()[-1] for n in (t.name for t in t4)} == {"A1", "A2"}
-    assert any(t.name == "news-backfill A1" for t in t4)                 # universe-grade depth
+    assert any(t.name == "news-deep A1" for t in t4)                     # universe-grade depth
+    assert any(t.name == "dividends-deep A1" for t in t4) and any(t.name == "short-interest-deep A1" for t in t4)
     t5 = [t for t in cr.due_tasks() if t.tier == 5]
-    assert {n.split()[-1] for n in (t.name for t in t5)} == {"A3"} and not any("backfill" in t.name for t in t5)
+    assert {n.split()[-1] for n in (t.name for t in t5)} == {"A3"} and not any("deep" in t.name for t in t5)
 
 
 def test_extra_tables_flatten(tmp_path):
@@ -644,3 +647,66 @@ def test_crawler_backs_off_a_failing_task_instead_of_looping(tmp_path):
     assert bad == 1                                                        # one failure → parked 6 h
     assert "details AAPL" in json.loads(cr.state_path.read_text())["failing"]
     assert not any(t.name == "details AAPL" for t in [cr.next_task()] if t)
+
+
+def test_deep_tasks_only_for_universe_and_extended_and_use_full_history_params(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    names = [t.name for t in cr.due_tasks() if t.tier == 3]
+    for kind in ("news-deep", "dividends-deep", "splits-deep", "short-interest-deep", "events", "related"):
+        assert f"{kind} AAPL" in names
+    assert "news-backfill AAPL" not in names
+    client.news(ticker="AAPL", gte=datetime(2000, 1, 1, tzinfo=timezone.utc), cache_key="news/ticker_deep/AAPL", max_pages=60)
+    client.dividends_ticker("AAPL"); client.short_interest_ticker("AAPL")
+    p = [x for _, x, _ in s.log]
+    assert p[0]["published_utc.gte"].startswith("2000-01-01") and "published_utc.lt" not in p[0]
+    assert p[1] == {"ticker": "AAPL", "limit": 1000, "sort": "ex_dividend_date", "order": "asc"}
+    assert p[2]["settlement_date.gte"] == "2000-01-01" and p[2]["limit"] == 50000
+
+
+def test_corporate_actions_merge_monthly_windows_with_per_ticker_history(tmp_path):
+    st, client, _ = _store(tmp_path, FakeSession())
+    d1 = st.today - timedelta(days=1)
+    lo, hi = M.month_windows(d1, d1)[0]
+    client.cache_write(f"splits/{lo.isoformat()}_{hi.isoformat()}",
+                       {"results": [{"ticker": "X", "execution_date": d1.isoformat(), "split_from": 1, "split_to": 2}], "fetched_at": 0})
+    client.cache_write("splits_ticker/X", {"results": [
+        {"ticker": "X", "execution_date": "2005-02-28", "split_from": 1, "split_to": 2},
+        {"ticker": "X", "execution_date": d1.isoformat(), "split_from": 1, "split_to": 2}], "fetched_at": 0})    # overlap → deduped
+    client.cache_write("dividends_ticker/X", {"results": [{"ticker": "X", "ex_dividend_date": "2012-08-09", "cash_amount": 0.38}], "fetched_at": 0})
+    splits, divs = st.build_corporate_actions()
+    assert splits.height == 2 and splits["execution_date"].min() == date(2005, 2, 28)
+    assert divs.height == 1 and divs["ex_dividend_date"][0] == date(2012, 8, 9)
+
+
+def test_build_deep_prices_splices_yfinance_onto_massive_window(tmp_path):
+    st, client, _ = _store(tmp_path, FakeSession())
+    days = M.business_days(st.today - timedelta(days=400), st.today)
+    massive_days = days[-100:]
+    pl.DataFrame({"date": massive_days, "ticker": ["AAPL"] * 100, "open": [20.0] * 100, "high": [20.0] * 100,
+                  "low": [20.0] * 100, "close": [20.0] * 100, "adj_close": [20.0] * 100, "volume": [1.0] * 100,
+                  "otc": [False] * 100}).with_columns(pl.col("date").cast(pl.Date)).write_parquet(st.ohlcv_all_path)
+
+    def fake_fetch(tickers, start, end=None, progress=True, workers=None):
+        assert start == "1970-01-01" and tickers == ["AAPL", "MSFT"]
+        rows = [{"date": d, "ticker": t, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "adj_close": 9.0, "volume": 2}
+                for t in tickers for d in days]
+        return pl.DataFrame(rows).with_columns(pl.col("date").cast(pl.Date))
+    out = st.build_deep_prices(["AAPL", "MSFT"], start="1970-01-01", fetch=fake_fetch)
+    a = out.filter(pl.col("ticker") == "AAPL").sort("date")
+    assert a.height == len(days) and a["source"].value_counts().sort("source")["count"].to_list() == [100, len(days) - 100]
+    assert a["close"].n_unique() == 1 and a["close"][0] == pytest.approx(20.0)           # rescaled ×2 at the seam
+    assert out.filter(pl.col("ticker") == "MSFT")["source"].unique().to_list() == ["yfinance"]
+    assert st.deep_path.exists()
+
+
+def test_maybe_deep_prices_runs_once_in_background(tmp_path, monkeypatch):
+    cr, st, client = _crawler(tmp_path)
+    cr.deep_prices = True
+    calls = []
+    monkeypatch.setattr(st, "build_deep_prices", lambda tickers, start: (calls.append((tuple(tickers), start)),
+                        st.deep_path.write_text("x"), pl.DataFrame({"ticker": ["AAPL"], "date": [date(2020, 1, 1)]}))[2])
+    assert cr.maybe_deep_prices() is True
+    cr._deep_thread.join(5)
+    assert calls == [(("AAPL", "MSFT"), "1970-01-01")]
+    assert cr.maybe_deep_prices() is False                     # fresh file → no second build
