@@ -72,7 +72,7 @@ logger = get_logger(__name__)
 MASSIVE_BASE = "https://api.massive.com"
 _ENV_KEYS = ("MASSIVE_API_KEY", "POLYGON_API_KEY")
 DEFAULT_RPM = 5
-WINDOW_S = 62.0            # server window is 60 s; 2 s slack for clock skew
+WINDOW_S = 61.0            # server window is 60 s; 1 s slack for clock skew (≈4.9 req/min sustained)
 HISTORY_YEARS = 2          # free-tier depth
 _DAY = 86_400.0
 _MAX_PAGES_DEFAULT = 200
@@ -225,6 +225,13 @@ class MassiveClient:
 
     def cached(self, key: str) -> bool:
         return self._cache_file(key).exists()
+
+    def cache_age(self, key: str) -> float | None:
+        """Seconds since the cache file was written (mtime), or None if absent. No JSON parse."""
+        try:
+            return max(time.time() - self._cache_file(key).stat().st_mtime, 0.0)
+        except FileNotFoundError:
+            return None
 
     def _count_call(self) -> None:
         """Append to a per-day counter so `ts massive status` can show budget use."""
@@ -650,7 +657,12 @@ class MassiveStore:
         self.rpm = rpm
         self.include_otc = include_otc
         self.history_years = history_years
-        self.today = today or datetime.now(timezone.utc).date()
+        self._today_fixed = today
+
+    @property
+    def today(self) -> date:
+        """UTC date, evaluated per call so a long-running crawler rolls over at midnight (tests freeze it)."""
+        return self._today_fixed or datetime.now(timezone.utc).date()
 
     @classmethod
     def from_config(cls, cfg, client: MassiveClient | None = None) -> "MassiveStore":
@@ -706,7 +718,7 @@ class MassiveStore:
 
     def _grouped_ttl(self, d: date) -> float | None:
         """Past days are immutable; the last few may not be published yet → short TTL when empty."""
-        return None if d < self.today - timedelta(days=3) else 6 * 3600
+        return None if d < self.today - timedelta(days=3) else 2 * 3600
 
     def fetch_day(self, d: date) -> int:
         """Ensure the grouped bar for ``d`` is cached; returns the row count (0 = holiday/not yet)."""
@@ -795,6 +807,25 @@ class MassiveStore:
             self.client.news(ticker=t, gte=gte, cache_key=f"news/ticker/{t}_{start.isoformat()}",
                              ttl_s=30 * _DAY, max_pages=5)
         return self.client.calls - c0
+
+    def crawl_news_recent(self, ticker: str, days: int = 14, ttl_s: float = _DAY) -> int:
+        """Rolling per-ticker refresh (last ``days``); merged with the one-off backfill at build time."""
+        c0 = self.client.calls
+        gte = datetime.now(timezone.utc) - timedelta(days=days)
+        gte = gte.replace(hour=0, minute=0, second=0, microsecond=0)
+        self.client.news(ticker=ticker, gte=gte, cache_key=f"news/ticker_recent/{ticker}", ttl_s=ttl_s, max_pages=2)
+        return self.client.calls - c0
+
+    def holiday_dates(self) -> set[date]:
+        doc = self.client.cache_read("reference/holidays", None)
+        out = set()
+        for h in (doc or {}).get("results", []) or []:
+            try:
+                if h.get("status") == "closed" and h.get("exchange") in (None, "NYSE", "NASDAQ"):
+                    out.add(date.fromisoformat(str(h.get("date"))[:10]))
+            except ValueError:
+                pass
+        return out
 
     def crawl_news_daily(self, days: int = 3, max_pages: int = 6) -> int:
         """Whole-market news, one cache entry per UTC day (yesterday..today refreshed every 6 h)."""
@@ -1054,3 +1085,319 @@ def build_liquid_universe(store: MassiveStore, *, min_price: float = 5.0, min_do
         ref = pl.read_parquet(store.tickers_path).select("ticker", "type", "name", "primary_exchange")
         stats = stats.join(ref, on="ticker", how="left").filter(pl.col("type").is_in(list(types)) | pl.col("type").is_null())
     return stats.sort("dollar_vol", descending=True).head(top)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Continuous crawler — keeps the 5 req/min budget busy, most valuable work first
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EQUITY_TYPES = ("CS", "ADRC")
+
+
+@dataclass
+class Task:
+    tier: int
+    name: str
+    run: Callable[[], int]          # returns network calls made
+
+
+class Crawler:
+    """Priority-scheduled crawl loop. Planning is cache-only (mtime ages), so every
+    network call is real work.  Tiers (checked in order before *each* call):
+
+      0  today-critical: newest grouped days once published, current-month corp
+         actions, whole-market news for today/yesterday
+      1  grouped-day backfill (newest first) — the 2-year price panel
+      2  directory + calendar: active tickers (7d), holidays (7d), monthly
+         splits/dividends (30d), delisted directory (30d)
+      3  universe depth: overview (30d), fundamentals (7d), 2y news backfill
+         (once) + rolling 14d news refresh (1d)
+      4  whole-market depth, by liquidity rank: overview (45d), fundamentals
+         (14d), rolling news (30d) for every active common stock / ADR
+      5  QA: Massive's own split-adjusted series per universe ticker (7d) so
+         `ts massive status` can report the adjustment-math discrepancy
+
+    Steady state after the backfill is ≈1.5k calls/day of the ≈7k budget; the
+    remainder is spent walking tier 4 deeper.  A SIGTERM finishes the current
+    call, writes state and exits 0.
+    """
+
+    TTL = {"tickers_active": 7 * _DAY, "tickers_delisted": 30 * _DAY, "holidays": 7 * _DAY,
+           "actions_current": _DAY, "actions_past": 30 * _DAY, "news_daily_recent": 6 * 3600,
+           "details_universe": 30 * _DAY, "financials_universe": 7 * _DAY, "news_universe": _DAY,
+           "details_market": 45 * _DAY, "financials_market": 14 * _DAY, "news_market": 30 * _DAY,
+           "aggs_qa": 7 * _DAY}
+    PUBLISH_LAG_H = 1.5             # grouped bar for D is tried from D+1 01:30 UTC (≈21:30 ET)
+
+    def __init__(self, store: MassiveStore, universe_tickers: Iterable[str], state_path: Path | None = None,
+                 rebuild_every_s: float = 900.0, log: Callable[[str], None] | None = None):
+        self.store = store
+        self.universe = [normalize_ticker(t) for t in universe_tickers]
+        self.state_path = state_path or (store.raw_dir / "crawler_state.json")
+        self.rebuild_every_s = rebuild_every_s
+        self.log = log or (lambda m: logger.info(m))
+        self._market: list[str] = []
+        self._market_at = 0.0
+        self._dirty_ohlcv = False
+        self._dirty_ref = False
+        self._last_build = 0.0
+        self.stop = False
+        self.tier_calls: dict[str, int] = {}
+        self.started = time.time()
+
+    # ---- helpers ----------------------------------------------------------------
+    def _age(self, key: str) -> float | None:
+        return self.store.client.cache_age(key)
+
+    def _stale(self, key: str, ttl: float) -> bool:
+        a = self._age(key)
+        return a is None or a > ttl
+
+    def _publish_ready(self, d: date) -> bool:
+        return datetime.now(timezone.utc) >= datetime(d.year, d.month, d.day, tzinfo=timezone.utc) \
+            + timedelta(days=1, hours=self.PUBLISH_LAG_H)
+
+    def market_tickers(self) -> list[str]:
+        """Active CS/ADRC tickers ranked by trailing-63d median dollar volume (universe first)."""
+        if self._market and time.time() - self._market_at < 3600:
+            return self._market
+        ranked: list[str] = []
+        try:
+            if self.store.tickers_path.exists():
+                ref = pl.read_parquet(self.store.tickers_path)
+                if "type" in ref.columns:
+                    ref = ref.filter(pl.col("type").is_in(list(_EQUITY_TYPES)))
+                if "active" in ref.columns:
+                    ref = ref.filter(pl.col("active").fill_null(True))
+                eq = set(ref["ticker"].to_list())
+                if self.store.ohlcv_all_path.exists():
+                    px = pl.read_parquet(self.store.ohlcv_all_path, columns=["date", "ticker", "close", "volume", "otc"])
+                    dates = sorted(px["date"].unique().to_list())[-63:]
+                    dv = (px.filter(pl.col("date").is_in(dates) & ~pl.col("otc").fill_null(False))
+                            .group_by("ticker").agg((pl.col("close") * pl.col("volume")).median().alias("dv"))
+                            .sort("dv", descending=True))
+                    ranked = [t for t in dv["ticker"].to_list() if t in eq]
+                    ranked += sorted(eq - set(ranked))
+                else:
+                    ranked = sorted(eq)
+        except Exception as e:
+            logger.warning(f"crawler: market ranking failed ({e}); using universe only")
+        seen = set(self.universe)
+        self._market = self.universe + [t for t in ranked if t not in seen]
+        self._market_at = time.time()
+        return self._market
+
+    def _mark(self, tier: int, ohlcv: bool = False, ref: bool = False) -> Callable[[Callable[[], int]], Callable[[], int]]:
+        def wrap(fn):
+            def run():
+                n = fn()
+                self.tier_calls[str(tier)] = self.tier_calls.get(str(tier), 0) + n
+                if n:
+                    self._dirty_ohlcv |= ohlcv
+                    self._dirty_ref |= ref
+                return n
+            return run
+        return wrap
+
+    # ---- planning ---------------------------------------------------------------
+    def due_tasks(self):
+        st, c, T = self.store, self.store.client, self.TTL
+        today = st.today
+        hol = st.holiday_dates()
+
+        # tier 0 — freshest bars, current corp actions, today's news
+        for d in sorted(st.missing_days(today - timedelta(days=7), today), reverse=True):
+            if d in hol or not self._publish_ready(d):
+                continue
+            yield Task(0, f"grouped {d}", self._mark(0, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)))
+        for lo, hi in month_windows(today - timedelta(days=45), today):
+            ttl = T["actions_current"] if hi >= today - timedelta(days=7) else T["actions_past"]
+            for kind in ("splits", "dividends"):
+                key = f"{kind}/{lo.isoformat()}_{hi.isoformat()}"
+                if self._stale(key, ttl):
+                    fn = c.splits if kind == "splits" else c.dividends
+                    yield Task(0, f"{kind} {lo:%Y-%m}", self._mark(0, ohlcv=True)(lambda fn=fn, lo=lo, hi=hi, ttl=ttl: self._calls(lambda: fn(lo, hi, ttl_s=ttl))))
+        for i in (0, 1, 2):
+            d = today - timedelta(days=i)
+            ttl = T["news_daily_recent"] if i <= 1 else None
+            key = f"news/daily/{d.isoformat()}"
+            if (ttl is None and self._age(key) is None) or (ttl is not None and self._stale(key, ttl)):
+                yield Task(0, f"news-daily {d}", self._mark(0, ref=True)(lambda d=d, ttl=ttl: self._calls(
+                    lambda: c.news(gte=datetime(d.year, d.month, d.day, tzinfo=timezone.utc),
+                                   lte=datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(days=1),
+                                   cache_key=f"news/daily/{d.isoformat()}", ttl_s=ttl, max_pages=6))))
+
+        # tier 1 — 2-year grouped backfill, newest first
+        for d in sorted(st.missing_days(), reverse=True):
+            if d in hol or not self._publish_ready(d):
+                continue
+            yield Task(1, f"grouped {d}", self._mark(1, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)))
+
+        # tier 2 — directory + calendar + full corp-action history
+        if self._stale("reference/tickers_active", T["tickers_active"]):
+            yield Task(2, "tickers active", self._mark(2, ref=True)(lambda: self._calls(lambda: c.tickers(active=True, ttl_s=0))))
+        if self._stale("reference/holidays", T["holidays"]):
+            yield Task(2, "holidays", self._mark(2)(lambda: self._calls(lambda: c.holidays(ttl_s=0))))
+        for lo, hi in month_windows(st.history_start() - timedelta(days=31), today):
+            for kind in ("splits", "dividends"):
+                key = f"{kind}/{lo.isoformat()}_{hi.isoformat()}"
+                if self._stale(key, T["actions_past"]):
+                    fn = c.splits if kind == "splits" else c.dividends
+                    yield Task(2, f"{kind} {lo:%Y-%m}", self._mark(2, ohlcv=True)(lambda fn=fn, lo=lo, hi=hi: self._calls(lambda: fn(lo, hi, ttl_s=0))))
+        if self._stale("reference/tickers_delisted", T["tickers_delisted"]):
+            yield Task(2, "tickers delisted", self._mark(2, ref=True)(lambda: self._calls(lambda: c.tickers(active=False, ttl_s=0))))
+
+        # tier 3 — universe depth
+        start = st.history_start()
+        for t in self.universe:
+            if self._stale(f"details/{t}", T["details_universe"]):
+                yield Task(3, f"details {t}", self._mark(3, ref=True)(lambda t=t: self._calls(lambda: c.ticker_details(t, ttl_s=0))))
+            if self._stale(f"financials/{t}", T["financials_universe"]):
+                yield Task(3, f"financials {t}", self._mark(3, ref=True)(lambda t=t: self._calls(lambda: c.financials(t, ttl_s=0))))
+            if self._age(f"news/ticker/{t}_{start.isoformat()}") is None:
+                yield Task(3, f"news-backfill {t}", self._mark(3, ref=True)(lambda t=t: st.crawl_news_backfill([t], start)))
+            elif self._stale(f"news/ticker_recent/{t}", T["news_universe"]):
+                yield Task(3, f"news-recent {t}", self._mark(3, ref=True)(lambda t=t: st.crawl_news_recent(t, ttl_s=0)))
+
+        # tier 4 — whole market by liquidity rank
+        for t in self.market_tickers():
+            if t in self.universe:
+                continue
+            if self._stale(f"details/{t}", T["details_market"]):
+                yield Task(4, f"details {t}", self._mark(4, ref=True)(lambda t=t: self._calls(lambda: c.ticker_details(t, ttl_s=0))))
+            if self._stale(f"financials/{t}", T["financials_market"]):
+                yield Task(4, f"financials {t}", self._mark(4, ref=True)(lambda t=t: self._calls(lambda: c.financials(t, ttl_s=0))))
+            if self._stale(f"news/ticker_recent/{t}", T["news_market"]):
+                yield Task(4, f"news-recent {t}", self._mark(4, ref=True)(lambda t=t: st.crawl_news_recent(t, days=30, ttl_s=0)))
+
+        # tier 5 — QA: Massive's split-adjusted series vs ours
+        for t in self.universe:
+            key = f"aggs_qa/{t}"
+            if self._stale(key, T["aggs_qa"]):
+                yield Task(5, f"aggs-qa {t}", self._mark(5)(lambda t=t, key=key: self._calls(
+                    lambda: c.get(f"/v2/aggs/ticker/{t}/range/1/day/{start.isoformat()}/{today.isoformat()}",
+                                  {"adjusted": "true", "sort": "asc", "limit": 50000}, cache_key=key, ttl_s=0))))
+
+    def _calls(self, fn: Callable[[], Any]) -> int:
+        c0 = self.store.client.calls
+        fn()
+        return self.store.client.calls - c0
+
+    def _fetch_day_calls(self, d: date) -> int:
+        return self._calls(lambda: self.store.fetch_day(d))
+
+    # ---- execution -----------------------------------------------------------------
+    def next_task(self) -> Task | None:
+        for t in self.due_tasks():
+            return t
+        return None
+
+    def maybe_rebuild(self, force: bool = False) -> None:
+        if not (force or time.time() - self._last_build >= self.rebuild_every_s):
+            return
+        if self._dirty_ohlcv or force:
+            try:
+                self.store.build_ohlcv_all()
+                self._dirty_ohlcv = False
+            except MassiveNotReady:
+                pass
+            except Exception as e:
+                logger.warning(f"crawler: ohlcv build failed: {e}")
+        if self._dirty_ref or force:
+            try:
+                n = self.store.build_reference(self.universe)
+                self.log(f"reference tables rebuilt: {n}")
+                self._dirty_ref = False
+            except Exception as e:
+                logger.warning(f"crawler: reference build failed: {e}")
+        self._last_build = time.time()
+
+    def write_state(self, current: str | None, idle: bool = False) -> None:
+        c = self.store.client
+        st = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "pid": os.getpid(),
+              "current": current, "idle": idle, "calls_session": c.calls, "cache_hits": c.cache_hits,
+              "tier_calls": self.tier_calls, "uptime_h": round((time.time() - self.started) / 3600, 2),
+              "waited_s": round(c.limiter.waited_s, 1), "calls_today": self.store.calls_today()}
+        try:
+            tmp = self.state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(st, indent=1))
+            os.replace(tmp, self.state_path)
+        except Exception:
+            pass
+
+    def run(self, once: bool = False, max_calls: int | None = None, idle_sleep: float = 60.0) -> int:
+        """Loop until stopped. Returns network calls made."""
+        import signal
+
+        def _stop(signum, frame):
+            self.log(f"signal {signum} — finishing current call")
+            self.stop = True
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _stop)
+            except ValueError:
+                pass                                # not main thread (tests)
+        c0 = self.store.client.calls
+        last_tier: int | None = None
+        while not self.stop:
+            if max_calls is not None and self.store.client.calls - c0 >= max_calls:
+                break
+            task = self.next_task()
+            if task is None:
+                self.maybe_rebuild(force=self._dirty_ohlcv or self._dirty_ref)
+                self.write_state(None, idle=True)
+                if once:
+                    break
+                time.sleep(idle_sleep)
+                continue
+            if task.tier != last_tier:
+                self.log(f"tier {task.tier} → {task.name}")
+                last_tier = task.tier
+            self.write_state(task.name)
+            try:
+                task.run()
+            except MassiveAuthError:
+                raise
+            except MassiveError as e:
+                logger.warning(f"crawler: {task.name} failed: {e}")
+                time.sleep(5)
+            self.maybe_rebuild()
+            if once and task.tier >= 4:
+                break
+        self.maybe_rebuild(force=True)
+        self.write_state(None, idle=True)
+        return self.store.client.calls - c0
+
+
+def crawler_state(store: MassiveStore) -> dict | None:
+    p = store.raw_dir / "crawler_state.json"
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+def adjustment_qa(store: MassiveStore, max_tickers: int = 2000) -> pl.DataFrame | None:
+    """Compare our split-adjusted ``close`` against Massive's own ``adjusted=true`` bars (tier-5 cache).
+
+    Returns per-ticker ``max_abs_dev`` (relative) and ``n`` overlapping days, or
+    None when nothing is cached yet.  A large deviation means a split we are
+    missing (or one Massive applies that we don't) — investigate before trusting
+    that name's history.
+    """
+    qa_dir = store.raw_dir / "aggs_qa"
+    if not qa_dir.exists() or not store.ohlcv_all_path.exists():
+        return None
+    ours = pl.read_parquet(store.ohlcv_all_path, columns=["date", "ticker", "close"])
+    rows = []
+    for p in sorted(qa_dir.glob("*.json.gz"))[:max_tickers]:
+        t = p.name[:-8]
+        doc = store.client.cache_read(f"aggs_qa/{t}", None)
+        if not doc or not doc["results"]:
+            continue
+        theirs = aggs_to_frame(t, doc["results"]).select("date", pl.col("close").alias("their_close"))
+        j = ours.filter(pl.col("ticker") == t).join(theirs, on="date", how="inner")
+        if j.height:
+            dev = ((j["close"] / j["their_close"]) - 1.0).abs()
+            rows.append({"ticker": t, "n": j.height, "max_abs_dev": float(dev.max()), "mean_abs_dev": float(dev.mean())})
+    return pl.DataFrame(rows) if rows else pl.DataFrame(schema={"ticker": pl.Utf8, "n": pl.Int64, "max_abs_dev": pl.Float64, "mean_abs_dev": pl.Float64})

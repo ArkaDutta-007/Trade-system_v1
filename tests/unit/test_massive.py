@@ -426,3 +426,96 @@ def test_build_liquid_universe_ranks_by_dollar_volume(tmp_path):
     pl.DataFrame(rows).with_columns(pl.col("date").cast(pl.Date)).write_parquet(st.ohlcv_all_path)
     u = M.build_liquid_universe(st, min_price=5.0, min_dollar_vol=5e5, top=10)
     assert u["ticker"].to_list() == ["BIG"]          # SMALL below $vol floor, PENNY below price, PINK is OTC
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Continuous crawler
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _crawler(tmp_path, session=None, today=None):
+    today = today or (datetime.now(timezone.utc).date() - timedelta(days=3))   # all days publish-ready
+    st, client, clock = _store(tmp_path, session or FakeSession(), today=today)
+    return M.Crawler(st, ["AAPL", "MSFT"], log=lambda m: None), st, client
+
+
+def test_crawler_priority_order_is_tier0_grouped_first(tmp_path):
+    cr, st, client = _crawler(tmp_path)
+    tasks = list(cr.due_tasks())
+    assert tasks[0].tier == 0 and tasks[0].name.startswith("grouped")
+    assert tasks[0].name.endswith(st.today.isoformat())              # newest first
+    tiers = [t.tier for t in tasks]
+    assert tiers == sorted(tiers)                                       # monotone by tier
+    assert any(t.name == "tickers active" for t in tasks) and any(t.name == "details AAPL" for t in tasks)
+    assert any(t.name.startswith("aggs-qa") for t in tasks)
+
+
+def test_crawler_skips_cached_and_fresh_items(tmp_path):
+    cr, st, client = _crawler(tmp_path)
+    for d in M.business_days(st.history_start(), st.today):
+        client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
+    client.cache_write("details/AAPL", {"results": [{"ticker": "AAPL"}], "fetched_at": 0})
+    names = [t.name for t in cr.due_tasks()]
+    assert not any(n.startswith("grouped") for n in names)
+    assert "details AAPL" not in names and "details MSFT" in names
+
+
+def test_crawler_respects_holidays_and_publish_lag(tmp_path):
+    cr, st, client = _crawler(tmp_path, today=datetime.now(timezone.utc).date())
+    today = st.today
+    client.cache_write("reference/holidays", {"results": [{"date": (today - timedelta(days=1)).isoformat(),
+                                                           "status": "closed", "exchange": "NYSE"}], "fetched_at": 0})
+    names = [t.name for t in cr.due_tasks() if t.name.startswith("grouped")]
+    assert f"grouped {today.isoformat()}" not in names                 # today not published yet
+    assert f"grouped {(today - timedelta(days=1)).isoformat()}" not in names   # holiday
+
+
+def test_crawler_run_stops_at_budget_and_rebuilds(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/v2/aggs/grouped", FakeResp(200, {"results": [grouped_row("AAPL", 10)]}))
+    s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    n = cr.run(max_calls=7, idle_sleep=0)
+    assert n == 7 and client.calls == 7
+    assert st.ohlcv_all_path.exists() and cr.state_path.exists()
+    state = json.loads(cr.state_path.read_text())
+    assert state["calls_session"] == 7 and state["tier_calls"].get("0", 0) + state["tier_calls"].get("1", 0) == 7
+
+
+def test_crawler_once_drains_then_exits(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path)
+    cr.store._client.session = s
+    # everything cached & fresh → once-mode exits immediately with zero calls
+    for d in M.business_days(st.history_start(), st.today):
+        client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
+    for key in ["reference/tickers_active", "reference/holidays", "reference/tickers_delisted",
+                "details/AAPL", "details/MSFT", "financials/AAPL", "financials/MSFT",
+                f"news/ticker/AAPL_{st.history_start().isoformat()}", f"news/ticker/MSFT_{st.history_start().isoformat()}",
+                "news/ticker_recent/AAPL", "news/ticker_recent/MSFT", "aggs_qa/AAPL", "aggs_qa/MSFT"]:
+        client.cache_write(key, {"results": [], "fetched_at": 0})
+    for lo, hi in M.month_windows(st.history_start() - timedelta(days=31), st.today):
+        for k in ("splits", "dividends"):
+            client.cache_write(f"{k}/{lo.isoformat()}_{hi.isoformat()}", {"results": [], "fetched_at": 0})
+    for i in (0, 1, 2):
+        client.cache_write(f"news/daily/{(st.today - timedelta(days=i)).isoformat()}", {"results": [], "fetched_at": 0})
+    assert cr.run(once=True, idle_sleep=0) == 0
+
+
+def test_market_tickers_ranks_by_liquidity_with_universe_first(tmp_path):
+    cr, st, client = _crawler(tmp_path)
+    pl.DataFrame({"ticker": ["ZZZ", "BIG", "ETF", "AAPL"], "type": ["CS", "CS", "ETF", "CS"], "active": [True] * 4}).write_parquet(st.tickers_path)
+    d = st.today
+    pl.DataFrame({"date": [d] * 3, "ticker": ["ZZZ", "BIG", "AAPL"], "close": [1.0, 100.0, 50.0],
+                  "volume": [10.0, 1e6, 1e6], "otc": [False] * 3}).with_columns(pl.col("date").cast(pl.Date)).write_parquet(st.ohlcv_all_path)
+    assert cr.market_tickers() == ["AAPL", "MSFT", "BIG", "ZZZ"]         # universe first, then $vol rank, ETF excluded
+
+
+def test_adjustment_qa_reports_deviation(tmp_path):
+    st, client, _ = _store(tmp_path, FakeSession())
+    d0, d1 = st.today - timedelta(days=2), st.today - timedelta(days=1)
+    pl.DataFrame({"date": [d0, d1], "ticker": ["X", "X"], "close": [25.0, 25.0]}).with_columns(pl.col("date").cast(pl.Date)).write_parquet(st.ohlcv_all_path)
+    ms = lambda d: int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)
+    client.cache_write("aggs_qa/X", {"results": [{"t": ms(d0), "c": 25.0}, {"t": ms(d1), "c": 25.5}], "fetched_at": 0})
+    qa = M.adjustment_qa(st)
+    assert qa.height == 1 and qa["max_abs_dev"][0] == pytest.approx(0.5 / 25.5)

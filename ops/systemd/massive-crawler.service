@@ -1,0 +1,23 @@
+[Unit]
+Description=Massive (ex-Polygon) continuous data crawler for Trade-system_v1 (5 req/min, prioritised)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+[Service]
+WorkingDirectory=/home/ad2688/Desktop/Trade-system_v1
+ExecStart=/home/ad2688/Desktop/Trade-system_v1/venv/bin/ts massive crawl -u liquid
+Restart=always
+RestartSec=60
+TimeoutStopSec=90
+KillSignal=SIGTERM
+Nice=10
+Environment=HOME=/home/ad2688
+Environment=PYTHONUNBUFFERED=1
+Environment=TERM=dumb
+StandardOutput=append:/home/ad2688/trade-ops/logs/massive-crawler.log
+StandardError=append:/home/ad2688/trade-ops/logs/massive-crawler.log
+
+[Install]
+WantedBy=default.target

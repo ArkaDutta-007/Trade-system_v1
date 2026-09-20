@@ -134,8 +134,20 @@ The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
   market by trailing-63d median dollar volume (CS/ADRC only, no OTC) into a
   universe YAML; `ohlcv_all.parquet` keeps delisted names for research.
 
-CLI: `ts massive status | backfill | update | build | universe`; the daily
-pipeline runs `ts massive update -u liquid` before `ts daily`. Tests:
+* **Continuous crawler** (`Crawler`, `ts massive crawl`, systemd user unit
+  `massive-crawler.service`) keeps the budget saturated with cache-planned work
+  in priority tiers, re-checked before *every* call: 0 newest bars once published
+  (D+1 01:30 UTC), current corp actions, today's news → 1 two-year grouped
+  backfill (newest first) → 2 directory, holidays, monthly splits/dividends →
+  3 universe overview/fundamentals/news (30d/7d/1d TTL) → 4 whole market by
+  liquidity rank (45d/14d/30d) → 5 QA: Massive's own adjusted series vs our
+  `close` (`adjustment_qa`, shown in `ts massive status`). Steady state ≈1.5k
+  calls/day of ≈7k; SIGTERM stops after the current call; state in
+  `data/raw/massive/crawler_state.json`.
+
+CLI: `ts massive status | crawl | backfill | update | build | universe`; the daily
+pipeline runs `ts massive update -u liquid` before `ts daily` (a no-op when the
+crawler has already fetched everything — they share the limiter). Tests:
 `tests/unit/test_massive.py` (limiter, cache/TTL, pagination, 429/auth,
 adjustment vs hand calcs, splice continuity, budget caps) — all network-free.
 

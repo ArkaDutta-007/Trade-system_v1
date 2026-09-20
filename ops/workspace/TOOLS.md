@@ -68,13 +68,17 @@ What Arka says → what you run:
 - "massive status / is the Massive feed ok" → `~/ops/bin/ts-run massive status`
   Massive (ex-Polygon) is the EOD price feed since 2026-09-19: whole-market bars
   for the last 2 years + splits/dividends/fundamentals/tagged news, capped at
-  **5 requests/min** (enforced client-side; never work around it). Needs
-  `MASSIVE_API_KEY` in the repo .env — until Arka adds it the pipeline silently
-  uses yfinance (`data.source: auto`). "backfill massive" →
-  `~/ops/bin/ts-run --timeout 30000 massive backfill -u liquid` (≈6 h, resumable,
-  safe to re-run; writes only gitignored data/). Daily top-up runs inside the
-  05:15 pipeline (`ts massive update`). Never run backfill and update at once
-  in two shells — they share the 5/min budget and just wait on each other.
+  **5 requests/min** (enforced client-side; never work around it). Key
+  `MASSIVE_API_KEY` is in the repo .env (added 2026-09-19).
+- "is the Massive crawler running / crawler status" → `~/ops/bin/ts-run massive status`
+  (bottom lines: crawler running/not, current tier+item, calls by tier, adjustment QA).
+  It is the systemd user service `massive-crawler.service` (log
+  `~/trade-ops/logs/massive-crawler.log`): `systemctl --user status|restart massive-crawler`.
+  It runs FOREVER on purpose — tiers: newest bars → 2y backfill → directory/corp
+  actions → universe depth → whole-market depth → QA — and it shares the 5/min
+  limiter with every other Massive call, so never start a second crawler or a
+  manual `ts massive backfill` while it runs (they only queue behind each other).
+  The 05:15 pipeline's `ts massive update` is a no-op when the crawler is current.
 - "are the tools healthy / run the tests" → `~/Desktop/Trade-system_v1/ops/run_tests.sh`
   (52 unit tests; also runs first in the daily pipeline).
 - "retrain the model now"         → `~/ops/bin/run-with-alert trade-weekly-retrain ~/Desktop/Trade-system_v1/ops/weekly_retrain.sh`

@@ -254,6 +254,21 @@ def massive_status(config: str = "configs/default.yaml", universe: str = UNIVERS
         v = st[k]
         rprint(f"  {k:<11} " + (f"{v['rows']:>10,} rows · {v['age_h']}h old" if v else "[dim]—[/dim]"))
     rprint(f"[dim]raw cache: {st['raw_dir']} · bronze: {st['bronze_dir']}[/dim]")
+    from .ingestion.massive import crawler_state, adjustment_qa
+    cs = crawler_state(store)
+    if cs:
+        alive = (Path("/proc") / str(cs.get("pid", 0))).exists()
+        rprint(f"[bold]crawler[/bold] {'[green]running[/green]' if alive else '[red]not running[/red]'} · "
+               f"last tick {cs['ts']} · {'idle' if cs.get('idle') else cs.get('current')} · "
+               f"session calls {cs['calls_session']} (by tier {cs['tier_calls']}) · uptime {cs['uptime_h']}h")
+    else:
+        rprint("[dim]crawler: never run (systemctl --user start massive-crawler)[/dim]")
+    qa = adjustment_qa(store)
+    if qa is not None and qa.height:
+        worst = qa.sort("max_abs_dev", descending=True).head(3)
+        rprint(f"[bold]adjustment QA[/bold] {qa.height} tickers vs Massive adjusted bars · median max-dev "
+               f"{qa['max_abs_dev'].median()*100:.3f}% · worst: " +
+               ", ".join(f"{r['ticker']} {r['max_abs_dev']*100:.2f}%" for r in worst.iter_rows(named=True)))
 
 
 @massive_app.command("backfill")
@@ -332,6 +347,38 @@ def massive_update(config: str = "configs/default.yaml", universe: str = UNIVERS
         rprint(f"[red]auth error: {e}[/red]"); raise typer.Exit(code=2)
     rprint(f"[green]massive update:[/green] {res['calls']} calls · tables {res['tables']} · "
            f"{res['pending_days']} grouped days still pending")
+
+
+@massive_app.command("crawl")
+def massive_crawl(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
+                  once: bool = typer.Option(False, help="drain tiers 0-3 then exit (cron-friendly)"),
+                  max_calls: int = typer.Option(0, help="stop after N network calls (0 = run forever)"),
+                  idle_sleep: float = typer.Option(60.0, help="seconds to sleep when nothing is due")):
+    """Continuous prioritised crawl that keeps the 5 req/min budget busy (see `ts massive status`).
+
+    Runs forever (systemd unit `massive-crawler.service`): newest bars first, then the
+    2-year backfill, directory/corp actions, universe depth, whole-market depth by
+    liquidity, and an adjustment-maths QA pass; re-reads .env every minute until the
+    key appears. SIGTERM stops cleanly after the current call.
+    """
+    import time as _time
+    from .config import _load_dotenv, find_project_root
+    from .ingestion import massive as M
+    cfg = get_config(config).use_universe(universe)
+    while not M.is_configured():
+        rprint("[yellow]MASSIVE_API_KEY not set — waiting (re-reading .env every 60 s)[/yellow]")
+        if once:
+            raise typer.Exit(code=0)
+        _time.sleep(60)
+        _load_dotenv(find_project_root())
+    store = M.MassiveStore.from_config(cfg)
+    crawler = M.Crawler(store, cfg["universe"]["tickers"],
+                        log=lambda m: rprint(f"[dim]{_time.strftime('%H:%M:%S')}[/dim] {m}"))
+    try:
+        n = crawler.run(once=once, max_calls=max_calls or None, idle_sleep=idle_sleep)
+    except M.MassiveAuthError as e:
+        rprint(f"[red]auth error: {e}[/red]"); raise typer.Exit(code=2)
+    rprint(f"[green]crawl: {n} network calls[/green] · waited {store.client.limiter.waited_s/60:.1f} min on the limiter")
 
 
 @massive_app.command("build")
