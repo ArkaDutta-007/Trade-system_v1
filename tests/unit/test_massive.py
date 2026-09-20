@@ -173,12 +173,64 @@ def test_client_429_sleeps_then_retries(tmp_path):
     assert 7.0 in clock.sleeps and c.calls == 2
 
 
-def test_client_auth_error_not_retried(tmp_path):
-    s = FakeSession(); s.add("https://api.massive.com/x", FakeResp(403, {"error": "forbidden"}))
+def test_client_401_retires_key_and_403_is_entitlement(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/x", FakeResp(401, {"error": "bad key"}))
     c, _ = make_client(tmp_path, s)
-    with pytest.raises(M.MassiveAuthError):
+    with pytest.raises(M.MassiveAuthError):                  # only key → all retired
         c.get("/x")
-    assert c.calls == 1
+    assert c.calls == 1 and c.dead == [True]
+    s = FakeSession(); s.add("https://api.massive.com/x", FakeResp(403, {"error": "not entitled"}))
+    c, _ = make_client(tmp_path, s)
+    with pytest.raises(M.MassiveEntitlementError):
+        c.get("/x")
+    assert c.calls == 1 and c.dead == [False]
+
+
+def make_client2(tmp_path, session, keys=("k1", "k2")):
+    clock = FakeClock()
+    return M.MassiveClient(keys=list(keys), cache_dir=tmp_path / "raw", rpm=5, session=session,
+                           clock=clock, sleep=clock.sleep), clock
+
+
+def test_two_keys_double_the_budget_and_alternate(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/x", FakeResp(200, {"results": [1]}))
+    c, clock = make_client2(tmp_path, s)
+    for _ in range(10):
+        c.get("/x")                                            # 10 calls, no sleeping
+    assert c.calls == 10 and clock.sleeps == [] and c.key_calls == [5, 5]
+    used = [h["Authorization"] for _, _, h in s.log]
+    assert used[:4] == ["Bearer k1", "Bearer k2", "Bearer k1", "Bearer k2"]   # round-robin
+    c.get("/x")                                                # 11th waits for the earliest slot
+    assert len(clock.sleeps) == 1 and clock.sleeps[0] == pytest.approx(M.WINDOW_S, abs=0.01)
+
+
+def test_429_on_one_key_falls_over_to_the_other_without_sleeping(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/x", FakeResp(429, {"error": "slow"}, {"Retry-After": "30"}), FakeResp(200, {"results": ["ok"]}))
+    c, clock = make_client2(tmp_path, s)
+    assert c.get("/x")["results"] == ["ok"]
+    assert c.calls == 2 and clock.sleeps == []                 # k1 cooled, k2 served immediately
+    assert c.cooldown[0] > clock() and c.cooldown[1] == 0.0
+    assert [h["Authorization"] for _, _, h in s.log] == ["Bearer k1", "Bearer k2"]
+
+
+def test_dead_key_is_skipped_and_others_continue(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/x", FakeResp(401, {"error": "bad"}), FakeResp(200, {"results": ["ok"]}))
+    c, clock = make_client2(tmp_path, s)
+    assert c.get("/x")["results"] == ["ok"]
+    assert c.dead == [True, False] and c.live_keys == 1
+    for _ in range(4):
+        c.get("/x")
+    assert all(h["Authorization"] == "Bearer k2" for _, _, h in s.log[1:])
+
+
+def test_api_keys_discovery(monkeypatch):
+    for k in ["MASSIVE_API_KEY", "MASSIVE_API_KEY2", "MASSIVE_API_KEY3", "POLYGON_API_KEY"]:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("MASSIVE_API_KEY", "a"); monkeypatch.setenv("MASSIVE_API_KEY2", "b")
+    monkeypatch.setenv("MASSIVE_API_KEY3", "a"); monkeypatch.setenv("POLYGON_API_KEY", " c ")
+    assert M.api_keys() == ["a", "b", "c"] and M.api_key() == "a" and M.is_configured()
 
 
 def test_client_404_is_empty_not_error(tmp_path):
@@ -446,7 +498,8 @@ def test_crawler_priority_order_is_tier0_grouped_first(tmp_path):
     tiers = [t.tier for t in tasks]
     assert tiers == sorted(tiers)                                       # monotone by tier
     assert any(t.name == "tickers active" for t in tasks) and any(t.name == "details AAPL" for t in tasks)
-    assert any(t.name.startswith("aggs-qa") for t in tasks)
+    assert any(t.name.startswith("aggs-qa") for t in tasks) and any(t.name.startswith("fed ") for t in tasks)
+    assert all(t.family for t in tasks)
 
 
 def test_crawler_skips_cached_and_fresh_items(tmp_path):
@@ -491,15 +544,62 @@ def test_crawler_once_drains_then_exits(tmp_path):
         client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
     for key in ["reference/tickers_active", "reference/holidays", "reference/tickers_delisted",
                 "details/AAPL", "details/MSFT", "financials/AAPL", "financials/MSFT",
-                f"news/ticker/AAPL_{st.history_start().isoformat()}", f"news/ticker/MSFT_{st.history_start().isoformat()}",
-                "news/ticker_recent/AAPL", "news/ticker_recent/MSFT", "aggs_qa/AAPL", "aggs_qa/MSFT"]:
+                "news/ticker/AAPL", "news/ticker/MSFT", "events/AAPL", "events/MSFT", "related/AAPL", "related/MSFT",
+                "news/ticker_recent/AAPL", "news/ticker_recent/MSFT", "aggs_qa/AAPL", "aggs_qa/MSFT",
+                "reference/exchanges", "reference/ticker_types", "reference/ipos",
+                "fed/treasury-yields", "fed/inflation", "fed/inflation-expectations",
+                f"short_interest/{(st.today - timedelta(days=45)).isoformat()}"]:
         client.cache_write(key, {"results": [], "fetched_at": 0})
     for lo, hi in M.month_windows(st.history_start() - timedelta(days=31), st.today):
         for k in ("splits", "dividends"):
             client.cache_write(f"{k}/{lo.isoformat()}_{hi.isoformat()}", {"results": [], "fetched_at": 0})
     for i in (0, 1, 2):
         client.cache_write(f"news/daily/{(st.today - timedelta(days=i)).isoformat()}", {"results": [], "fetched_at": 0})
+    for d in M.business_days(st.today - timedelta(days=10), st.today - timedelta(days=1)):
+        client.cache_write(f"short_volume/{d.isoformat()}", {"results": [], "fetched_at": 0})
     assert cr.run(once=True, idle_sleep=0) == 0
+
+
+def test_crawler_parks_family_on_403_and_moves_on(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/vX/reference/financials", FakeResp(403, {"error": "not entitled"}))
+    s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    for d in M.business_days(st.history_start(), st.today):            # skip the grouped tiers
+        client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
+    cr.run(once=True, idle_sleep=0)                                     # drains tiers 0-4 then exits
+    assert "financials" in cr.blocked_families()
+    fin_calls = sum(1 for u, _, _ in s.log if "/vX/reference/financials" in u)
+    assert fin_calls == 1                                                # one probe, then parked
+    assert not any(t.family == "financials" for t in cr.due_tasks())
+
+
+def test_extended_tier_takes_top_n_beyond_universe(tmp_path):
+    cr, st, client = _crawler(tmp_path)
+    cr.extended_top = 4
+    pl.DataFrame({"ticker": ["A1", "A2", "A3", "AAPL", "MSFT"], "type": ["CS"] * 5, "active": [True] * 5}).write_parquet(st.tickers_path)
+    d = st.today
+    pl.DataFrame({"date": [d] * 5, "ticker": ["A1", "A2", "A3", "AAPL", "MSFT"], "close": [1.0] * 5,
+                  "volume": [3e6, 2e6, 1e6, 9e6, 9e6], "otc": [False] * 5}).with_columns(pl.col("date").cast(pl.Date)).write_parquet(st.ohlcv_all_path)
+    assert cr.extended_tickers() == ["A1", "A2"]                        # 4 − 2 universe names, by $vol
+    t4 = [t for t in cr.due_tasks() if t.tier == 4]
+    assert {n.split()[-1] for n in (t.name for t in t4)} == {"A1", "A2"}
+    assert any(t.name == "news-backfill A1" for t in t4)                 # universe-grade depth
+    t5 = [t for t in cr.due_tasks() if t.tier == 5]
+    assert {n.split()[-1] for n in (t.name for t in t5)} == {"A3"} and not any("backfill" in t.name for t in t5)
+
+
+def test_extra_tables_flatten(tmp_path):
+    st, client, _ = _store(tmp_path, FakeSession())
+    client.cache_write("events/META", {"results": [{"name": "Meta", "events": [{"type": "ticker_change", "date": "2022-06-09", "ticker_change": {"ticker": "META"}}]}], "fetched_at": 0})
+    client.cache_write("related/AAPL", {"results": [{"ticker": "MSFT"}], "fetched_at": 0})
+    client.cache_write("fed/treasury-yields", {"results": [{"date": "2026-09-18", "yield_10_year": 4.1, "yield_2_year": 3.7}], "fetched_at": 0})
+    client.cache_write("short_interest/2026-08-01", {"results": [{"ticker": "AAPL", "settlement_date": "2026-08-15", "short_interest": 100}], "fetched_at": 0})
+    out = st.build_extra_tables()
+    assert out == {"events": 1, "related": 1, "fed_treasury_yields": 1, "short_interest": 1}
+    ev = pl.read_parquet(st.bronze_dir / "events.parquet")
+    assert ev["new_ticker"][0] == "META" and ev["ticker"][0] == "META"
+    assert M.flat_rows([{"a": {"b": 1, "c": [1, 2]}, "d": "x"}]) == [{"a__b": 1, "a__c": "[1, 2]", "d": "x"}]
 
 
 def test_market_tickers_ranks_by_liquidity_with_universe_first(tmp_path):
@@ -519,3 +619,28 @@ def test_adjustment_qa_reports_deviation(tmp_path):
     client.cache_write("aggs_qa/X", {"results": [{"t": ms(d0), "c": 25.0}, {"t": ms(d1), "c": 25.5}], "fetched_at": 0})
     qa = M.adjustment_qa(st)
     assert qa.height == 1 and qa["max_abs_dev"][0] == pytest.approx(0.5 / 25.5)
+
+
+def test_api_ticker_denormalises_for_paths_and_params(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    c, _ = make_client(tmp_path, s)
+    c.ticker_details("BRK-B"); c.financials("BRK-B"); c.news(ticker="BRK-B"); c.ticker_events("BRK-B")
+    urls = [u for u, _, _ in s.log]; params = [p for _, p, _ in s.log]
+    assert urls[0].endswith("/v3/reference/tickers/BRK.B") and urls[3].endswith("/tickers/BRK.B/events")
+    assert params[1]["ticker"] == "BRK.B" and params[2]["ticker"] == "BRK.B"
+    assert c.cached("details/BRK-B") and c.cached("financials/BRK-B")      # cache keys stay normalised
+    assert M.api_ticker("brk-b") == "BRK.B" and M.normalize_ticker("BRK.B") == "BRK-B"
+
+
+def test_crawler_backs_off_a_failing_task_instead_of_looping(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/v3/reference/tickers/AAPL", FakeResp(400, {"error": "Invalid ticker"}))
+    s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    for d in M.business_days(st.history_start(), st.today):
+        client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
+    cr.run(once=True, idle_sleep=0)
+    bad = sum(1 for u, _, _ in s.log if u.endswith("/v3/reference/tickers/AAPL"))
+    assert bad == 1                                                        # one failure → parked 6 h
+    assert "details AAPL" in json.loads(cr.state_path.read_text())["failing"]
+    assert not any(t.name == "details AAPL" for t in [cr.next_task()] if t)

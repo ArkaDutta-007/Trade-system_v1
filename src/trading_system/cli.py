@@ -246,13 +246,15 @@ def massive_status(config: str = "configs/default.yaml", universe: str = UNIVERS
         raise typer.Exit(code=0 if is_configured() else 1)
     cfg, store = _massive_store(config, universe)
     st = store.status()
-    rprint(f"[bold]Massive[/bold] key: {'[green]set[/green]' if st['configured'] else '[red]MISSING — add MASSIVE_API_KEY to .env[/red]'}"
-           f" · calls today: {st['calls_today']} (budget 5/min ≈ 7 200/day)")
+    nk = st.get("keys", 0)
+    rprint(f"[bold]Massive[/bold] keys: {('[green]%d set[/green]' % nk) if nk else '[red]MISSING — add MASSIVE_API_KEY to .env[/red]'}"
+           f" · calls today: {st['calls_today']} (budget {5 * max(nk, 1)}/min ≈ {7200 * max(nk, 1):,}/day)")
     rprint(f"grouped days cached: {st['grouped_days']} ({st['first_day']} → {st['last_day']}) · "
            f"pending: {st['pending_days']} · window start: {st['history_start']}")
-    for k in ("ohlcv_all", "splits", "dividends", "tickers", "details", "financials", "news"):
+    core = ("ohlcv_all", "splits", "dividends", "tickers", "details", "financials", "news")
+    for k in core + tuple(sorted(x for x in st if isinstance(st[x], dict) and x not in core)):
         v = st[k]
-        rprint(f"  {k:<11} " + (f"{v['rows']:>10,} rows · {v['age_h']}h old" if v else "[dim]—[/dim]"))
+        rprint(f"  {k:<24} " + (f"{v['rows']:>10,} rows · {v['age_h']}h old" if v else "[dim]—[/dim]"))
     rprint(f"[dim]raw cache: {st['raw_dir']} · bronze: {st['bronze_dir']}[/dim]")
     from .ingestion.massive import crawler_state, adjustment_qa
     cs = crawler_state(store)
@@ -260,7 +262,10 @@ def massive_status(config: str = "configs/default.yaml", universe: str = UNIVERS
         alive = (Path("/proc") / str(cs.get("pid", 0))).exists()
         rprint(f"[bold]crawler[/bold] {'[green]running[/green]' if alive else '[red]not running[/red]'} · "
                f"last tick {cs['ts']} · {'idle' if cs.get('idle') else cs.get('current')} · "
-               f"session calls {cs['calls_session']} (by tier {cs['tier_calls']}) · uptime {cs['uptime_h']}h")
+               f"session calls {cs['calls_session']} (by tier {cs['tier_calls']}; by key {cs.get('key_calls')}) · "
+               f"keys live {cs.get('keys_live')}/{cs.get('keys')} · extended top-{cs.get('extended_top')} · uptime {cs['uptime_h']}h")
+        if cs.get("blocked"):
+            rprint(f"  [yellow]parked (403, not in plan): {', '.join(cs['blocked'])}[/yellow]")
     else:
         rprint("[dim]crawler: never run (systemctl --user start massive-crawler)[/dim]")
     qa = adjustment_qa(store)
@@ -372,13 +377,15 @@ def massive_crawl(config: str = "configs/default.yaml", universe: str = UNIVERSE
         _time.sleep(60)
         _load_dotenv(find_project_root())
     store = M.MassiveStore.from_config(cfg)
-    crawler = M.Crawler(store, cfg["universe"]["tickers"],
+    m = (cfg.get("data", {}) or {}).get("massive", {}) or {}
+    crawler = M.Crawler(store, cfg["universe"]["tickers"], extended_top=int(m.get("extended_top", 1000)),
                         log=lambda m: rprint(f"[dim]{_time.strftime('%H:%M:%S')}[/dim] {m}"))
+    rprint(f"[dim]{len(store.client.keys)} key(s) → {5 * len(store.client.keys)} req/min · extended top-{crawler.extended_top}[/dim]")
     try:
         n = crawler.run(once=once, max_calls=max_calls or None, idle_sleep=idle_sleep)
     except M.MassiveAuthError as e:
         rprint(f"[red]auth error: {e}[/red]"); raise typer.Exit(code=2)
-    rprint(f"[green]crawl: {n} network calls[/green] · waited {store.client.limiter.waited_s/60:.1f} min on the limiter")
+    rprint(f"[green]crawl: {n} network calls[/green] · waited {store.client.waited_s/60:.1f} min on the limiter")
 
 
 @massive_app.command("build")

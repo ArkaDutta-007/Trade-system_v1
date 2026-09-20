@@ -121,7 +121,10 @@ The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
   per-ticker **overview** (SIC, market cap, shares), **fundamentals**
   (`/vX/reference/financials`, every `*.value` leaf flattened) and **tagged news
   with LLM sentiment** (`/v2/reference/news` insights). Bronze outputs:
-  `data/bronze/massive/{ohlcv_all,splits,dividends,tickers,details,financials,news}.parquet`.
+  `data/bronze/massive/{ohlcv_all,splits,dividends,tickers,details,financials,news}.parquet`
+  plus the long tail `events` (symbol changes), `related`, `ipos`, `exchanges`,
+  `ticker_types`, `fed_*` (treasury yields, inflation, expectations),
+  `short_interest`, `short_volume` — every field kept (`flat_rows`).
 * **Adjustment maths, CRSP-style, recomputed at build time:**
   `s_t = ∏_{splits d>t} from/to`, `f_t = ∏_{ex-dates d>t} (1 − cash_d/close_{d−1})`;
   `close = raw·s_t` (split-adjusted = yfinance *Close*), `adj_close = close·f_t`
@@ -134,16 +137,27 @@ The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
   market by trailing-63d median dollar volume (CS/ADRC only, no OTC) into a
   universe YAML; `ohlcv_all.parquet` keeps delisted names for research.
 
+* **Multiple keys** — `MASSIVE_API_KEY`, `MASSIVE_API_KEY2…9` each carry their
+  own 5/min at the server, so the client keeps one limiter file per key
+  (`.ratelimit-<sha-fingerprint>.json`) and round-robins: N keys ≈ N×5 req/min.
+  A 429 cools only that key (the next request goes out on another one), a 401
+  retires the key for the process, a 403 is a `MassiveEntitlementError` (plan
+  limit, not key) and the crawler parks that endpoint family for a week.
+  Tickers are stored as `BRK-B` but sent as `BRK.B` (`api_ticker`).
 * **Continuous crawler** (`Crawler`, `ts massive crawl`, systemd user unit
   `massive-crawler.service`) keeps the budget saturated with cache-planned work
   in priority tiers, re-checked before *every* call: 0 newest bars once published
   (D+1 01:30 UTC), current corp actions, today's news → 1 two-year grouped
-  backfill (newest first) → 2 directory, holidays, monthly splits/dividends →
-  3 universe overview/fundamentals/news (30d/7d/1d TTL) → 4 whole market by
-  liquidity rank (45d/14d/30d) → 5 QA: Massive's own adjusted series vs our
-  `close` (`adjustment_qa`, shown in `ts massive status`). Steady state ≈1.5k
-  calls/day of ≈7k; SIGTERM stops after the current call; state in
-  `data/raw/massive/crawler_state.json`.
+  backfill (newest first) → 2 directory, holidays, exchanges/types, monthly
+  splits/dividends, IPOs, Fed series, short interest/volume → 3 universe depth:
+  overview, fundamentals, 2y news backfill + rolling news, ticker events, related
+  companies (30d/7d/60d/1d/30d TTL) → 4 **extended**: the top-`extended_top`
+  (1000) US stocks/ADRs by trailing-63d dollar volume get the same depth (their
+  YAML lands in `bronze/massive/universe_extended.yaml`, refreshed hourly) →
+  5 whole market by liquidity rank (45d/14d/30d) → 6 QA: Massive's own adjusted
+  series vs our `close` (`adjustment_qa`, in `ts massive status`). A task that
+  errors is backed off 6h → 24h → 7d instead of retried; SIGTERM stops after
+  the current call; state in `data/raw/massive/crawler_state.json`.
 
 CLI: `ts massive status | crawl | backfill | update | build | universe`; the daily
 pipeline runs `ts massive update -u liquid` before `ts daily` (a no-op when the

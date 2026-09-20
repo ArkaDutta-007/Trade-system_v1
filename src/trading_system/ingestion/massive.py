@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import fcntl
 import gzip
+import hashlib
 import json
 import os
 import time
@@ -88,25 +89,52 @@ class MassiveAuthError(MassiveError):
     """401/403 — bad or missing key. Never retried."""
 
 
+class MassiveEntitlementError(MassiveError):
+    """403 — the plan does not include this endpoint. Not key-specific; the crawler
+    parks the endpoint family for a week instead of burning calls on it."""
+
+
 class MassiveNotReady(RuntimeError):
     """The local Massive cache is empty/too stale to build from — run `ts massive backfill`."""
 
 
+def api_keys() -> list[str]:
+    """Every configured key, deduplicated: ``MASSIVE_API_KEY``, ``MASSIVE_API_KEY2..9``, ``POLYGON_API_KEY``.
+
+    Each key has its own 5/min allowance, so N keys ≈ N×5 req/min (the client
+    round-robins across them and retires any that 401).
+    """
+    names = ["MASSIVE_API_KEY"] + [f"MASSIVE_API_KEY{i}" for i in range(2, 10)] + ["POLYGON_API_KEY"]
+    out: list[str] = []
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 def api_key() -> str | None:
-    for k in _ENV_KEYS:
-        v = os.environ.get(k, "").strip()
-        if v:
-            return v
-    return None
+    ks = api_keys()
+    return ks[0] if ks else None
 
 
 def is_configured() -> bool:
-    return api_key() is not None
+    return bool(api_keys())
+
+
+def _key_fp(key: str) -> str:
+    """Short non-reversible fingerprint used to name per-key limiter files (never the key itself)."""
+    return hashlib.sha256(key.encode()).hexdigest()[:10]
 
 
 def normalize_ticker(t: str) -> str:
     """Massive writes share classes as ``BRK.B``; the repo/yfinance use ``BRK-B``."""
     return t.strip().upper().replace(".", "-")
+
+
+def api_ticker(t: str) -> str:
+    """Inverse of :func:`normalize_ticker` for URL paths/params (``BRK-B`` → ``BRK.B``; the API 400s on the hyphen)."""
+    return t.strip().upper().replace("-", ".")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,23 +176,29 @@ class RateLimiter:
         fh.write(json.dumps(stamps))
         fh.flush()
 
+    def try_acquire(self) -> float:
+        """Non-blocking: take a slot now and return 0.0, or return seconds until one frees."""
+        with open(self.path, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                now = self.clock()
+                stamps = sorted(t for t in self._read(fh) if now - t < self.window_s)
+                if len(stamps) < self.rpm:
+                    stamps.append(now)
+                    self._write(fh, stamps)
+                    return 0.0
+                return max(stamps[0] + self.window_s - now, 0.05)
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
     def acquire(self) -> float:
         """Block until a slot is free; returns seconds waited."""
         waited = 0.0
         while True:
-            with open(self.path, "a+") as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX)
-                try:
-                    now = self.clock()
-                    stamps = sorted(t for t in self._read(fh) if now - t < self.window_s)
-                    if len(stamps) < self.rpm:
-                        stamps.append(now)
-                        self._write(fh, stamps)
-                        self.waited_s += waited
-                        return waited
-                    wait = max(stamps[0] + self.window_s - now, 0.05)
-                finally:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
+            wait = self.try_acquire()
+            if wait == 0.0:
+                self.waited_s += waited
+                return waited
             self.sleep(wait)
             waited += wait
 
@@ -181,10 +215,12 @@ class MassiveClient:
                  session: Any = None, timeout: float = 30.0,
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep,
-                 max_retries: int = 5):
-        self.key = key or api_key()
-        if not self.key:
+                 max_retries: int = 5, keys: Iterable[str] | None = None):
+        ks = [k for k in (keys or ([key] if key else api_keys())) if k]
+        if not ks:
             raise MassiveAuthError("MASSIVE_API_KEY is not set (add it to .env)")
+        self.keys = list(dict.fromkeys(ks))
+        self.key = self.keys[0]                       # back-compat
         self.base = base.rstrip("/")
         self.cache_dir = Path(cache_dir) if cache_dir else Path("data/raw/massive")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -193,9 +229,50 @@ class MassiveClient:
         self.clock = clock
         self.sleep = sleep
         self.max_retries = max_retries
-        self.limiter = RateLimiter(self.cache_dir / ".ratelimit.json", rpm=rpm, clock=clock, sleep=sleep)
+        # one sliding window PER KEY (each key has its own 5/min at the server)
+        self.limiters = [RateLimiter(self.cache_dir / f".ratelimit-{_key_fp(k)}.json", rpm=rpm, clock=clock, sleep=sleep)
+                         for k in self.keys]
+        self.limiter = self.limiters[0]              # back-compat
+        self.dead = [False] * len(self.keys)         # 401 → retired for this process
+        self.cooldown = [0.0] * len(self.keys)       # 429 → don't use before this clock time
+        self.key_calls = [0] * len(self.keys)
+        self._rr = 0
+        self._waited_extra = 0.0
         self.calls = 0            # network requests made by this instance
         self.cache_hits = 0
+
+    @property
+    def waited_s(self) -> float:
+        return sum(l.waited_s for l in self.limiters) + self._waited_extra
+
+    @property
+    def live_keys(self) -> int:
+        return sum(1 for d in self.dead if not d)
+
+    def _pick_key(self) -> int:
+        """Round-robin over live, non-cooling keys; take the first with a free slot, else sleep
+        until the earliest slot/cooldown frees. Raises when every key has been retired."""
+        n = len(self.keys)
+        while True:
+            now = self.clock()
+            best: float | None = None
+            for j in range(n):
+                i = (self._rr + j) % n
+                if self.dead[i]:
+                    continue
+                if self.cooldown[i] > now:
+                    best = min(best if best is not None else 1e9, self.cooldown[i] - now)
+                    continue
+                w = self.limiters[i].try_acquire()
+                if w == 0.0:
+                    self._rr = (i + 1) % n
+                    return i
+                best = min(best if best is not None else 1e9, w)
+            if best is None:
+                raise MassiveAuthError("every Massive API key has been retired (401) — check .env")
+            wait = max(best, 0.05)
+            self.sleep(wait)
+            self._waited_extra += wait
 
     # ---- cache -------------------------------------------------------------
     def _cache_file(self, key: str) -> Path:
@@ -247,11 +324,12 @@ class MassiveClient:
 
     # ---- transport -----------------------------------------------------------
     def _request(self, url: str, params: dict | None) -> dict:
-        headers = {"Authorization": f"Bearer {self.key}", "Accept": "application/json"}
         attempt = 0
         while True:
-            self.limiter.acquire()
+            i = self._pick_key()
+            headers = {"Authorization": f"Bearer {self.keys[i]}", "Accept": "application/json"}
             self._count_call()
+            self.key_calls[i] += 1
             try:
                 resp = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
             except requests.RequestException as e:
@@ -263,18 +341,23 @@ class MassiveClient:
             status = resp.status_code
             if status == 200:
                 return resp.json()
-            if status in (401, 403):
-                raise MassiveAuthError(f"{status} from {url.split('?')[0]}: {resp.text[:200]}")
+            if status == 401:                        # this key is bad; others may be fine
+                self.dead[i] = True
+                logger.error(f"massive: key #{i + 1} rejected (401) — retired for this process")
+                attempt += 1
+                continue                             # _pick_key raises once all keys are dead
+            if status == 403:
+                raise MassiveEntitlementError(f"403 (not in plan) from {url.split('?')[0]}: {resp.text[:200]}")
             if status == 404:
                 return {"results": [], "status": "NOT_FOUND"}
             attempt += 1
             if attempt > self.max_retries:
                 raise MassiveError(f"{status} after {attempt} tries: {resp.text[:300]}")
-            if status == 429:
+            if status == 429:                        # cool THIS key only; another key may serve at once
                 ra = resp.headers.get("Retry-After")
                 wait = float(ra) if ra and ra.replace(".", "", 1).isdigit() else WINDOW_S
-                logger.warning(f"massive: 429 rate-limited, sleeping {wait:.0f}s (attempt {attempt})")
-                self.sleep(wait)
+                self.cooldown[i] = self.clock() + wait
+                logger.warning(f"massive: 429 on key #{i + 1}, cooling it {wait:.0f}s (attempt {attempt})")
                 continue
             if status >= 500:
                 self.sleep(min(2.0 ** attempt, 30.0))
@@ -324,7 +407,7 @@ class MassiveClient:
                         cache_key=f"grouped/{d.isoformat()}", ttl_s=ttl_s, paginate=False)
 
     def aggs(self, ticker: str, start: date, end: date, *, adjusted: bool = False) -> dict:
-        return self.get(f"/v2/aggs/ticker/{ticker}/range/1/day/{start.isoformat()}/{end.isoformat()}",
+        return self.get(f"/v2/aggs/ticker/{api_ticker(ticker)}/range/1/day/{start.isoformat()}/{end.isoformat()}",
                         {"adjusted": "true" if adjusted else "false", "sort": "asc", "limit": 50000},
                         cache_key=f"aggs/{ticker}_{start.isoformat()}_{end.isoformat()}_{int(adjusted)}",
                         ttl_s=_DAY)
@@ -336,7 +419,7 @@ class MassiveClient:
                         cache_key=f"reference/tickers_{'active' if active else 'delisted'}", ttl_s=ttl_s)
 
     def ticker_details(self, ticker: str, *, ttl_s: float = 30 * _DAY) -> dict:
-        return self.get(f"/v3/reference/tickers/{ticker}", cache_key=f"details/{ticker}",
+        return self.get(f"/v3/reference/tickers/{api_ticker(ticker)}", cache_key=f"details/{normalize_ticker(ticker)}",
                         ttl_s=ttl_s, paginate=False)
 
     def splits(self, gte: date, lte: date, *, ttl_s: float | None) -> dict:
@@ -353,20 +436,54 @@ class MassiveClient:
 
     def financials(self, ticker: str, *, ttl_s: float = 7 * _DAY) -> dict:
         return self.get("/vX/reference/financials",
-                        {"ticker": ticker, "limit": 100, "sort": "filing_date", "order": "desc"},
-                        cache_key=f"financials/{ticker}", ttl_s=ttl_s, max_pages=3)
+                        {"ticker": api_ticker(ticker), "limit": 100, "sort": "filing_date", "order": "desc"},
+                        cache_key=f"financials/{normalize_ticker(ticker)}", ttl_s=ttl_s, max_pages=3)
 
     def news(self, *, ticker: str | None = None, gte: datetime | None = None,
              lte: datetime | None = None, limit: int = 1000, max_pages: int = 10,
              cache_key: str | None = None, ttl_s: float | None = None) -> dict:
         params: dict[str, Any] = {"limit": limit, "sort": "published_utc", "order": "asc"}
         if ticker:
-            params["ticker"] = ticker
+            params["ticker"] = api_ticker(ticker)
         if gte:
             params["published_utc.gte"] = gte.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if lte:
             params["published_utc.lt"] = lte.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return self.get("/v2/reference/news", params, cache_key=cache_key, ttl_s=ttl_s, max_pages=max_pages)
+
+    def exchanges(self, *, ttl_s: float = 30 * _DAY) -> dict:
+        return self.get("/v3/reference/exchanges", {"asset_class": "stocks", "locale": "us"},
+                        cache_key="reference/exchanges", ttl_s=ttl_s, paginate=False)
+
+    def ticker_types(self, *, ttl_s: float = 30 * _DAY) -> dict:
+        return self.get("/v3/reference/tickers/types", {"asset_class": "stocks", "locale": "us"},
+                        cache_key="reference/ticker_types", ttl_s=ttl_s, paginate=False)
+
+    def ticker_events(self, ticker: str, *, ttl_s: float = 30 * _DAY) -> dict:
+        """Symbol-change history (point-in-time ticker mapping)."""
+        return self.get(f"/vX/reference/tickers/{api_ticker(ticker)}/events", cache_key=f"events/{normalize_ticker(ticker)}",
+                        ttl_s=ttl_s, paginate=False)
+
+    def related_companies(self, ticker: str, *, ttl_s: float = 30 * _DAY) -> dict:
+        return self.get(f"/v1/related-companies/{api_ticker(ticker)}", cache_key=f"related/{normalize_ticker(ticker)}",
+                        ttl_s=ttl_s, paginate=False)
+
+    def ipos(self, *, ttl_s: float = _DAY) -> dict:
+        return self.get("/vX/reference/ipos", {"limit": 1000, "order": "desc", "sort": "listing_date"},
+                        cache_key="reference/ipos", ttl_s=ttl_s, max_pages=3)
+
+    def short_interest(self, gte: date, *, ttl_s: float = _DAY) -> dict:
+        return self.get("/stocks/v1/short-interest", {"settlement_date.gte": gte.isoformat(), "limit": 50000},
+                        cache_key=f"short_interest/{gte.isoformat()}", ttl_s=ttl_s, max_pages=4)
+
+    def short_volume(self, d: date, *, ttl_s: float | None) -> dict:
+        return self.get("/stocks/v1/short-volume", {"date": d.isoformat(), "limit": 50000},
+                        cache_key=f"short_volume/{d.isoformat()}", ttl_s=ttl_s, max_pages=2)
+
+    def fed(self, series: str, *, ttl_s: float = _DAY) -> dict:
+        """``treasury-yields`` | ``inflation`` | ``inflation-expectations`` (Fed data set)."""
+        return self.get(f"/fed/v1/{series}", {"limit": 5000, "sort": "date.desc"},
+                        cache_key=f"fed/{series}", ttl_s=ttl_s, max_pages=3)
 
     def holidays(self, *, ttl_s: float = 7 * _DAY) -> dict:
         return self._whole("/v1/marketstatus/upcoming", "reference/holidays", ttl_s)
@@ -606,6 +723,38 @@ def flatten_details(results: list[dict]) -> pl.DataFrame:
     return df
 
 
+def flat_rows(results: list[dict], extra: dict | None = None) -> list[dict]:
+    """Flatten nested dicts one level per ``__`` (any depth); lists become JSON strings.
+    Used for the long tail of reference tables where we keep *every* field."""
+    out = []
+    for r in results or []:
+        row: dict = dict(extra or {})
+
+        def walk(prefix: str, obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    walk(f"{prefix}{k}__", v)
+            elif isinstance(obj, list):
+                row[prefix[:-2]] = json.dumps(obj)
+            else:
+                row[prefix[:-2]] = obj
+        walk("", r if isinstance(r, dict) else {"value": r})
+        out.append(row)
+    return out
+
+
+def flatten_events(ticker: str, results: list[dict]) -> list[dict]:
+    """``/vX/reference/tickers/{t}/events`` → one row per event (ticker changes etc.)."""
+    rows = []
+    for r in results or []:
+        for ev in r.get("events") or []:
+            change = ev.get("ticker_change") or {}
+            rows.append({"ticker": normalize_ticker(ticker), "name": r.get("name"), "cik": r.get("cik"),
+                         "composite_figi": r.get("composite_figi"), "date": ev.get("date"),
+                         "type": ev.get("type"), "new_ticker": normalize_ticker(change.get("ticker", "")) or None})
+    return rows
+
+
 def business_days(start: date, end: date) -> list[date]:
     out, d = [], start
     while d <= end:
@@ -796,16 +945,17 @@ class MassiveStore:
         return self.client.calls - c0
 
     def crawl_news_backfill(self, tickers: Iterable[str], start: date | None = None,
-                            max_calls: int | None = None) -> int:
-        """Per-ticker news since ``start`` (one call/ticker/1000 articles). Cached 30 days."""
+                            max_calls: int | None = None, ttl_s: float = 60 * _DAY) -> int:
+        """Per-ticker news since ``start`` (one call/ticker/1000 articles). Stable cache key
+        (``news/ticker/<T>``) so the rolling history window doesn't trigger daily refetches;
+        ``crawl_news_recent`` keeps the last two weeks fresh in between."""
         start = start or self.history_start()
         gte = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         c0 = self.client.calls
         for t in tickers:
             if max_calls is not None and self.client.calls - c0 >= max_calls:
                 break
-            self.client.news(ticker=t, gte=gte, cache_key=f"news/ticker/{t}_{start.isoformat()}",
-                             ttl_s=30 * _DAY, max_pages=5)
+            self.client.news(ticker=t, gte=gte, cache_key=f"news/ticker/{t}", ttl_s=ttl_s, max_pages=5)
         return self.client.calls - c0
 
     def crawl_news_recent(self, ticker: str, days: int = 14, ttl_s: float = _DAY) -> int:
@@ -922,6 +1072,46 @@ class MassiveStore:
             df = (pl.concat(news, how="diagonal_relaxed").unique(subset=["article_id", "ticker"], keep="last")
                     .sort(["ticker", "published_utc"]))
             df.write_parquet(self.news_path, compression="zstd"); out["news"] = df.height
+        out.update(self.build_extra_tables())
+        return out
+
+    def _docs_in(self, folder: str):
+        d = self.raw_dir / folder
+        if not d.exists():
+            return
+        for p in sorted(d.glob("*.json.gz")):
+            doc = self.client.cache_read(f"{folder}/{p.name[:-8]}", None)
+            if doc:
+                yield p.name[:-8], doc
+
+    def build_extra_tables(self) -> dict[str, int]:
+        """The long tail: events, related, ipos, fed_*, short_interest, short_volume, exchanges, ticker_types."""
+        out: dict[str, int] = {}
+
+        def write(name: str, rows: list[dict], subset: list[str] | None = None):
+            if not rows:
+                return
+            df = pl.DataFrame(rows, infer_schema_length=None)
+            if subset and all(c in df.columns for c in subset):
+                df = df.unique(subset=subset, keep="last")
+            df.write_parquet(self.bronze_dir / f"{name}.parquet", compression="zstd")
+            out[name] = df.height
+
+        write("events", [r for t, doc in self._docs_in("events") for r in flatten_events(t, doc["results"])],
+              ["ticker", "date", "type"])
+        write("related", [{"ticker": normalize_ticker(t), "related": normalize_ticker(r.get("ticker", ""))}
+                          for t, doc in self._docs_in("related") for r in doc["results"] if r.get("ticker")],
+              ["ticker", "related"])
+        for name, folder in (("ipos", "reference"), ("exchanges", "reference"), ("ticker_types", "reference")):
+            doc = self.client.cache_read(f"reference/{name}", None)
+            if doc and doc["results"]:
+                write(name, flat_rows(doc["results"]))
+        for series, doc in self._docs_in("fed"):
+            write(f"fed_{series.replace('-', '_')}", flat_rows(doc["results"]), ["date"])
+        write("short_interest", [r for _, doc in self._docs_in("short_interest") for r in flat_rows(doc["results"])],
+              ["ticker", "settlement_date"])
+        write("short_volume", [r for _, doc in self._docs_in("short_volume") for r in flat_rows(doc["results"])],
+              ["ticker", "date"])
         return out
 
     # ---- status ----------------------------------------------------------------------
@@ -941,10 +1131,13 @@ class MassiveStore:
             "pending_days": len(self.missing_days()) if is_configured() else None,
             "calls_today": self.calls_today(), "history_start": self.history_start().isoformat(),
         }
+        st["keys"] = len(api_keys())
+        extra = sorted(p.stem for p in self.bronze_dir.glob("*.parquet")
+                       if p.stem not in {"ohlcv_all", "bars_raw", "splits", "dividends", "tickers", "details", "financials", "news"})
         for name, p in [("ohlcv_all", self.ohlcv_all_path), ("splits", self.splits_path),
                         ("dividends", self.dividends_path), ("tickers", self.tickers_path),
                         ("details", self.details_path), ("financials", self.financials_path),
-                        ("news", self.news_path)]:
+                        ("news", self.news_path)] + [(n, self.bronze_dir / f"{n}.parquet") for n in extra]:
             st[name] = None
             if p.exists():
                 try:
@@ -1092,6 +1285,7 @@ def build_liquid_universe(store: MassiveStore, *, min_price: float = 5.0, min_do
 # ─────────────────────────────────────────────────────────────────────────────
 
 _EQUITY_TYPES = ("CS", "ADRC")
+BLOCK_TTL_S = 7 * _DAY            # how long a 403'd endpoint family is parked
 
 
 @dataclass
@@ -1099,40 +1293,49 @@ class Task:
     tier: int
     name: str
     run: Callable[[], int]          # returns network calls made
+    family: str = ""                # entitlement family (parked together on 403)
 
 
 class Crawler:
     """Priority-scheduled crawl loop. Planning is cache-only (mtime ages), so every
-    network call is real work.  Tiers (checked in order before *each* call):
+    network call is real work.  Tiers (re-checked before *each* call):
 
       0  today-critical: newest grouped days once published, current-month corp
          actions, whole-market news for today/yesterday
-      1  grouped-day backfill (newest first) — the 2-year price panel
-      2  directory + calendar: active tickers (7d), holidays (7d), monthly
-         splits/dividends (30d), delisted directory (30d)
+      1  grouped-day backfill (newest first) — the 2-year whole-market panel
+      2  directory + calendar + macro: active tickers (7d), holidays, exchanges,
+         ticker types, monthly splits/dividends history (30d), delisted directory
+         (30d), IPOs, Fed series, short interest / short volume (1d)
       3  universe depth: overview (30d), fundamentals (7d), 2y news backfill
-         (once) + rolling 14d news refresh (1d)
-      4  whole-market depth, by liquidity rank: overview (45d), fundamentals
-         (14d), rolling news (30d) for every active common stock / ADR
-      5  QA: Massive's own split-adjusted series per universe ticker (7d) so
-         `ts massive status` can report the adjustment-math discrepancy
+         (60d) + rolling 14d news (1d), ticker events + related companies (30d)
+      4  EXTENDED depth — the top-``extended_top`` (1000) US common stocks/ADRs by
+         trailing-63d dollar volume get the same treatment as the universe
+      5  whole-market depth, by liquidity rank: overview (45d), fundamentals
+         (14d), rolling news (30d)
+      6  QA: Massive's own split-adjusted series per universe+extended ticker
+         (7d) so `ts massive status` can report the adjustment-maths discrepancy
 
-    Steady state after the backfill is ≈1.5k calls/day of the ≈7k budget; the
-    remainder is spent walking tier 4 deeper.  A SIGTERM finishes the current
+    A 403 parks that endpoint *family* for a week (marker under ``.blocked/``)
+    instead of retrying it; a 401 retires that key; SIGTERM finishes the current
     call, writes state and exits 0.
     """
 
     TTL = {"tickers_active": 7 * _DAY, "tickers_delisted": 30 * _DAY, "holidays": 7 * _DAY,
+           "static": 30 * _DAY, "daily": _DAY,
            "actions_current": _DAY, "actions_past": 30 * _DAY, "news_daily_recent": 6 * 3600,
            "details_universe": 30 * _DAY, "financials_universe": 7 * _DAY, "news_universe": _DAY,
+           "news_backfill": 60 * _DAY, "events": 30 * _DAY,
            "details_market": 45 * _DAY, "financials_market": 14 * _DAY, "news_market": 30 * _DAY,
            "aggs_qa": 7 * _DAY}
     PUBLISH_LAG_H = 1.5             # grouped bar for D is tried from D+1 01:30 UTC (≈21:30 ET)
+    ONCE_MAX_TIER = 4               # --once drains up to and including this tier
 
     def __init__(self, store: MassiveStore, universe_tickers: Iterable[str], state_path: Path | None = None,
-                 rebuild_every_s: float = 900.0, log: Callable[[str], None] | None = None):
+                 rebuild_every_s: float = 900.0, log: Callable[[str], None] | None = None,
+                 extended_top: int = 1000):
         self.store = store
         self.universe = [normalize_ticker(t) for t in universe_tickers]
+        self.extended_top = int(extended_top)
         self.state_path = state_path or (store.raw_dir / "crawler_state.json")
         self.rebuild_every_s = rebuild_every_s
         self.log = log or (lambda m: logger.info(m))
@@ -1144,6 +1347,9 @@ class Crawler:
         self.stop = False
         self.tier_calls: dict[str, int] = {}
         self.started = time.time()
+        self.blocked_dir = store.raw_dir / ".blocked"
+        self._skip_until: dict[str, float] = {}      # task name → clock time (failure backoff)
+        self._fail_count: dict[str, int] = {}
 
     # ---- helpers ----------------------------------------------------------------
     def _age(self, key: str) -> float | None:
@@ -1156,6 +1362,22 @@ class Crawler:
     def _publish_ready(self, d: date) -> bool:
         return datetime.now(timezone.utc) >= datetime(d.year, d.month, d.day, tzinfo=timezone.utc) \
             + timedelta(days=1, hours=self.PUBLISH_LAG_H)
+
+    def blocked(self, family: str) -> bool:
+        try:
+            return time.time() - (self.blocked_dir / family).stat().st_mtime < BLOCK_TTL_S
+        except FileNotFoundError:
+            return False
+
+    def block(self, family: str, reason: str) -> None:
+        self.blocked_dir.mkdir(parents=True, exist_ok=True)
+        (self.blocked_dir / family).write_text(f"{datetime.now(timezone.utc).isoformat()} {reason}\n")
+        self.log(f"family '{family}' not in plan — parked for {BLOCK_TTL_S / _DAY:.0f} days")
+
+    def blocked_families(self) -> list[str]:
+        if not self.blocked_dir.exists():
+            return []
+        return sorted(p.name for p in self.blocked_dir.iterdir() if self.blocked(p.name))
 
     def market_tickers(self) -> list[str]:
         """Active CS/ADRC tickers ranked by trailing-63d median dollar volume (universe first)."""
@@ -1185,7 +1407,35 @@ class Crawler:
         seen = set(self.universe)
         self._market = self.universe + [t for t in ranked if t not in seen]
         self._market_at = time.time()
+        self._write_extended_universe(ranked)
         return self._market
+
+    def extended_tickers(self) -> list[str]:
+        """Top-N liquid names beyond the universe (needs the directory + ≥63 days of bars)."""
+        mk = self.market_tickers()
+        uni = set(self.universe)
+        return [t for t in mk if t not in uni][: max(self.extended_top - len(uni), 0)]
+
+    def _write_extended_universe(self, ranked: list[str]) -> None:
+        """Gitignored YAML of the top-N by liquidity — promote with `ts massive universe` when wanted."""
+        if not ranked:
+            return
+        try:
+            px_days = pl.scan_parquet(self.store.ohlcv_all_path).select(pl.col("date").n_unique()).collect().item()
+            if px_days < 63:
+                return
+            import yaml
+            uni = set(self.universe)
+            top = self.universe + [t for t in ranked if t not in uni]
+            top = top[: self.extended_top]
+            doc = {"name": "universe_extended", "benchmark": "SPY",
+                   "description": f"Universe + top US common stocks/ADRs by trailing-63d median dollar volume "
+                                  f"(Massive grouped bars, {self.store.today}); {len(top)} names, refreshed hourly by the crawler.",
+                   "required": self.universe, "additions": [t for t in top if t not in uni]}
+            out = self.store.bronze_dir / "universe_extended.yaml"
+            out.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+        except Exception as e:
+            logger.debug(f"crawler: extended universe yaml skipped: {e}")
 
     def _mark(self, tier: int, ohlcv: bool = False, ref: bool = False) -> Callable[[Callable[[], int]], Callable[[], int]]:
         def wrap(fn):
@@ -1200,83 +1450,115 @@ class Crawler:
         return wrap
 
     # ---- planning ---------------------------------------------------------------
+    def _depth_tasks(self, tier: int, tickers: Iterable[str], *, details_ttl: float, fin_ttl: float,
+                     news_recent_ttl: float, backfill: bool, events: bool, start: date):
+        st, c, T = self.store, self.store.client, self.TTL
+        for t in tickers:
+            if not self.blocked("details") and self._stale(f"details/{t}", details_ttl):
+                yield Task(tier, f"details {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.ticker_details(t, ttl_s=0))), "details")
+            if not self.blocked("financials") and self._stale(f"financials/{t}", fin_ttl):
+                yield Task(tier, f"financials {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.financials(t, ttl_s=0))), "financials")
+            if not self.blocked("news"):
+                if backfill and self._stale(f"news/ticker/{t}", T["news_backfill"]):
+                    yield Task(tier, f"news-backfill {t}", self._mark(tier, ref=True)(lambda t=t: st.crawl_news_backfill([t], start, ttl_s=0)), "news")
+                elif self._stale(f"news/ticker_recent/{t}", news_recent_ttl):
+                    days = 14 if backfill else 30
+                    yield Task(tier, f"news-recent {t}", self._mark(tier, ref=True)(lambda t=t, days=days: st.crawl_news_recent(t, days=days, ttl_s=0)), "news")
+            if events:
+                if not self.blocked("events") and self._stale(f"events/{t}", T["events"]):
+                    yield Task(tier, f"events {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.ticker_events(t, ttl_s=0))), "events")
+                if not self.blocked("related") and self._stale(f"related/{t}", T["events"]):
+                    yield Task(tier, f"related {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.related_companies(t, ttl_s=0))), "related")
+
     def due_tasks(self):
         st, c, T = self.store, self.store.client, self.TTL
         today = st.today
         hol = st.holiday_dates()
+        start = st.history_start()
 
         # tier 0 — freshest bars, current corp actions, today's news
         for d in sorted(st.missing_days(today - timedelta(days=7), today), reverse=True):
             if d in hol or not self._publish_ready(d):
                 continue
-            yield Task(0, f"grouped {d}", self._mark(0, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)))
+            yield Task(0, f"grouped {d}", self._mark(0, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)), "grouped")
         for lo, hi in month_windows(today - timedelta(days=45), today):
             ttl = T["actions_current"] if hi >= today - timedelta(days=7) else T["actions_past"]
             for kind in ("splits", "dividends"):
                 key = f"{kind}/{lo.isoformat()}_{hi.isoformat()}"
-                if self._stale(key, ttl):
+                if not self.blocked(kind) and self._stale(key, ttl):
                     fn = c.splits if kind == "splits" else c.dividends
-                    yield Task(0, f"{kind} {lo:%Y-%m}", self._mark(0, ohlcv=True)(lambda fn=fn, lo=lo, hi=hi, ttl=ttl: self._calls(lambda: fn(lo, hi, ttl_s=ttl))))
-        for i in (0, 1, 2):
-            d = today - timedelta(days=i)
-            ttl = T["news_daily_recent"] if i <= 1 else None
-            key = f"news/daily/{d.isoformat()}"
-            if (ttl is None and self._age(key) is None) or (ttl is not None and self._stale(key, ttl)):
-                yield Task(0, f"news-daily {d}", self._mark(0, ref=True)(lambda d=d, ttl=ttl: self._calls(
-                    lambda: c.news(gte=datetime(d.year, d.month, d.day, tzinfo=timezone.utc),
-                                   lte=datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(days=1),
-                                   cache_key=f"news/daily/{d.isoformat()}", ttl_s=ttl, max_pages=6))))
+                    yield Task(0, f"{kind} {lo:%Y-%m}", self._mark(0, ohlcv=True)(lambda fn=fn, lo=lo, hi=hi: self._calls(lambda: fn(lo, hi, ttl_s=0))), kind)
+        if not self.blocked("news"):
+            for i in (0, 1, 2):
+                d = today - timedelta(days=i)
+                ttl = T["news_daily_recent"] if i <= 1 else None
+                key = f"news/daily/{d.isoformat()}"
+                if (ttl is None and self._age(key) is None) or (ttl is not None and self._stale(key, ttl)):
+                    yield Task(0, f"news-daily {d}", self._mark(0, ref=True)(lambda d=d, ttl=ttl: self._calls(
+                        lambda: c.news(gte=datetime(d.year, d.month, d.day, tzinfo=timezone.utc),
+                                       lte=datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(days=1),
+                                       cache_key=f"news/daily/{d.isoformat()}", ttl_s=ttl, max_pages=6))), "news")
 
         # tier 1 — 2-year grouped backfill, newest first
         for d in sorted(st.missing_days(), reverse=True):
             if d in hol or not self._publish_ready(d):
                 continue
-            yield Task(1, f"grouped {d}", self._mark(1, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)))
+            yield Task(1, f"grouped {d}", self._mark(1, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)), "grouped")
 
-        # tier 2 — directory + calendar + full corp-action history
+        # tier 2 — directory, calendar, corp-action history, macro, short data
         if self._stale("reference/tickers_active", T["tickers_active"]):
-            yield Task(2, "tickers active", self._mark(2, ref=True)(lambda: self._calls(lambda: c.tickers(active=True, ttl_s=0))))
+            yield Task(2, "tickers active", self._mark(2, ref=True)(lambda: self._calls(lambda: c.tickers(active=True, ttl_s=0))), "tickers")
         if self._stale("reference/holidays", T["holidays"]):
-            yield Task(2, "holidays", self._mark(2)(lambda: self._calls(lambda: c.holidays(ttl_s=0))))
-        for lo, hi in month_windows(st.history_start() - timedelta(days=31), today):
+            yield Task(2, "holidays", self._mark(2)(lambda: self._calls(lambda: c.holidays(ttl_s=0))), "holidays")
+        for name, fn in (("exchanges", c.exchanges), ("ticker_types", c.ticker_types)):
+            if not self.blocked(name) and self._stale(f"reference/{name}", T["static"]):
+                yield Task(2, name, self._mark(2, ref=True)(lambda fn=fn: self._calls(lambda: fn(ttl_s=0))), name)
+        for lo, hi in month_windows(start - timedelta(days=31), today):
             for kind in ("splits", "dividends"):
                 key = f"{kind}/{lo.isoformat()}_{hi.isoformat()}"
-                if self._stale(key, T["actions_past"]):
+                if not self.blocked(kind) and self._stale(key, T["actions_past"]):
                     fn = c.splits if kind == "splits" else c.dividends
-                    yield Task(2, f"{kind} {lo:%Y-%m}", self._mark(2, ohlcv=True)(lambda fn=fn, lo=lo, hi=hi: self._calls(lambda: fn(lo, hi, ttl_s=0))))
+                    yield Task(2, f"{kind} {lo:%Y-%m}", self._mark(2, ohlcv=True)(lambda fn=fn, lo=lo, hi=hi: self._calls(lambda: fn(lo, hi, ttl_s=0))), kind)
         if self._stale("reference/tickers_delisted", T["tickers_delisted"]):
-            yield Task(2, "tickers delisted", self._mark(2, ref=True)(lambda: self._calls(lambda: c.tickers(active=False, ttl_s=0))))
+            yield Task(2, "tickers delisted", self._mark(2, ref=True)(lambda: self._calls(lambda: c.tickers(active=False, ttl_s=0))), "tickers")
+        if not self.blocked("ipos") and self._stale("reference/ipos", T["daily"]):
+            yield Task(2, "ipos", self._mark(2, ref=True)(lambda: self._calls(lambda: c.ipos(ttl_s=0))), "ipos")
+        for series in ("treasury-yields", "inflation", "inflation-expectations"):
+            if not self.blocked("fed") and self._stale(f"fed/{series}", T["daily"]):
+                yield Task(2, f"fed {series}", self._mark(2, ref=True)(lambda series=series: self._calls(lambda: c.fed(series, ttl_s=0))), "fed")
+        si_start = today - timedelta(days=45)
+        if not self.blocked("short_interest") and self._stale(f"short_interest/{si_start.isoformat()}", T["daily"]):
+            yield Task(2, "short interest", self._mark(2, ref=True)(lambda: self._calls(lambda: c.short_interest(si_start, ttl_s=0))), "short_interest")
+        if not self.blocked("short_volume"):
+            for d in sorted(business_days(today - timedelta(days=10), today - timedelta(days=1)), reverse=True):
+                if d in hol:
+                    continue
+                if self._age(f"short_volume/{d.isoformat()}") is None:
+                    yield Task(2, f"short volume {d}", self._mark(2, ref=True)(lambda d=d: self._calls(lambda: c.short_volume(d, ttl_s=None))), "short_volume")
 
         # tier 3 — universe depth
-        start = st.history_start()
-        for t in self.universe:
-            if self._stale(f"details/{t}", T["details_universe"]):
-                yield Task(3, f"details {t}", self._mark(3, ref=True)(lambda t=t: self._calls(lambda: c.ticker_details(t, ttl_s=0))))
-            if self._stale(f"financials/{t}", T["financials_universe"]):
-                yield Task(3, f"financials {t}", self._mark(3, ref=True)(lambda t=t: self._calls(lambda: c.financials(t, ttl_s=0))))
-            if self._age(f"news/ticker/{t}_{start.isoformat()}") is None:
-                yield Task(3, f"news-backfill {t}", self._mark(3, ref=True)(lambda t=t: st.crawl_news_backfill([t], start)))
-            elif self._stale(f"news/ticker_recent/{t}", T["news_universe"]):
-                yield Task(3, f"news-recent {t}", self._mark(3, ref=True)(lambda t=t: st.crawl_news_recent(t, ttl_s=0)))
+        yield from self._depth_tasks(3, self.universe, details_ttl=T["details_universe"], fin_ttl=T["financials_universe"],
+                                     news_recent_ttl=T["news_universe"], backfill=True, events=True, start=start)
 
-        # tier 4 — whole market by liquidity rank
-        for t in self.market_tickers():
-            if t in self.universe:
-                continue
-            if self._stale(f"details/{t}", T["details_market"]):
-                yield Task(4, f"details {t}", self._mark(4, ref=True)(lambda t=t: self._calls(lambda: c.ticker_details(t, ttl_s=0))))
-            if self._stale(f"financials/{t}", T["financials_market"]):
-                yield Task(4, f"financials {t}", self._mark(4, ref=True)(lambda t=t: self._calls(lambda: c.financials(t, ttl_s=0))))
-            if self._stale(f"news/ticker_recent/{t}", T["news_market"]):
-                yield Task(4, f"news-recent {t}", self._mark(4, ref=True)(lambda t=t: st.crawl_news_recent(t, days=30, ttl_s=0)))
+        # tier 4 — extended (top-N liquid) depth, same treatment as the universe
+        ext = self.extended_tickers()
+        yield from self._depth_tasks(4, ext, details_ttl=T["details_universe"], fin_ttl=T["financials_universe"],
+                                     news_recent_ttl=T["news_universe"], backfill=True, events=True, start=start)
 
-        # tier 5 — QA: Massive's split-adjusted series vs ours
-        for t in self.universe:
-            key = f"aggs_qa/{t}"
-            if self._stale(key, T["aggs_qa"]):
-                yield Task(5, f"aggs-qa {t}", self._mark(5)(lambda t=t, key=key: self._calls(
-                    lambda: c.get(f"/v2/aggs/ticker/{t}/range/1/day/{start.isoformat()}/{today.isoformat()}",
-                                  {"adjusted": "true", "sort": "asc", "limit": 50000}, cache_key=key, ttl_s=0))))
+        # tier 5 — whole market by liquidity rank (lighter TTLs)
+        skip = set(self.universe) | set(ext)
+        yield from self._depth_tasks(5, (t for t in self.market_tickers() if t not in skip),
+                                     details_ttl=T["details_market"], fin_ttl=T["financials_market"],
+                                     news_recent_ttl=T["news_market"], backfill=False, events=False, start=start)
+
+        # tier 6 — QA: Massive's split-adjusted series vs ours (universe + extended)
+        if not self.blocked("aggs"):
+            for t in self.universe + ext:
+                key = f"aggs_qa/{t}"
+                if self._stale(key, T["aggs_qa"]):
+                    yield Task(6, f"aggs-qa {t}", self._mark(6)(lambda t=t, key=key: self._calls(
+                        lambda: c.get(f"/v2/aggs/ticker/{api_ticker(t)}/range/1/day/{start.isoformat()}/{today.isoformat()}",
+                                      {"adjusted": "true", "sort": "asc", "limit": 50000}, cache_key=key, ttl_s=0))), "aggs")
 
     def _calls(self, fn: Callable[[], Any]) -> int:
         c0 = self.store.client.calls
@@ -1287,10 +1569,22 @@ class Crawler:
         return self._calls(lambda: self.store.fetch_day(d))
 
     # ---- execution -----------------------------------------------------------------
+    FAIL_BACKOFF_S = (6 * 3600, 24 * 3600, 7 * _DAY)   # 1st, 2nd, 3rd+ failure of the same task
+
     def next_task(self) -> Task | None:
+        now = time.time()
         for t in self.due_tasks():
+            if self._skip_until.get(t.name, 0.0) > now:
+                continue
             return t
         return None
+
+    def _note_failure(self, task: Task, err: Exception) -> None:
+        n = self._fail_count.get(task.name, 0) + 1
+        self._fail_count[task.name] = n
+        back = self.FAIL_BACKOFF_S[min(n, len(self.FAIL_BACKOFF_S)) - 1]
+        self._skip_until[task.name] = time.time() + back
+        logger.warning(f"crawler: {task.name} failed ({n}×): {str(err)[:160]} — retry in {back / 3600:.0f}h")
 
     def maybe_rebuild(self, force: bool = False) -> None:
         if not (force or time.time() - self._last_build >= self.rebuild_every_s):
@@ -1317,7 +1611,10 @@ class Crawler:
         st = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "pid": os.getpid(),
               "current": current, "idle": idle, "calls_session": c.calls, "cache_hits": c.cache_hits,
               "tier_calls": self.tier_calls, "uptime_h": round((time.time() - self.started) / 3600, 2),
-              "waited_s": round(c.limiter.waited_s, 1), "calls_today": self.store.calls_today()}
+              "waited_s": round(c.waited_s, 1), "calls_today": self.store.calls_today(),
+              "keys": len(c.keys), "keys_live": c.live_keys, "key_calls": c.key_calls,
+              "blocked": self.blocked_families(), "extended_top": self.extended_top,
+              "failing": sorted(k for k, v in self._skip_until.items() if v > time.time())[:20]}
         try:
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(st, indent=1))
@@ -1343,7 +1640,7 @@ class Crawler:
             if max_calls is not None and self.store.client.calls - c0 >= max_calls:
                 break
             task = self.next_task()
-            if task is None:
+            if task is None or (once and task.tier > self.ONCE_MAX_TIER):
                 self.maybe_rebuild(force=self._dirty_ohlcv or self._dirty_ref)
                 self.write_state(None, idle=True)
                 if once:
@@ -1358,12 +1655,13 @@ class Crawler:
                 task.run()
             except MassiveAuthError:
                 raise
+            except MassiveEntitlementError as e:
+                self.block(task.family or task.name.split()[0], str(e)[:160])
             except MassiveError as e:
-                logger.warning(f"crawler: {task.name} failed: {e}")
-                time.sleep(5)
+                self._note_failure(task, e)
+            except Exception as e:                   # never let one bad payload stop the loop
+                self._note_failure(task, e)
             self.maybe_rebuild()
-            if once and task.tier >= 4:
-                break
         self.maybe_rebuild(force=True)
         self.write_state(None, idle=True)
         return self.store.client.calls - c0

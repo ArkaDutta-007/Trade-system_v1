@@ -41,6 +41,7 @@ data:
     include_otc: true         # the universe's ADRs (MKKGY, SHECY, TOELY) trade OTC
     deep_refresh_days: 7      # how often the yfinance pre-window history cache is refreshed
     update_max_calls: 40      # budget for the daily `ts massive update` (≈ 8 min at 5/min)
+    extended_top: 1000        # crawler: top-N US stocks by liquidity get universe-grade depth
 
 backtest:
   initial_cash: 10000.0
