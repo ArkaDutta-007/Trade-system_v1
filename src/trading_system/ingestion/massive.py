@@ -497,6 +497,20 @@ class MassiveClient:
         return self.get("/stocks/v1/short-volume", {"date": d.isoformat(), "limit": 50000},
                         cache_key=f"short_volume/{d.isoformat()}", ttl_s=ttl_s, max_pages=2)
 
+    def short_volume_ticker(self, ticker: str, *, ttl_s: float = 30 * _DAY) -> dict:
+        """Daily FINRA short-volume history for one ticker (data set starts 2024-02)."""
+        return self.get("/stocks/v1/short-volume",
+                        {"ticker": api_ticker(ticker), "limit": 50000, "sort": "date.asc"},
+                        cache_key=f"short_volume_ticker/{normalize_ticker(ticker)}", ttl_s=ttl_s, max_pages=2)
+
+    def aggs_minute(self, ticker: str, start: date, end: date, *, ttl_s: float | None = None) -> dict:
+        """Unadjusted 1-minute bars (pre/regular/post sessions) for [start, end] — one doc per calendar
+        month (≈18k rows for a mega-cap, one page).  The free plan serves the trailing 2 years only and
+        answers 403 outside it, so callers clip ``start`` to :meth:`MassiveStore.history_start`."""
+        return self.get(f"/v2/aggs/ticker/{api_ticker(ticker)}/range/1/minute/{start.isoformat()}/{end.isoformat()}",
+                        {"adjusted": "false", "sort": "asc", "limit": 50000},
+                        cache_key=f"aggs_minute/{normalize_ticker(ticker)}/{start:%Y-%m}", ttl_s=ttl_s, max_pages=4)
+
     def fed(self, series: str, *, ttl_s: float = _DAY) -> dict:
         """``treasury-yields`` | ``inflation`` | ``inflation-expectations`` (Fed data set)."""
         return self.get(f"/fed/v1/{series}", {"limit": 5000, "sort": "date.desc"},
@@ -560,6 +574,31 @@ def aggs_to_frame(ticker: str, results: list[dict]) -> pl.DataFrame:
                      "vwap": float(r["vw"]) if r.get("vw") is not None else None,
                      "n_trades": int(r["n"]) if r.get("n") is not None else None, "otc": False})
     return pl.DataFrame(rows, schema=_BAR_SCHEMA) if rows else pl.DataFrame(schema=_BAR_SCHEMA)
+
+
+_MINUTE_SCHEMA = {"ts": pl.Int64, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64, "close": pl.Float64,
+                  "vwap": pl.Float64, "volume": pl.Float64, "trades": pl.Int64}
+MINUTE_COLS = ["ts", "date", "session", "ticker", "open", "high", "low", "close", "vwap", "volume", "trades"]
+
+
+def minute_to_frame(ticker: str, results: list[dict]) -> pl.DataFrame:
+    """``/v2/aggs/ticker/{t}/range/1/minute`` rows → tidy bars with a UTC ``ts`` (bar open, exact to the
+    minute), the New-York trading ``date`` and a ``session`` tag (pre < 09:30 ≤ regular < 16:00 ≤ post).
+    Prices are as traded (unadjusted); apply ``splits.parquet`` factors if you need a continuous series."""
+    rows = [{"ts": int(r["t"]), "open": r.get("o"), "high": r.get("h"), "low": r.get("l"), "close": r.get("c"),
+             "vwap": r.get("vw"), "volume": r.get("v"), "trades": r.get("n")} for r in results or [] if r.get("t") is not None]
+    if not rows:
+        return pl.DataFrame(schema={**{"ts": pl.Datetime("us", "UTC"), "date": pl.Date, "session": pl.Utf8, "ticker": pl.Utf8},
+                                    **{k: v for k, v in _MINUTE_SCHEMA.items() if k != "ts"}}).select(MINUTE_COLS)
+    et = pl.col("ts").dt.convert_time_zone("America/New_York")
+    mins = et.dt.hour().cast(pl.Int32) * 60 + et.dt.minute().cast(pl.Int32)     # hour() is i8 → would overflow
+    return (pl.DataFrame(rows, schema=_MINUTE_SCHEMA)
+              .with_columns(pl.from_epoch("ts", time_unit="ms").dt.replace_time_zone("UTC"),
+                            ticker=pl.lit(normalize_ticker(ticker)))
+              .with_columns(date=et.dt.date(),
+                            session=pl.when(mins < 570).then(pl.lit("pre")).when(mins < 960).then(pl.lit("regular"))
+                                      .otherwise(pl.lit("post")))
+              .unique(subset=["ts"], keep="last").sort("ts").select(MINUTE_COLS))
 
 
 def splits_frame(results: list[dict]) -> pl.DataFrame:
@@ -677,7 +716,8 @@ def flatten_financials(results: list[dict]) -> pl.DataFrame:
                "company_name": r.get("company_name"), "fiscal_year": r.get("fiscal_year"),
                "fiscal_period": r.get("fiscal_period"), "timeframe": r.get("timeframe"),
                "start_date": r.get("start_date"), "end_date": r.get("end_date"),
-               "filing_date": r.get("filing_date"), "source_filing_url": r.get("source_filing_url")}
+               "filing_date": r.get("filing_date"), "acceptance_datetime": r.get("acceptance_datetime"),
+               "source_filing_url": r.get("source_filing_url"), "source_filing_file_url": r.get("source_filing_file_url")}
         for stmt, items in (r.get("financials") or {}).items():
             if not isinstance(items, dict):
                 continue
@@ -867,6 +907,61 @@ class MassiveStore:
     def news_path(self) -> Path:          return self.bronze_dir / "news.parquet"
     @property
     def deep_path(self) -> Path:          return self.bronze_dir / "ohlcv_deep.parquet"
+    @property
+    def minute_dir(self) -> Path:         return self.bronze_dir / "bars_minute"      # one parquet per ticker
+
+    # ---- intraday (universe only) ----------------------------------------------
+    def minute_windows(self) -> list[tuple[date, date]]:
+        """Calendar-month windows covering the plan's 2-year intraday window, oldest first; the first one
+        is clipped to :meth:`history_start` so we never ask for a day the plan would 403."""
+        lo = self.history_start()
+        return [(max(a, lo), min(b, self.today)) for a, b in month_windows(lo, self.today)]
+
+    def build_minute_bars(self, tickers: Iterable[str] | None = None, force: bool = False) -> dict[str, int]:
+        """``bronze/massive/bars_minute/{ticker}.parquet`` from the ``aggs_minute/{ticker}/{YYYY-MM}`` docs.
+        Incremental: a ticker is rebuilt only when one of its month docs is newer than its parquet."""
+        root = self.raw_dir / "aggs_minute"
+        out: dict[str, int] = {}
+        if not root.exists():
+            return out
+        want = {normalize_ticker(t) for t in tickers} if tickers is not None else None
+        self.minute_dir.mkdir(parents=True, exist_ok=True)
+        for d in sorted(p for p in root.iterdir() if p.is_dir()):
+            t = d.name
+            if want is not None and t not in want:
+                continue
+            docs = sorted(d.glob("*.json.gz"))
+            if not docs:
+                continue
+            target = self.minute_dir / f"{t}.parquet"
+            if not force and target.exists() and target.stat().st_mtime >= max(p.stat().st_mtime for p in docs):
+                continue
+            frames = []
+            for p in docs:
+                doc = self.client.cache_read(f"aggs_minute/{t}/{p.name[:-8]}", None)
+                if doc and doc["results"]:
+                    frames.append(minute_to_frame(t, doc["results"]))
+            if not frames:
+                continue
+            df = pl.concat(frames).unique(subset=["ts"], keep="last").sort("ts")
+            tmp = target.with_suffix(".tmp")
+            df.write_parquet(tmp, compression="zstd")
+            os.replace(tmp, target)
+            out[t] = df.height
+        return out
+
+    def minute_summary(self) -> dict | None:
+        files = sorted(self.minute_dir.glob("*.parquet")) if self.minute_dir.exists() else []
+        if not files:
+            return None
+        try:
+            lf = pl.scan_parquet([str(p) for p in files])
+            agg = lf.select(pl.len().alias("rows"), pl.col("ts").min().alias("first"), pl.col("ts").max().alias("last")).collect()
+            return {"rows": int(agg["rows"][0]), "tickers": len(files),
+                    "first": str(agg["first"][0])[:16], "last": str(agg["last"][0])[:16],
+                    "age_h": round((time.time() - max(p.stat().st_mtime for p in files)) / 3600, 1)}
+        except Exception:
+            return {"rows": -1, "tickers": len(files)}
 
     def build_deep_prices(self, tickers: Iterable[str], start: str = "1970-01-01",
                           fetch: Callable[..., pl.DataFrame] | None = None) -> pl.DataFrame:
@@ -1175,7 +1270,8 @@ class MassiveStore:
         write("short_interest", [r for folder in ("short_interest", "short_interest_ticker")
                                  for _, doc in self._docs_in(folder) for r in flat_rows(doc["results"])],
               ["ticker", "settlement_date"])
-        write("short_volume", [r for _, doc in self._docs_in("short_volume") for r in flat_rows(doc["results"])],
+        write("short_volume", [r for folder in ("short_volume", "short_volume_ticker")
+                               for _, doc in self._docs_in(folder) for r in flat_rows(doc["results"])],
               ["ticker", "date"])
         return out
 
@@ -1211,6 +1307,7 @@ class MassiveStore:
                                 "age_h": round((time.time() - p.stat().st_mtime) / 3600, 1)}
                 except Exception:
                     st[name] = {"rows": -1}
+        st["bars_minute"] = self.minute_summary()
         return st
 
 
@@ -1371,13 +1468,17 @@ class Crawler:
       2  directory + calendar + macro: active tickers (7d), holidays, exchanges,
          ticker types, monthly splits/dividends history (30d), delisted directory
          (30d), IPOs, Fed series, short interest / short volume (1d)
-      3  universe depth: overview (30d), fundamentals (7d), 2y news backfill
-         (60d) + rolling 14d news (1d), ticker events + related companies (30d)
-      4  EXTENDED depth — the top-``extended_top`` (1000) US common stocks/ADRs by
-         trailing-63d dollar volume get the same treatment as the universe
-      5  whole-market depth, by liquidity rank: overview (45d), fundamentals
+      3  universe depth: overview (30d), fundamentals (7d), EVERY news article
+         (365d) + rolling 14d news (1d), full dividend/split history (180d), short
+         interest (14d) + short volume (30d) history, ticker events + related (30d)
+      4  universe INTRADAY: unadjusted 1-minute bars (pre/regular/post) for the
+         plan's 2-year window, one doc per ticker-month; closed months are
+         immutable, the open month refreshes daily
+      5  EXTENDED depth — the top-``extended_top`` (1000) US common stocks/ADRs by
+         trailing-63d dollar volume get the tier-3 treatment (no minute bars)
+      6  whole-market depth, by liquidity rank: overview (45d), fundamentals
          (14d), rolling news (30d)
-      6  QA: Massive's own split-adjusted series per universe+extended ticker
+      7  QA: Massive's own split-adjusted series per universe+extended ticker
          (7d) so `ts massive status` can report the adjustment-maths discrepancy
 
     A 403 parks that endpoint *family* for a week (marker under ``.blocked/``)
@@ -1386,7 +1487,7 @@ class Crawler:
     """
 
     TTL = {"news_deep": 365 * _DAY, "actions_ticker": 180 * _DAY, "short_interest_ticker": 14 * _DAY,
-           "deep_prices": 7 * _DAY,
+           "short_volume_ticker": 30 * _DAY, "minute_open": _DAY, "deep_prices": 7 * _DAY,
            "tickers_active": 7 * _DAY, "tickers_delisted": 30 * _DAY, "holidays": 7 * _DAY,
            "static": 30 * _DAY, "daily": _DAY,
            "actions_current": _DAY, "actions_past": 30 * _DAY, "news_daily_recent": 6 * 3600,
@@ -1395,7 +1496,7 @@ class Crawler:
            "details_market": 45 * _DAY, "financials_market": 14 * _DAY, "news_market": 30 * _DAY,
            "aggs_qa": 7 * _DAY}
     PUBLISH_LAG_H = 1.5             # grouped bar for D is tried from D+1 01:30 UTC (≈21:30 ET)
-    ONCE_MAX_TIER = 4               # --once drains up to and including this tier
+    ONCE_MAX_TIER = 5               # --once drains up to and including this tier (…extended)
 
     def __init__(self, store: MassiveStore, universe_tickers: Iterable[str], state_path: Path | None = None,
                  rebuild_every_s: float = 900.0, log: Callable[[str], None] | None = None,
@@ -1413,6 +1514,7 @@ class Crawler:
         self._market_at = 0.0
         self._dirty_ohlcv = False
         self._dirty_ref = False
+        self._dirty_minute = False
         self._last_build = 0.0
         self.stop = False
         self.tier_calls: dict[str, int] = {}
@@ -1507,7 +1609,8 @@ class Crawler:
         except Exception as e:
             logger.debug(f"crawler: extended universe yaml skipped: {e}")
 
-    def _mark(self, tier: int, ohlcv: bool = False, ref: bool = False) -> Callable[[Callable[[], int]], Callable[[], int]]:
+    def _mark(self, tier: int, ohlcv: bool = False, ref: bool = False,
+              minute: bool = False) -> Callable[[Callable[[], int]], Callable[[], int]]:
         def wrap(fn):
             def run():
                 n = fn()
@@ -1515,6 +1618,7 @@ class Crawler:
                 if n:
                     self._dirty_ohlcv |= ohlcv
                     self._dirty_ref |= ref
+                    self._dirty_minute |= minute
                 return n
             return run
         return wrap
@@ -1544,11 +1648,45 @@ class Crawler:
                     yield Task(tier, f"splits-deep {t}", self._mark(tier, ohlcv=True)(lambda t=t: self._calls(lambda: c.splits_ticker(t, ttl_s=0))), "splits")
                 if not self.blocked("short_interest") and self._stale(f"short_interest_ticker/{t}", T["short_interest_ticker"]):
                     yield Task(tier, f"short-interest-deep {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.short_interest_ticker(t, ttl_s=0))), "short_interest")
+                if not self.blocked("short_volume") and self._stale(f"short_volume_ticker/{t}", T["short_volume_ticker"]):
+                    yield Task(tier, f"short-volume-deep {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.short_volume_ticker(t, ttl_s=0))), "short_volume")
             if events:
                 if not self.blocked("events") and self._stale(f"events/{t}", T["events"]):
                     yield Task(tier, f"events {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.ticker_events(t, ttl_s=0))), "events")
                 if not self.blocked("related") and self._stale(f"related/{t}", T["events"]):
                     yield Task(tier, f"related {t}", self._mark(tier, ref=True)(lambda t=t: self._calls(lambda: c.related_companies(t, ttl_s=0))), "related")
+
+    def _minute_stale(self, ticker: str, lo: date, hi: date) -> bool:
+        """A month doc is complete once fetched after its last day has published (D+1 + lag);
+        the still-open month is refreshed daily."""
+        age = self._age(f"aggs_minute/{ticker}/{lo:%Y-%m}")
+        if age is None:
+            return True
+        complete_at = datetime(hi.year, hi.month, hi.day, tzinfo=timezone.utc) + timedelta(days=1, hours=self.PUBLISH_LAG_H)
+        now = datetime.now(timezone.utc)
+        if now < complete_at:
+            return age > self.TTL["minute_open"]
+        return now - timedelta(seconds=age) < complete_at
+
+    def _minute_tasks(self, tier: int, tickers: Iterable[str]):
+        """One task per stale (ticker, month), newest month first within a ticker."""
+        if self.blocked("aggs_minute"):
+            return
+        c = self.store.client
+        windows = self.store.minute_windows()
+        for t in tickers:
+            for i, (lo, hi) in reversed(list(enumerate(windows))):
+                if not self._minute_stale(t, lo, hi):
+                    continue
+
+                def run(t=t, lo=lo, hi=hi, edge=(i == 0)):
+                    try:
+                        return self._calls(lambda: c.aggs_minute(t, lo, hi, ttl_s=0))
+                    except MassiveEntitlementError as e:
+                        if edge:                     # oldest month may sit just outside the 2y window:
+                            raise MassiveError(f"plan edge: {e}") from e   # back off this month, don't park the family
+                        raise
+                yield Task(tier, f"minute {t} {lo:%Y-%m}", self._mark(tier, minute=True)(run), "aggs_minute")
 
     # ---- deep prices (yfinance, no Massive budget) ------------------------------------
     def maybe_deep_prices(self, force: bool = False) -> bool:
@@ -1646,23 +1784,26 @@ class Crawler:
         yield from self._depth_tasks(3, self.universe, details_ttl=T["details_universe"], fin_ttl=T["financials_universe"],
                                      news_recent_ttl=T["news_universe"], backfill=True, events=True, start=start)
 
-        # tier 4 — extended (top-N liquid) depth, same treatment as the universe
+        # tier 4 — universe intraday: 1-minute bars for the 2-year window
+        yield from self._minute_tasks(4, self.universe)
+
+        # tier 5 — extended (top-N liquid) depth, same treatment as the universe (minus minute bars)
         ext = self.extended_tickers()
-        yield from self._depth_tasks(4, ext, details_ttl=T["details_universe"], fin_ttl=T["financials_universe"],
+        yield from self._depth_tasks(5, ext, details_ttl=T["details_universe"], fin_ttl=T["financials_universe"],
                                      news_recent_ttl=T["news_universe"], backfill=True, events=True, start=start)
 
-        # tier 5 — whole market by liquidity rank (lighter TTLs)
+        # tier 6 — whole market by liquidity rank (lighter TTLs)
         skip = set(self.universe) | set(ext)
-        yield from self._depth_tasks(5, (t for t in self.market_tickers() if t not in skip),
+        yield from self._depth_tasks(6, (t for t in self.market_tickers() if t not in skip),
                                      details_ttl=T["details_market"], fin_ttl=T["financials_market"],
                                      news_recent_ttl=T["news_market"], backfill=False, events=False, start=start)
 
-        # tier 6 — QA: Massive's split-adjusted series vs ours (universe + extended)
+        # tier 7 — QA: Massive's split-adjusted series vs ours (universe + extended)
         if not self.blocked("aggs"):
             for t in self.universe + ext:
                 key = f"aggs_qa/{t}"
                 if self._stale(key, T["aggs_qa"]):
-                    yield Task(6, f"aggs-qa {t}", self._mark(6)(lambda t=t, key=key: self._calls(
+                    yield Task(7, f"aggs-qa {t}", self._mark(7)(lambda t=t, key=key: self._calls(
                         lambda: c.get(f"/v2/aggs/ticker/{api_ticker(t)}/range/1/day/{start.isoformat()}/{today.isoformat()}",
                                       {"adjusted": "true", "sort": "asc", "limit": 50000}, cache_key=key, ttl_s=0))), "aggs")
 
@@ -1710,6 +1851,14 @@ class Crawler:
                 self._dirty_ref = False
             except Exception as e:
                 logger.warning(f"crawler: reference build failed: {e}")
+        if self._dirty_minute or force:
+            try:
+                n = self.store.build_minute_bars()
+                if n:
+                    self.log(f"minute bars rebuilt: {len(n)} tickers, {sum(n.values()):,} rows")
+                self._dirty_minute = False
+            except Exception as e:
+                logger.warning(f"crawler: minute-bar build failed: {e}")
         self._last_build = time.time()
 
     def write_state(self, current: str | None, idle: bool = False) -> None:
@@ -1786,7 +1935,7 @@ def crawler_state(store: MassiveStore) -> dict | None:
 
 
 def adjustment_qa(store: MassiveStore, max_tickers: int = 2000) -> pl.DataFrame | None:
-    """Compare our split-adjusted ``close`` against Massive's own ``adjusted=true`` bars (tier-5 cache).
+    """Compare our split-adjusted ``close`` against Massive's own ``adjusted=true`` bars (tier-7 cache).
 
     Returns per-ticker ``max_abs_dev`` (relative) and ``n`` overlapping days, or
     None when nothing is cached yet.  A large deviation means a split we are

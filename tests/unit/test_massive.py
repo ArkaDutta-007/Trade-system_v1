@@ -8,6 +8,8 @@ continuity, the daily-update budget cap, and the flatteners.
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -547,6 +549,7 @@ def test_crawler_once_drains_then_exits(tmp_path):
                 "news/ticker_deep/AAPL", "news/ticker_deep/MSFT", "events/AAPL", "events/MSFT", "related/AAPL", "related/MSFT",
                 "dividends_ticker/AAPL", "dividends_ticker/MSFT", "splits_ticker/AAPL", "splits_ticker/MSFT",
                 "short_interest_ticker/AAPL", "short_interest_ticker/MSFT",
+                "short_volume_ticker/AAPL", "short_volume_ticker/MSFT",
                 "news/ticker_recent/AAPL", "news/ticker_recent/MSFT", "aggs_qa/AAPL", "aggs_qa/MSFT",
                 "reference/exchanges", "reference/ticker_types", "reference/ipos",
                 "fed/treasury-yields", "fed/inflation", "fed/inflation-expectations",
@@ -559,6 +562,9 @@ def test_crawler_once_drains_then_exits(tmp_path):
         client.cache_write(f"news/daily/{(st.today - timedelta(days=i)).isoformat()}", {"results": [], "fetched_at": 0})
     for d in M.business_days(st.today - timedelta(days=10), st.today - timedelta(days=1)):
         client.cache_write(f"short_volume/{d.isoformat()}", {"results": [], "fetched_at": 0})
+    for t in ("AAPL", "MSFT"):
+        for lo, _ in st.minute_windows():
+            client.cache_write(f"aggs_minute/{t}/{lo:%Y-%m}", {"results": [], "fetched_at": 0})
     assert cr.run(once=True, idle_sleep=0) == 0
 
 
@@ -569,7 +575,7 @@ def test_crawler_parks_family_on_403_and_moves_on(tmp_path):
     cr, st, client = _crawler(tmp_path, s)
     for d in M.business_days(st.history_start(), st.today):            # skip the grouped tiers
         client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
-    cr.run(once=True, idle_sleep=0)                                     # drains tiers 0-4 then exits
+    cr.run(once=True, idle_sleep=0)                                     # drains tiers 0-5 then exits
     assert "financials" in cr.blocked_families()
     fin_calls = sum(1 for u, _, _ in s.log if "/vX/reference/financials" in u)
     assert fin_calls == 1                                                # one probe, then parked
@@ -584,12 +590,14 @@ def test_extended_tier_takes_top_n_beyond_universe(tmp_path):
     pl.DataFrame({"date": [d] * 5, "ticker": ["A1", "A2", "A3", "AAPL", "MSFT"], "close": [1.0] * 5,
                   "volume": [3e6, 2e6, 1e6, 9e6, 9e6], "otc": [False] * 5}).with_columns(pl.col("date").cast(pl.Date)).write_parquet(st.ohlcv_all_path)
     assert cr.extended_tickers() == ["A1", "A2"]                        # 4 − 2 universe names, by $vol
-    t4 = [t for t in cr.due_tasks() if t.tier == 4]
-    assert {n.split()[-1] for n in (t.name for t in t4)} == {"A1", "A2"}
-    assert any(t.name == "news-deep A1" for t in t4)                     # universe-grade depth
-    assert any(t.name == "dividends-deep A1" for t in t4) and any(t.name == "short-interest-deep A1" for t in t4)
-    t5 = [t for t in cr.due_tasks() if t.tier == 5]
-    assert {n.split()[-1] for n in (t.name for t in t5)} == {"A3"} and not any("deep" in t.name for t in t5)
+    t5 = [t for t in cr.due_tasks() if t.tier == 5]                     # extended depth
+    assert {n.split()[-1] for n in (t.name for t in t5)} == {"A1", "A2"}
+    assert any(t.name == "news-deep A1" for t in t5)                     # universe-grade depth
+    assert any(t.name == "dividends-deep A1" for t in t5) and any(t.name == "short-interest-deep A1" for t in t5)
+    assert any(t.name == "short-volume-deep A1" for t in t5)
+    assert not any(t.name.startswith("minute") for t in t5)             # minute bars are universe-only
+    t6 = [t for t in cr.due_tasks() if t.tier == 6]                     # rest of market
+    assert {n.split()[-1] for n in (t.name for t in t6)} == {"A3"} and not any("deep" in t.name for t in t6)
 
 
 def test_extra_tables_flatten(tmp_path):
@@ -653,7 +661,7 @@ def test_deep_tasks_only_for_universe_and_extended_and_use_full_history_params(t
     s = FakeSession(); s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
     cr, st, client = _crawler(tmp_path, s)
     names = [t.name for t in cr.due_tasks() if t.tier == 3]
-    for kind in ("news-deep", "dividends-deep", "splits-deep", "short-interest-deep", "events", "related"):
+    for kind in ("news-deep", "dividends-deep", "splits-deep", "short-interest-deep", "short-volume-deep", "events", "related"):
         assert f"{kind} AAPL" in names
     assert "news-backfill AAPL" not in names
     client.news(ticker="AAPL", gte=datetime(2000, 1, 1, tzinfo=timezone.utc), cache_key="news/ticker_deep/AAPL", max_pages=60)
@@ -710,3 +718,119 @@ def test_maybe_deep_prices_runs_once_in_background(tmp_path, monkeypatch):
     cr._deep_thread.join(5)
     assert calls == [(("AAPL", "MSFT"), "1970-01-01")]
     assert cr.maybe_deep_prices() is False                     # fresh file → no second build
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Universe intraday (1-minute bars) + per-ticker short volume
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _minute_row(ts_ms, px, v=100, n=3):
+    return {"t": ts_ms, "o": px, "h": px + 0.5, "l": px - 0.5, "c": px, "vw": px, "v": v, "n": n}
+
+
+def test_minute_to_frame_tags_sessions_in_new_york_time():
+    # 2026-09-18 (EDT, UTC-4): 08:00 ET pre, 09:30 ET regular, 15:59 ET regular, 16:00 ET post
+    base = int(datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)     # 08:00 ET
+    rows = [_minute_row(base, 10.0), _minute_row(base + 90 * 60_000, 11.0),
+            _minute_row(base + (8 * 60 - 1) * 60_000, 12.0), _minute_row(base + 8 * 3600_000, 13.0),
+            _minute_row(base, 10.0)]                                                        # duplicate → dropped
+    df = M.minute_to_frame("brk.b", rows)
+    assert df.columns == M.MINUTE_COLS and df.height == 4
+    assert df["ticker"].unique().to_list() == ["BRK-B"]
+    assert df["session"].to_list() == ["pre", "regular", "regular", "post"]
+    assert df["date"].unique().to_list() == [date(2026, 9, 18)]
+    assert df["ts"].dtype.time_zone == "UTC" and df["ts"][0] == datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    assert M.minute_to_frame("X", []).columns == M.MINUTE_COLS
+
+
+def test_aggs_minute_is_keyed_per_ticker_month_and_unadjusted(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/v2/aggs/ticker/BRK.B/range/1/minute/", FakeResp(200, {"results": [_minute_row(1, 1.0)]}))
+    client, _ = make_client(tmp_path, s)
+    client.aggs_minute("BRK-B", date(2026, 9, 5), date(2026, 9, 30), ttl_s=None)
+    url, params, _ = s.log[0]
+    assert url.endswith("/range/1/minute/2026-09-05/2026-09-30") and params["adjusted"] == "false"
+    assert client.cached("aggs_minute/BRK-B/2026-09")
+
+
+def test_minute_windows_clip_to_plan_window(tmp_path):
+    st, _, _ = _store(tmp_path, FakeSession())
+    w = st.minute_windows()
+    assert w[0][0] == st.history_start() and w[-1][1] == st.today
+    assert all(lo.month == hi.month for lo, hi in w) and len(w) in (24, 25)
+
+
+def test_minute_tasks_are_universe_only_newest_first_and_skip_complete_months(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    t4 = [t for t in cr.due_tasks() if t.tier == 4]
+    assert t4 and all(t.name.startswith("minute ") and t.family == "aggs_minute" for t in t4)
+    aapl = [t.name for t in t4 if " AAPL " in t.name]
+    assert aapl[0].endswith(f"{st.today:%Y-%m}") and aapl == sorted(aapl, reverse=True)      # newest month first
+    assert len(aapl) == len(st.minute_windows()) and not any("MSFT" in n for n in aapl)
+    # a closed month fetched after it published is complete → never re-planned
+    lo, hi = st.minute_windows()[-2]
+    client.cache_write(f"aggs_minute/AAPL/{lo:%Y-%m}", {"results": [], "fetched_at": 0})
+    assert f"minute AAPL {lo:%Y-%m}" not in [t.name for t in cr.due_tasks()]
+    # …but one fetched BEFORE its last day published is not: backdate the file
+    old = (datetime(hi.year, hi.month, hi.day, tzinfo=timezone.utc) - timedelta(days=3)).timestamp()
+    f = client._cache_file(f"aggs_minute/AAPL/{lo:%Y-%m}"); os.utime(f, (old, old))
+    assert f"minute AAPL {lo:%Y-%m}" in [t.name for t in cr.due_tasks()]
+
+
+def test_minute_plan_edge_403_backs_off_the_month_instead_of_parking(tmp_path):
+    s = FakeSession()
+    cr, st, client = _crawler(tmp_path, s)
+    lo0, hi0 = st.minute_windows()[0]
+    s.add(f"https://api.massive.com/v2/aggs/ticker/AAPL/range/1/minute/{lo0.isoformat()}", FakeResp(403, {"status": "NOT_AUTHORIZED"}))
+    s.add("https://api.massive.com/", FakeResp(200, {"results": [_minute_row(1_700_000_000_000, 5.0)]}))
+    tasks = {t.name: t for t in cr.due_tasks() if t.tier == 4}
+    edge = tasks[f"minute AAPL {lo0:%Y-%m}"]
+    with pytest.raises(M.MassiveError) as ei:
+        edge.run()
+    assert not isinstance(ei.value, M.MassiveEntitlementError) and "plan edge" in str(ei.value)
+    cr._note_failure(edge, ei.value)
+    assert "aggs_minute" not in cr.blocked_families()
+    assert cr.next_task().name != edge.name                                # backed off, others proceed
+    newest = tasks[f"minute AAPL {st.today:%Y-%m}"]
+    assert newest.run() == 1 and cr._dirty_minute
+
+
+def test_build_minute_bars_is_per_ticker_and_incremental(tmp_path):
+    st, client, _ = _store(tmp_path, FakeSession())
+    t0 = int(datetime(2026, 8, 3, 13, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    client.cache_write("aggs_minute/AAPL/2026-08", {"results": [_minute_row(t0, 1.0), _minute_row(t0 + 60_000, 2.0)], "fetched_at": 0})
+    client.cache_write("aggs_minute/AAPL/2026-09", {"results": [_minute_row(t0 + 30 * 86_400_000, 3.0)], "fetched_at": 0})
+    client.cache_write("aggs_minute/MSFT/2026-09", {"results": [], "fetched_at": 0})
+    out = st.build_minute_bars()
+    assert out == {"AAPL": 3} and (st.minute_dir / "AAPL.parquet").exists() and not (st.minute_dir / "MSFT.parquet").exists()
+    df = pl.read_parquet(st.minute_dir / "AAPL.parquet")
+    assert df["close"].to_list() == [1.0, 2.0, 3.0] and df["session"][0] == "regular"
+    assert st.build_minute_bars() == {}                                    # nothing newer → no work
+    time.sleep(0.01)
+    client.cache_write("aggs_minute/AAPL/2026-09", {"results": [_minute_row(t0 + 30 * 86_400_000, 3.0), _minute_row(t0 + 31 * 86_400_000, 4.0)], "fetched_at": 0})
+    f = client._cache_file("aggs_minute/AAPL/2026-09"); now = time.time() + 5; os.utime(f, (now, now))
+    assert st.build_minute_bars() == {"AAPL": 4}
+    summ = st.minute_summary()
+    assert summ["tickers"] == 1 and summ["rows"] == 4 and summ["first"].startswith("2026-08-03 13:30")
+
+
+def test_short_volume_history_merges_into_short_volume_table(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/stocks/v1/short-volume", FakeResp(200, {"results": [
+        {"ticker": "AAPL", "date": "2024-02-06", "short_volume": 5, "total_volume": 10}]}))
+    st, client, _ = _store(tmp_path, s)
+    client.short_volume_ticker("aapl")
+    _, params, _ = s.log[0]
+    assert params == {"ticker": "AAPL", "limit": 50000, "sort": "date.asc"} and client.cached("short_volume_ticker/AAPL")
+    client.cache_write("short_volume/2026-09-17", {"results": [{"ticker": "AAPL", "date": "2026-09-17", "short_volume": 7, "total_volume": 10},
+                                                                 {"ticker": "AAPL", "date": "2024-02-06", "short_volume": 9, "total_volume": 10}], "fetched_at": 0})
+    n = st.build_extra_tables()
+    df = pl.read_parquet(st.bronze_dir / "short_volume.parquet").sort("date")
+    assert n["short_volume"] == 2 and df["date"].to_list() == ["2024-02-06", "2026-09-17"]
+
+
+def test_financials_keep_acceptance_datetime():
+    df = M.flatten_financials([{"tickers": ["AAPL"], "fiscal_year": "2026", "fiscal_period": "Q3", "timeframe": "quarterly",
+                                "filing_date": "2026-08-01", "acceptance_datetime": "20260731T203015",
+                                "source_filing_file_url": "https://sec/x.htm",
+                                "financials": {"income_statement": {"revenues": {"value": 1.0}}}}])
+    assert df["acceptance_datetime"][0] == "20260731T203015" and df["source_filing_file_url"][0].endswith("x.htm")

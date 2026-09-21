@@ -153,14 +153,26 @@ The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
   overview, fundamentals, 2y news backfill + rolling news, ticker events, related
   companies — **at full depth**: every article Massive has (archive starts
   2017-04, 1 call/1000, 365d TTL), complete dividend + split histories
-  (per ticker, 180d), short interest since 2017-12 (14d), fundamentals since
-  2009 → 4 **extended**: the top-`extended_top`
-  (1000) US stocks/ADRs by trailing-63d dollar volume get the same depth (their
+  (per ticker, 180d), short interest since 2017-12 (14d), daily FINRA short
+  volume since 2024-02 (30d), fundamentals since 2009 with the SEC
+  `acceptance_datetime` of every filing → 4 **universe intraday**: unadjusted
+  1-minute bars (pre/regular/post, `session` + New-York `date` columns) for the
+  plan's 2-year window, one immutable doc per ticker-month (`aggs_minute/{t}/
+  {YYYY-MM}`, the open month refreshes daily, a month fetched before its last
+  day published is re-fetched), built incrementally into
+  `bronze/massive/bars_minute/{ticker}.parquet` — ≈8 200 calls once, then
+  ≈330/day → 5 **extended**: the top-`extended_top`
+  (1000) US stocks/ADRs by trailing-63d dollar volume get the tier-3 depth (their
   YAML lands in `bronze/massive/universe_extended.yaml`, refreshed hourly) →
-  5 whole market by liquidity rank (45d/14d/30d) → 6 QA: Massive's own adjusted
+  6 whole market by liquidity rank (45d/14d/30d) → 7 QA: Massive's own adjusted
   series vs our `close` (`adjustment_qa`, in `ts massive status`). A task that
-  errors is backed off 6h → 24h → 7d instead of retried; SIGTERM stops after
-  the current call; state in `data/raw/massive/crawler_state.json`.
+  errors is backed off 6h → 24h → 7d instead of retried (a 403 on the oldest
+  minute month — the plan edge — is treated the same way rather than parking
+  the family); SIGTERM stops after the current call; state in
+  `data/raw/massive/crawler_state.json`. Not on the free plan (probed
+  2026-09-21, 403): trades/quotes, Benzinga earnings calendar / analyst ratings
+  / guidance — the nearest free proxies for "event time" are news
+  `published_utc`, filing `acceptance_datetime` and the minute bars.
 * **Deep prices** — the plan hard-caps bars at 2 years (a request from 2000
   returns 2024-09→, verified), so `ohlcv_deep.parquet` (universe + extended,
   `source` column) is built weekly in a crawler background thread from yfinance

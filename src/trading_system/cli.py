@@ -252,9 +252,13 @@ def massive_status(config: str = "configs/default.yaml", universe: str = UNIVERS
     rprint(f"grouped days cached: {st['grouped_days']} ({st['first_day']} → {st['last_day']}) · "
            f"pending: {st['pending_days']} · window start: {st['history_start']}")
     core = ("ohlcv_all", "splits", "dividends", "tickers", "details", "financials", "news")
-    for k in core + tuple(sorted(x for x in st if isinstance(st[x], dict) and x not in core)):
+    for k in core + tuple(sorted(x for x in st if isinstance(st[x], dict) and x not in core and x != "bars_minute")):
         v = st[k]
         rprint(f"  {k:<24} " + (f"{v['rows']:>10,} rows · {v['age_h']}h old" if v else "[dim]—[/dim]"))
+    mb = st.get("bars_minute")
+    if mb:
+        rprint(f"  {'bars_minute (universe)':<24} {mb['rows']:>10,} rows · {mb['tickers']} tickers · "
+               f"{mb.get('first')} → {mb.get('last')} UTC · {mb.get('age_h')}h old")
     rprint(f"[dim]raw cache: {st['raw_dir']} · bronze: {st['bronze_dir']}[/dim]")
     from .ingestion.massive import crawler_state, adjustment_qa
     cs = crawler_state(store)
@@ -356,15 +360,16 @@ def massive_update(config: str = "configs/default.yaml", universe: str = UNIVERS
 
 @massive_app.command("crawl")
 def massive_crawl(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
-                  once: bool = typer.Option(False, help="drain tiers 0-3 then exit (cron-friendly)"),
+                  once: bool = typer.Option(False, help="drain tiers 0-5 (through extended depth) then exit"),
                   max_calls: int = typer.Option(0, help="stop after N network calls (0 = run forever)"),
                   idle_sleep: float = typer.Option(60.0, help="seconds to sleep when nothing is due")):
     """Continuous prioritised crawl that keeps the 5 req/min budget busy (see `ts massive status`).
 
     Runs forever (systemd unit `massive-crawler.service`): newest bars first, then the
-    2-year backfill, directory/corp actions, universe depth, whole-market depth by
-    liquidity, and an adjustment-maths QA pass; re-reads .env every minute until the
-    key appears. SIGTERM stops cleanly after the current call.
+    2-year backfill, directory/corp actions, universe depth (every article, full corp-action
+    and short-interest/volume history), universe 1-minute bars, extended depth, whole-market
+    depth by liquidity, and an adjustment-maths QA pass; re-reads .env every minute until
+    the key appears. SIGTERM stops cleanly after the current call.
     """
     import time as _time
     from .config import _load_dotenv, find_project_root
@@ -402,6 +407,9 @@ def massive_build(config: str = "configs/default.yaml", universe: str = UNIVERSE
         rprint(f"[yellow]{e}[/yellow]")
     ref = store.build_reference(cfg["universe"]["tickers"])
     rprint(f"[green]reference tables:[/green] {ref or 'none cached yet'}")
+    mb = store.build_minute_bars()
+    if mb:
+        rprint(f"[green]minute bars:[/green] {len(mb)} tickers rebuilt · {sum(mb.values()):,} rows")
 
 
 @massive_app.command("universe")

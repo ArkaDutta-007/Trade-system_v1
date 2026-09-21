@@ -75,9 +75,12 @@ What Arka says → what you run:
   It is the systemd user service `massive-crawler.service` (log
   `~/trade-ops/logs/massive-crawler.log`): `systemctl --user status|restart massive-crawler`.
   It runs FOREVER on purpose — tiers: newest bars → 2y backfill → directory/corp
-  actions → universe depth → whole-market depth → QA — and it shares the 5/min
+  actions → universe depth (every article, full corp-action/short history) →
+  universe 1-MINUTE bars (2y, `bronze/massive/bars_minute/<T>.parquet`) →
+  extended top-1000 depth → whole-market depth → QA — and it shares the 5/min
   limiter with every other Massive call, so never start a second crawler or a
   manual `ts massive backfill` while it runs (they only queue behind each other).
+  Two keys are set (MASSIVE_API_KEY, MASSIVE_API_KEY2 → 10 req/min).
   The 05:15 pipeline's `ts massive update` is a no-op when the crawler is current.
 - "are the tools healthy / run the tests" → `~/Desktop/Trade-system_v1/ops/run_tests.sh`
   (52 unit tests; also runs first in the daily pipeline).
