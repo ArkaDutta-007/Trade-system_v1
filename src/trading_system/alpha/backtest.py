@@ -86,12 +86,14 @@ class ColumnAlpha:
         return today[self.col].fill_null(strategy="zero").to_numpy()
 
 
-def _weight_fn(book: BookConfig, sector_of: dict[str, str], regime: dict | None = None):
-    """``regime``: date → bool (risk-on); None = overlay off."""
+def _weight_fn(book: BookConfig, sector_of: dict[str, str], regime: dict | None = None, stress: dict | None = None):
+    """``regime``: date → bool (trend risk-on); ``stress``: date → gross multiplier; None = that overlay off."""
     def fn(scores, cols, cfg):
         sectors = np.array([sector_of.get(t, "unknown") for t in cols["ticker"]]) if "ticker" in cols else None
-        on = True if regime is None else regime.get(cols.get("date"), True)
-        return target_weights(scores, cols, book, sectors, regime_on=on)
+        d = cols.get("date")
+        on = True if regime is None else regime.get(d, True)
+        gm = 1.0 if stress is None else stress.get(d, 1.0)
+        return target_weights(scores, cols, book, sectors, regime_on=on, gross_mult=gm)
     return fn
 
 
@@ -99,6 +101,14 @@ def regime_map(panel: pl.DataFrame) -> dict:
     from .portfolio import market_regime_on
     m = panel.group_by("date").agg(pl.col("mkt_trend_200").first()).sort("date")
     return {r["date"]: market_regime_on(r["mkt_trend_200"]) for r in m.iter_rows(named=True)}
+
+
+def stress_map(cfg, panel: pl.DataFrame) -> dict:
+    """date → gross multiplier from the point-in-time stress score (regime.gross_multiplier)."""
+    from .regime import build_state, fragility_score, gross_multiplier
+    _, zf = build_state(cfg, panel)
+    f = fragility_score(zf)
+    return {r["date"]: gross_multiplier(r["stress"]) for r in f.iter_rows(named=True)}
 
 
 def eligible_mask(panel: pl.DataFrame, book: BookConfig) -> pl.Expr:

@@ -142,7 +142,12 @@ def test_training_rows_are_purged_and_embargoed():
     cut = 300
     tr = M.training_rows(frame, 21, cut, spec)
     assert tr["didx"].max() <= cut - 21 - 5 and tr["y_21"].is_null().sum() == 0
-    assert set(rcols) == {f + "_r" for f in P.FEATURE_COLS if f in pn.columns}
+    assert set(rcols) == {f + "_r" for f in P.MODEL_FEATURES if f in pn.columns}
+    assert not any(f in P.DATE_LEVEL_FEATURES for f in P.MODEL_FEATURES)
+    # date-level columns, when explicitly requested, pass through raw instead of collapsing to a 0.5 rank
+    fr2, rc2 = M.prepare(pn, ["ret_21", "mkt_vol_21"])
+    assert fr2.filter(pl.col("didx") == 300)["mkt_vol_21_r"].n_unique() == 1
+    assert fr2.filter(pl.col("didx") == 300)["mkt_vol_21_r"][0] == pytest.approx(float(pn.filter(pl.col("date") == fr2.filter(pl.col("didx") == 300)["date"][0])["mkt_vol_21"][0]), rel=1e-5)
     r = frame.filter(pl.col("didx") == 300)["ret_21_r"]
     assert 0 < r.min() and r.max() < 1                                                  # per-date pct ranks
 
@@ -320,3 +325,53 @@ def test_build_book_end_to_end():
     h2 = book2.filter(pl.col("weight") > 0)
     assert "T0" in h2["ticker"].to_list() and "T29" in h2["ticker"].to_list()             # partially in, partially out
     assert h2.filter(pl.col("ticker") == "T29")["weight"][0] < prev["T29"]
+
+
+# ── regime layer ──────────────────────────────────────────────────────────────
+
+def test_regime_standardize_is_expanding_and_similarity_finds_the_lookalike():
+    from trading_system.alpha import regime as R
+    days = _bdays(1200, start=date(2015, 1, 1))
+    rng = np.random.default_rng(0)
+    base = rng.normal(size=(1200, 4))
+    base[600:620] += 3.0                                    # one stress episode
+    base[-1] = base[610]                                    # today looks exactly like the episode
+    rf = pl.DataFrame({"date": days, "vix": base[:, 0], "oil_vol_21": base[:, 1], "baa_spread": base[:, 2], "avg_corr_21": base[:, 3]})
+    zf = R.standardize(rf, min_days=100)
+    z = zf["vix_z"].to_numpy()
+    assert np.isnan(z[:99]).all() and np.isfinite(z[100:]).all()
+    # point-in-time: the z at row i must not change when later rows change
+    rf2 = rf.with_columns(pl.when(pl.col("date") > days[800]).then(pl.col("vix") + 50).otherwise(pl.col("vix")).alias("vix"))
+    z2 = R.standardize(rf2, min_days=100)["vix_z"].to_numpy()
+    assert np.allclose(z[100:800], z2[100:800])
+    an = R.similarity(zf, cols=["vix", "oil_vol_21", "baa_spread", "avg_corr_21"], k=5, exclude_recent_days=30, min_gap_days=5, tau=20)
+    assert an.nearest["date"][0] == days[610] and an.weights["w"].sum() == pytest.approx(1.0)
+    assert (an.weights.filter(pl.col("date") >= days[600]).filter(pl.col("date") <= days[619])["w"].sum()) > 0.5
+
+
+def test_fragility_and_gross_multiplier():
+    from trading_system.alpha import regime as R
+    assert R.gross_multiplier(0.0) == 1.0 and R.gross_multiplier(None) == 1.0
+    assert R.gross_multiplier(1.5) == pytest.approx(0.75) and R.gross_multiplier(3.0) == 0.5
+    days = _bdays(30)
+    zf = pl.DataFrame({"date": days, "vix_z": [2.0] * 30, "mkt_vol_21_z": [0.0] * 30, "oil_level_z_z": [1.0] * 30})
+    f = R.fragility_score(zf)
+    assert f["stress"][0] == pytest.approx(1.0) and f["imbalance"][0] == pytest.approx(1.0) and f["fragility"][0] == pytest.approx(1.0)
+    assert 0.4 < f["crisis_like"][0] < 0.6
+
+
+def test_calibrator_analog_blend_uses_the_weights():
+    led = _synthetic_ledger(n_dates=300)
+    dates = sorted(led["date"].unique().to_list())
+    # analog weights that only see the LAST 100 days, where we make realised returns systematically higher
+    boost = pl.when(pl.col("date") >= dates[200]).then(pl.col("realized_ret") + 0.05).otherwise(pl.col("realized_ret"))
+    led = led.with_columns(realized_ret=boost.cast(pl.Float32))
+    w = pl.DataFrame({"date": dates, "w": [0.0] * 200 + [1.0] * 100})
+    plain = L.Calibrator.fit(led, (21,), window_days=10_000)
+    mixed = L.Calibrator.fit(led, (21,), window_days=10_000, date_weights=w, analog_blend=1.0)
+    s = np.array([0.0])
+    assert mixed.horizons[21].source == "blend" and mixed.horizons[21].ess > 2000
+    assert mixed.horizons[21].expected(s)[0] > plain.horizons[21].expected(s)[0] + 0.03   # analog fit sees the boosted regime
+    half = L.Calibrator.fit(led, (21,), window_days=10_000, date_weights=w, analog_blend=0.5)
+    assert plain.horizons[21].expected(s)[0] < half.horizons[21].expected(s)[0] < mixed.horizons[21].expected(s)[0]
+    assert half.horizons[21].q_hi[2] >= plain.horizons[21].q_hi[2] - 1e-9                # bands never narrower than trailing

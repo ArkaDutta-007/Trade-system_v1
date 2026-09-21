@@ -54,7 +54,14 @@ FUND_FEATURES = [
 NEWS_FEATURES = ["news_n_5", "news_n_21", "news_sent_5", "news_sent_21", "news_n_z"]
 SHORT_FEATURES = ["si_days_to_cover", "si_ratio", "si_chg", "sv_ratio_5"]
 MARKET_FEATURES = ["mkt_ret_21", "mkt_ret_63", "mkt_vol_21", "breadth_200", "dispersion_21", "sector_rel_63"]
-FEATURE_COLS = PRICE_FEATURES + FUND_FEATURES + NEWS_FEATURES + SHORT_FEATURES + MARKET_FEATURES
+from .regime import MACRO_FEATURES  # noqa: E402  (date-level macro/fragility state, see regime.py)
+FEATURE_COLS = PRICE_FEATURES + FUND_FEATURES + NEWS_FEATURES + SHORT_FEATURES + MARKET_FEATURES + MACRO_FEATURES
+# constant within a date → they cannot be within-date ranks. Tested 2003→2026 as raw model inputs: the
+# regime-aware walk-forward was WORSE (63d IC 0.074 → 0.065, ICIR 0.76 → 0.51, paired t −7.8) — the ranker
+# overfits regime-specific cross-sectional patterns it has seen only a handful of times. So they stay in the
+# panel for the regime layer (calibration weights, reporting) but are NOT default model features.
+DATE_LEVEL_FEATURES = [c for c in MARKET_FEATURES if c != "sector_rel_63"] + MACRO_FEATURES
+MODEL_FEATURES = [c for c in FEATURE_COLS if c not in DATE_LEVEL_FEATURES]
 BASE_COLS = ["date", "ticker", "close", "adj_close", "volume", "sector"]
 CONTEXT_COLS = ["mkt_trend_200"]          # kept for the book's regime overlay, NOT a model feature
 
@@ -431,6 +438,11 @@ def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "
     sv = pl.read_parquet(sv_p, columns=["ticker", "date", "short_volume_ratio"]) if sv_p.exists() else None
     panel = _join_short(panel, si, sv)
     panel = market_features(panel)
+    try:
+        from .regime import macro_features_for_panel
+        panel = panel.join(macro_features_for_panel(cfg, panel), on="date", how="left")
+    except Exception as e:                       # macro is an enrichment, never a hard dependency
+        logger.warning(f"panel: macro/regime features unavailable ({str(e)[:100]})")
     panel = add_labels(panel, horizons)
     # tradable-ish rows only (a $1M/day floor keeps the training cross-section honest but broad)
     panel = panel.filter(pl.col("log_dv_21").is_null() | (pl.col("log_dv_21") >= math.log1p(min_dollar_vol)))

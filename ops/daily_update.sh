@@ -159,6 +159,10 @@ digest_step "Survivorship bias check (ts bias-check) — context for every backt
 digest_step "🎯 TOP PICKS — use THIS section for the brief" 600 ts alpha picks --top 20 --compact --prev $OPS/portfolio/books/alpha_v2.json
 digest_step "Alpha book — full table (targets, calibrated E[r], 80% bands, drivers)" 600 ts alpha picks --top 20 --prev $OPS/portfolio/books/alpha_v2.json
 digest_step "Alpha engine — realised forecast skill (ledger tally)" 300 ts alpha status
+# Macro/fragility background: oil, vol, credit, rates, AI concentration → closest
+# historical episodes → how the signal and the book behaved in those backgrounds.
+# The forecast step above already blended this into the calibration.
+digest_step "Regime & fragility — where are we, when was it like this" 300 ts alpha regime --compact
 
 # Previous pick engine, kept as a diagnostic/second opinion only (superseded
 # 2026-09-21: 54-name candidate set, IC 0.011, 20% single-name weights).

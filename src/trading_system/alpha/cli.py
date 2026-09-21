@@ -25,13 +25,14 @@ def _cfg(config: str):
 @alpha_app.command("panel")
 def alpha_panel(config: str = CONFIG_OPT, start: str = typer.Option("1998-01-01", help="first date of the panel")):
     """Build the point-in-time feature panel (prices ⊕ fundamentals ⊕ news ⊕ short data) → data/gold/alpha_panel.parquet."""
-    from .panel import build_panel, save_panel, FEATURE_COLS
+    from .panel import build_panel, save_panel, FEATURE_COLS, MODEL_FEATURES
     cfg = _cfg(config)
     pn = build_panel(cfg, start=start)
     p = save_panel(cfg, pn)
     cov = pn.select([pl.col(c).is_not_null().mean().alias(c) for c in FEATURE_COLS if c in pn.columns]).to_dicts()[0]
     thin = [f"{k} {v:.0%}" for k, v in cov.items() if v < 0.5]
-    rprint(f"[green]panel:[/green] {pn.height:,} rows · {pn['ticker'].n_unique()} tickers · {pn['date'].min()} → {pn['date'].max()} → {p}")
+    rprint(f"[green]panel:[/green] {pn.height:,} rows · {pn['ticker'].n_unique()} tickers · {pn['date'].min()} → {pn['date'].max()} · "
+           f"{len(MODEL_FEATURES)} model features + {len(FEATURE_COLS) - len(MODEL_FEATURES)} regime context columns → {p}")
     if thin:
         rprint(f"[dim]sparse features (expected — younger data sets): {', '.join(thin)}[/dim]")
 
@@ -53,8 +54,10 @@ def alpha_train(config: str = CONFIG_OPT, rounds: int = typer.Option(400), seeds
 
 @alpha_app.command("forecast")
 def alpha_forecast(config: str = CONFIG_OPT, days: int = typer.Option(1, help="score the last N panel dates (fills gaps)"),
-                   window_years: float = typer.Option(3.0, help="calibration window over matured forecasts")):
-    """Score the latest cross-section, recalibrate on the tallied ledger, record live forecasts."""
+                   window_years: float = typer.Option(3.0, help="calibration window over matured forecasts"),
+                   analog_weight: float = typer.Option(0.5, help="blend weight of the regime-analog calibration (0 = off)")):
+    """Score the latest cross-section, recalibrate on the tallied ledger (trailing window ⊕ regime analogs),
+    record live forecasts."""
     from . import ledger as L
     from .model import load_production, models_dir, predict_dates
     from .panel import load_panel
@@ -65,7 +68,17 @@ def alpha_forecast(config: str = CONFIG_OPT, days: int = typer.Option(1, help="s
     scores = predict_dates(pn, models, dates)
     lp = L.ledger_path(cfg)
     led = L.load(lp)
-    cal = L.Calibrator.fit(led, list(models), window_days=int(window_years * 365)) if led.height else L.Calibrator()
+    dw = None
+    if analog_weight > 0 and led.height:
+        try:
+            from .regime import build_state, similarity
+            _, zf = build_state(cfg, pn)
+            an = similarity(zf, as_of=dates[-1])
+            dw = an.weights
+        except Exception as e:
+            rprint(f"[yellow]regime analogs unavailable ({str(e)[:80]}) — trailing calibration only[/yellow]")
+    cal = (L.Calibrator.fit(led, list(models), window_days=int(window_years * 365), date_weights=dw, analog_blend=analog_weight)
+           if led.height else L.Calibrator())
     cal.save(models_dir(cfg) / "calibration.json")
     rows = cal.apply(scores).join(pn.select("date", "ticker", entry_price=pl.col("adj_close").cast(pl.Float32)),
                                   on=["date", "ticker"], how="left").with_columns(mode=pl.lit("live"))
@@ -75,7 +88,8 @@ def alpha_forecast(config: str = CONFIG_OPT, days: int = typer.Option(1, help="s
            f"({scores['ticker'].n_unique()} tickers × {len(models)} horizons) → {lp}")
     if cal.horizons:
         rprint("[bold]recalibrated[/bold] on matured ledger rows: " + " · ".join(
-            f"{h}d IC {c.ic:+.3f} (n={c.n:,}, w={w.get(h, 0):.2f})" for h, c in sorted(cal.horizons.items())))
+            f"{h}d IC {c.ic:+.3f}" + (f" (analog {c.ic_analog:+.3f}, ESS {c.ess:,.0f})" if c.ic_analog is not None else "")
+            + f" w={w.get(h, 0):.2f}" for h, c in sorted(cal.horizons.items())))
     else:
         rprint("[yellow]no matured forecasts yet — expected returns/bands are null until the ledger has history "
                "(run `ts alpha backtest` once to seed it)[/yellow]")
@@ -235,6 +249,71 @@ def alpha_picks(config: str = CONFIG_OPT, top: int = typer.Option(20), compact: 
     if json_out:
         p = write_targets_json(cfg, Path(json_out), top)
         rprint(f"[dim]targets → {p}[/dim]")
+
+
+@alpha_app.command("regime")
+def alpha_regime(config: str = CONFIG_OPT, k: int = typer.Option(10, help="nearest analog dates to show"),
+                 compact: bool = typer.Option(False, help="digest-sized summary")):
+    """Where are we (oil, vol, credit, rates, concentration), which past episodes look like today, and what the
+    signal and the book did in those backgrounds — the inputs to the regime-aware recalibration."""
+    from . import ledger as L
+    from .panel import load_panel
+    from .regime import (EPISODES, STRESS_COLS, IMBALANCE_COLS, REGIME_COLS, build_state, conditional_forward,
+                         conditional_skill, fragility_score, gross_multiplier, similarity)
+    cfg = _cfg(config)
+    pn = load_panel(cfg)
+    rf, zf = build_state(cfg, pn)
+    an = similarity(zf, k=k)
+    fr = fragility_score(zf).drop_nulls("stress")
+    today_f = fr.tail(1).row(0, named=True)
+    pct = float((fr["stress"] <= today_f["stress"]).mean())
+    st = an.state
+    def z(c):
+        v = st.get(c + "_z"); return "—" if v is None else f"{v:+.1f}"
+    def raw(c, fmt=".2f"):
+        v = st.get(c); return "—" if v is None else format(v, fmt)
+    rprint(f"[bold]Regime as of {an.as_of}[/bold] · stress {today_f['stress']:+.2f} (pct {pct:.0%}) · imbalance {today_f['imbalance']:+.2f} · "
+           f"fragility {today_f['fragility']:+.2f} · gross multiplier if the stress overlay were on: {gross_multiplier(today_f['stress']):.2f}")
+    rprint(f"  equity vol: VIX {raw('vix', '.1f')} (z {z('vix')}) · VXN/VIX {raw('vxn_vix')} · mkt vol {raw('mkt_vol_21', '.0%')} (z {z('mkt_vol_21')}) · "
+           f"avg corr {raw('avg_corr_21')} (z {z('avg_corr_21')}) · breadth {raw('breadth_200', '.0%')} · drawdown {raw('mkt_dd_252', '.1%')}")
+    rprint(f"  oil: WTI level z {raw('oil_level_z', '+.1f')} · 63d {raw('oil_ret_63', '+.0%')} (z {z('oil_ret_63')}) · realised vol {raw('oil_vol_21', '.0%')} (z {z('oil_vol_21')}) · OVX {raw('ovx', '.0f')} (z {z('ovx')})")
+    rprint(f"  credit/rates: Baa spread {raw('baa_spread')} (z {z('baa_spread')}, 63d Δ {raw('baa_chg_63', '+.2f')}) · curve 10y-3m {raw('curve_10y3m', '+.2f')} · "
+           f"real 10y {raw('real10')} (z {z('real10')}) · 10y 63d Δ {raw('ust10_chg_63', '+.2f')} · breakeven {raw('breakeven10')} · dollar 63d {raw('dollar_ret_63', '+.1%')}")
+    rprint(f"  AI/tech: basket vol {raw('ai_vol_21', '.0%')} (z {z('ai_vol_21')}) · basket 63d {raw('ai_ret_63', '+.1%')} vs market {raw('ai_rel_63', '+.1%')} · "
+           f"share of $volume {raw('ai_share', '.0%')} (z {z('ai_share')}) · Nasdaq rel. 252d {raw('nasdaq_rel_252', '+.1%')} · Nasdaq drawdown {raw('nasdaq_dd', '.1%')}")
+    if an.episodes.height:
+        rprint("[bold]closest historical episodes[/bold] (kernel similarity, 1 = identical background)")
+        for r in an.episodes.head(6).iter_rows(named=True):
+            rprint(f"  {r['similarity']:.2f}  {r['episode']:<24} {r['from']} → {r['to']}  {r['what']}")
+        far = an.episodes.tail(3)
+        rprint("  least similar: " + ", ".join(f"{r['episode']} {r['similarity']:.2f}" for r in far.iter_rows(named=True)))
+    if not compact:
+        rprint("[bold]nearest analog days[/bold]: " + ", ".join(
+            f"{r['date']}{(' [' + r['episode'] + ']') if r['episode'] else ''} ({r['dist']:.2f})" for r in an.nearest.iter_rows(named=True)))
+    led = L.load(L.ledger_path(cfg))
+    if led.height:
+        for h in (21, 63):
+            cs = conditional_skill(led, an.weights, h)
+            if cs:
+                rprint(f"[bold]signal in analog backgrounds[/bold] {h}d rank-IC {cs['ic_analog']:+.3f} vs unconditional {cs['ic_uncond']:+.3f} "
+                       f"(effective analog days {cs['effective_analog_days']:.0f})")
+    curve = cfg.path("reports") / "alpha" / "daily_alpha_book.parquet"
+    if curve.exists():
+        d = pl.read_parquet(curve)
+        cf = conditional_forward(d, an.weights, 63)
+        if cf:
+            rprint(f"[bold]book in analog backgrounds[/bold] next-63d return: mean {cf['fwd_mean_analog']:+.1%} (median {cf['fwd_median_analog']:+.1%}, "
+                   f"worst decile {cf['fwd_q10_analog']:+.1%}) vs unconditional {cf['fwd_mean_uncond']:+.1%} · mean drawdown inside the window "
+                   f"{cf['mdd_mean_analog']:.1%} vs {cf['mdd_mean_uncond']:.1%}")
+    cp = __import__("trading_system.alpha.model", fromlist=["models_dir"]).models_dir(cfg) / "calibration.json"
+    if cp.exists():
+        cal = L.Calibrator.load(cp)
+        parts = []
+        for h, c in sorted(cal.horizons.items()):
+            if c.ic_analog is not None:
+                parts.append(f"{h}d trailing IC {c.ic:+.3f} / analog {c.ic_analog:+.3f}")
+        if parts:
+            rprint("[bold]calibration in use[/bold] (blend of trailing window and analog-weighted fit): " + " · ".join(parts))
 
 
 @alpha_app.command("status")

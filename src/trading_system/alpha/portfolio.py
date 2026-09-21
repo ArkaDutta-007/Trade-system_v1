@@ -45,6 +45,8 @@ class BookConfig:
     trade_rate: float = 0.35         # partial trading toward target per rebalance
     no_trade_band: float = 0.20      # skip trades smaller than this fraction of the target weight
     regime_scale: float = 0.5        # gross multiplier when the market trend is "off" (1.0 = no overlay)
+    stress_overlay: bool = False     # also scale gross by the stress score — tested 2004→26: adds nothing over the trend rule
+    min_gross_mult: float = 0.35     # floor for the combined overlay multiplier
 
 
 def portfolio_vol(w: np.ndarray, dvol: np.ndarray, avg_corr: float) -> float:
@@ -69,12 +71,13 @@ def _cap(w: np.ndarray, cap: float, rounds: int = 10) -> np.ndarray:
 
 
 def target_weights(scores: np.ndarray, cols: dict, cfg: BookConfig, sectors: np.ndarray | None = None,
-                   regime_on: bool = True) -> np.ndarray:
+                   regime_on: bool = True, gross_mult: float = 1.0) -> np.ndarray:
     """Scores + per-name context → target weights (same length as ``scores``).
 
     ``cols`` needs ``dvol`` (daily return vol); ``adv`` and ``price`` are used for the gates when
     present (the research simulator applies its own gates before calling). ``regime_on=False``
-    multiplies the gross by ``cfg.regime_scale`` (a market-regime overlay decided by the caller).
+    multiplies the gross by ``cfg.regime_scale`` (the trend overlay) and ``gross_mult`` by the caller's
+    stress/fragility multiplier; the product is floored at ``cfg.min_gross_mult``.
     """
     s = np.asarray(scores, dtype=float)
     dvol = np.asarray(cols["dvol"], dtype=float)
@@ -117,9 +120,9 @@ def target_weights(scores: np.ndarray, cols: dict, cfg: BookConfig, sectors: np.
         pv = portfolio_vol(w, dvol, cfg.avg_corr)
         if pv > cfg.vol_target:
             w = w * (cfg.vol_target / pv)
-    if not regime_on:
-        w = w * cfg.regime_scale
-    return w
+    mult = (cfg.regime_scale if not regime_on else 1.0) * float(gross_mult)
+    mult = max(min(mult, 1.0), cfg.min_gross_mult) if mult < 1.0 else 1.0
+    return w * mult
 
 
 def partial_rebalance(current: np.ndarray, target: np.ndarray, cfg: BookConfig) -> np.ndarray:
@@ -143,14 +146,14 @@ def market_regime_on(mkt_trend_200: float | None) -> bool:
 
 
 def build_book(today: pl.DataFrame, cfg: BookConfig, prev: dict[str, float] | None = None,
-               regime_on: bool = True) -> pl.DataFrame:
+               regime_on: bool = True, gross_mult: float = 1.0) -> pl.DataFrame:
     """One date's cross-section (``ticker, composite, dvol, adv, price, sector, exp_ret?, q10?, q90?``)
     → target + traded weights. ``prev`` = current weights by ticker (for partial trading)."""
     t = today.sort("ticker")
     scores = t["composite"].to_numpy()
     cols = {"dvol": t["dvol"].to_numpy(), "adv": t["adv"].to_numpy(), "price": t["price"].to_numpy()}
     sectors = t["sector"].to_numpy() if "sector" in t.columns else None
-    tgt = target_weights(scores, cols, cfg, sectors, regime_on=regime_on)
+    tgt = target_weights(scores, cols, cfg, sectors, regime_on=regime_on, gross_mult=gross_mult)
     tickers = t["ticker"].to_list()
     cur = np.array([float((prev or {}).get(tk, 0.0)) for tk in tickers])
     new = partial_rebalance(cur, tgt, cfg) if prev is not None else tgt

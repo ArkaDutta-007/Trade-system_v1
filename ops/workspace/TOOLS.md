@@ -61,6 +61,14 @@ What Arka says → what you run:
   2003→), the calibrator's horizon weights, and the rolling 63-date IC. A
   rolling IC that sits below zero for weeks means the signal has decayed —
   say so in the brief; the calibrator already down-weights that horizon.
+- "what regime are we in / is this like 2008 / oil shock / AI bubble" → `~/ops/bin/ts-run alpha regime`
+  Oil, vol, credit, rates, AI-concentration state (z-scores), the closest
+  historical episodes (Gulf War, dot-com, 2008, 2022, tariff shock 2025 …)
+  with similarity scores, and how the forecast signal and the book did in
+  those backgrounds. The daily forecast already blends an analog-weighted
+  calibration (50/50 with the trailing 3y) — so "recalibrated for the regime"
+  is automatic; quote the analog-vs-unconditional IC when asked how much to
+  trust the picks right now.
 - "backtest the alpha engine" → `~/ops/bin/ts-run --timeout 3600 alpha backtest --extend`
   (weekly via cron `trade-weekly-retrain`; the report is
   `~/Desktop/Trade-system_v1/reports/alpha/backtest.md`). Read the

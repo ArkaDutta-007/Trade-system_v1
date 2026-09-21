@@ -26,7 +26,7 @@ import numpy as np
 import polars as pl
 
 from ..utils import get_logger
-from .panel import FEATURE_COLS, HORIZONS
+from .panel import DATE_LEVEL_FEATURES, FEATURE_COLS, HORIZONS, MODEL_FEATURES
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ class TrainSpec:
     half_life_days: float = 252 * 10       # time-decay of sample weights (0 = flat)
     max_train_rows: int = 2_500_000
     device: str = "auto"                   # auto | cuda | cpu
-    features: tuple[str, ...] = tuple(FEATURE_COLS)
+    features: tuple[str, ...] = tuple(MODEL_FEATURES)   # cross-sectional only; see panel.DATE_LEVEL_FEATURES
 
     def stride_for(self, h: int) -> int:
         return int(self.stride.get(h, max(1, h // 4)))
@@ -67,14 +67,18 @@ def resolve_device(pref: str = "auto") -> str:
 
 # ── feature preparation ───────────────────────────────────────────────────────
 
-def prepare(panel: pl.DataFrame, features: Iterable[str] = FEATURE_COLS) -> tuple[pl.DataFrame, list[str]]:
-    """Add per-date rank columns ``<f>_r`` ∈ (0, 1) for every feature (nulls stay null) and a
-    trading-day index ``didx``. Returns (frame, rank column names)."""
+def prepare(panel: pl.DataFrame, features: Iterable[str] = MODEL_FEATURES) -> tuple[pl.DataFrame, list[str]]:
+    """Add ``<f>_r`` columns: per-date pct ranks ∈ (0, 1) for cross-sectional features, the raw value for
+    date-level (market/macro) features — a within-date rank of a date-constant is 0.5 everywhere, which is
+    how the first version of this engine silently threw its market context away. Plus ``didx``."""
     feats = [f for f in features if f in panel.columns]
     dates = panel.select("date").unique().sort("date").with_row_index("didx")
     out = panel.join(dates, on="date", how="left")
+    xs = [f for f in feats if f not in DATE_LEVEL_FEATURES]
+    dl = [f for f in feats if f in DATE_LEVEL_FEATURES]
     out = out.with_columns([((pl.col(f).rank(method="average").over("date") - 0.5) / pl.col(f).count().over("date"))
-                            .cast(pl.Float32).alias(f + RANK_SUFFIX) for f in feats])
+                            .cast(pl.Float32).alias(f + RANK_SUFFIX) for f in xs]
+                           + [pl.col(f).cast(pl.Float32).alias(f + RANK_SUFFIX) for f in dl])   # raw, same suffix
     return out, [f + RANK_SUFFIX for f in feats]
 
 

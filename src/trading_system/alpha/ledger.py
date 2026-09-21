@@ -188,6 +188,13 @@ def rolling_ic(led: pl.DataFrame, horizon: int, window_dates: int = 63, mode: st
 
 # ── calibration (the feedback loop) ───────────────────────────────────────────
 
+def _wquantile(v: np.ndarray, w: np.ndarray, q: float) -> float:
+    """Weighted quantile (weights need not be normalised)."""
+    order = np.argsort(v)
+    cw = np.cumsum(w[order])
+    return float(v[order][min(int(np.searchsorted(cw, q * cw[-1])), len(v) - 1)])
+
+
 @dataclass
 class HorizonCalibration:
     horizon: int
@@ -199,6 +206,27 @@ class HorizonCalibration:
     ic: float = 0.0                # trailing mean rank-IC used for skill weighting
     n: int = 0
     fitted_through: str | None = None
+    source: str = "trailing"       # trailing | analog | blend
+    ic_analog: float | None = None # analog-weighted IC (when blended)
+    ess: float | None = None       # effective sample size of the analog weights
+
+    def blend(self, other: "HorizonCalibration", lam: float) -> "HorizonCalibration":
+        """(1−λ)·self + λ·other on self's breakpoints; bands take the wider side of the two."""
+        xs = np.asarray(self.x)
+        y = (1 - lam) * np.asarray(self.y) + lam * other.expected(xs)
+        lo_s, hi_s = np.asarray(self.q_lo), np.asarray(self.q_hi)
+        # re-express the other's quintile bands on our quintiles: evaluate at one representative score per quintile
+        e = np.asarray(self.quintile_edges)
+        mids = np.array([xs[0], (e[0] + e[1]) / 2, (e[1] + e[2]) / 2, (e[2] + e[3]) / 2, xs[-1]]) if len(e) == 4 \
+            else np.linspace(xs[0], xs[-1], 5)
+        lo_o = np.array([other.band(np.array([m]))[0][0] - other.expected(np.array([m]))[0] for m in mids])
+        hi_o = np.array([other.band(np.array([m]))[1][0] - other.expected(np.array([m]))[0] for m in mids])
+        q_lo = np.minimum(lo_s, (1 - lam) * lo_s + lam * lo_o)
+        q_hi = np.maximum(hi_s, (1 - lam) * hi_s + lam * hi_o)
+        return HorizonCalibration(self.horizon, [float(v) for v in xs], [float(v) for v in y], [float(v) for v in q_lo],
+                                  [float(v) for v in q_hi], list(self.quintile_edges),
+                                  ic=(1 - lam) * self.ic + lam * other.ic, n=self.n, fitted_through=self.fitted_through,
+                                  source="blend", ic_analog=other.ic, ess=other.ess)
 
     def expected(self, score: np.ndarray) -> np.ndarray:
         return np.interp(score, self.x, self.y, left=self.y[0], right=self.y[-1]).astype(np.float32)
@@ -219,8 +247,10 @@ class Calibrator:
 
     @classmethod
     def fit(cls, led: pl.DataFrame, horizons: Iterable[int], window_days: int = 365 * 3,
-            until: date | None = None, mode: str | None = None, min_rows: int = 5000) -> "Calibrator":
-        from sklearn.isotonic import IsotonicRegression
+            until: date | None = None, mode: str | None = None, min_rows: int = 5000,
+            date_weights: pl.DataFrame | None = None, analog_blend: float = 0.0) -> "Calibrator":
+        """Trailing-window calibration; with ``date_weights`` (``date, w`` — regime-analog kernel weights over
+        the whole matured history) an analog-weighted fit is blended in with weight ``analog_blend``."""
         cal = cls(window_days=window_days, min_rows=min_rows)
         m = led.filter(pl.col("realized_ret").is_not_null())
         if mode:
@@ -232,24 +262,22 @@ class Calibrator:
             if mh.height == 0:
                 continue
             last = mh["date"].max()
-            mh = mh.filter(pl.col("date") >= last - timedelta(days=window_days))
-            if mh.height < cal.min_rows:
-                logger.warning(f"calibrator h={h}: only {mh.height} matured rows in window — skipping")
+            win = mh.filter(pl.col("date") >= last - timedelta(days=window_days))
+            if win.height < cal.min_rows:
+                logger.warning(f"calibrator h={h}: only {win.height} matured rows in window — skipping")
                 continue
-            s = mh["score"].to_numpy().astype(np.float64)
-            r = np.clip(mh["realized_ret"].to_numpy().astype(np.float64), -0.95, 5.0)
-            iso = IsotonicRegression(increasing=True, out_of_bounds="clip").fit(s, r)
-            xs = np.quantile(s, np.linspace(0, 1, 41))
-            ys = iso.predict(xs)
-            resid = r - iso.predict(s)
-            edges = np.quantile(s, [0.2, 0.4, 0.6, 0.8])
-            q = np.searchsorted(edges, s, side="right")
-            q_lo = [float(np.quantile(resid[q == i], 0.10)) if (q == i).sum() > 50 else float(np.quantile(resid, 0.10)) for i in range(5)]
-            q_hi = [float(np.quantile(resid[q == i], 0.90)) if (q == i).sum() > 50 else float(np.quantile(resid, 0.90)) for i in range(5)]
-            ic = _spearman_by_date(mh, "score", "realized_ret")["ic"]
-            cal.horizons[h] = HorizonCalibration(h, [float(v) for v in xs], [float(v) for v in ys], q_lo, q_hi,
-                                                 [float(v) for v in edges], float(ic.mean()) if ic.len() else 0.0,
-                                                 int(mh.height), str(last))
+            trailing = _fit_horizon(win, h, str(last))
+            if date_weights is not None and analog_blend > 0:
+                wa = mh.join(date_weights.select("date", "w"), on="date", how="inner").filter(pl.col("w") > 0)
+                w = wa["w"].to_numpy().astype(np.float64) if wa.height else np.array([])
+                ess = float(w.sum() ** 2 / max((w ** 2).sum(), 1e-12)) if len(w) else 0.0
+                if ess >= 2000:
+                    analog = _fit_horizon(wa, h, str(last), weights=w)
+                    analog.source, analog.ess = "analog", ess
+                    trailing = trailing.blend(analog, float(analog_blend))
+                else:
+                    logger.warning(f"calibrator h={h}: analog weights too thin (ESS {ess:.0f}) — trailing only")
+            cal.horizons[h] = trailing
         return cal
 
     def apply(self, scores: pl.DataFrame) -> pl.DataFrame:
@@ -280,7 +308,8 @@ class Calibrator:
     def to_json(self) -> dict:
         return {"window_days": self.window_days,
                 "horizons": {str(h): {"x": c.x, "y": c.y, "q_lo": c.q_lo, "q_hi": c.q_hi, "quintile_edges": c.quintile_edges,
-                                      "ic": c.ic, "n": c.n, "fitted_through": c.fitted_through} for h, c in self.horizons.items()}}
+                                      "ic": c.ic, "n": c.n, "fitted_through": c.fitted_through, "source": c.source,
+                                      "ic_analog": c.ic_analog, "ess": c.ess} for h, c in self.horizons.items()}}
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,8 +321,42 @@ class Calibrator:
         cal = cls(window_days=d.get("window_days", 365 * 3))
         for h, c in d["horizons"].items():
             cal.horizons[int(h)] = HorizonCalibration(int(h), c["x"], c["y"], c["q_lo"], c["q_hi"], c["quintile_edges"],
-                                                      c.get("ic", 0.0), c.get("n", 0), c.get("fitted_through"))
+                                                      c.get("ic", 0.0), c.get("n", 0), c.get("fitted_through"),
+                                                      c.get("source", "trailing"), c.get("ic_analog"), c.get("ess"))
         return cal
+
+
+def _fit_horizon(mh: pl.DataFrame, h: int, last: str, weights: np.ndarray | None = None) -> HorizonCalibration:
+    """Isotonic score → return plus per-quintile conformal residual bands, optionally sample-weighted."""
+    from sklearn.isotonic import IsotonicRegression
+    s = mh["score"].to_numpy().astype(np.float64)
+    r = np.clip(mh["realized_ret"].to_numpy().astype(np.float64), -0.95, 5.0)
+    w = np.ones_like(s) if weights is None else np.asarray(weights, dtype=np.float64)
+    iso = IsotonicRegression(increasing=True, out_of_bounds="clip").fit(s, r, sample_weight=w)
+    xs = np.array([_wquantile(s, w, q) for q in np.linspace(0, 1, 41)])
+    ys = iso.predict(xs)
+    resid = r - iso.predict(s)
+    edges = np.array([_wquantile(s, w, q) for q in (0.2, 0.4, 0.6, 0.8)])
+    qb = np.searchsorted(edges, s, side="right")
+    q_lo, q_hi = [], []
+    for i in range(5):
+        sel = qb == i
+        if w[sel].sum() > 50:
+            q_lo.append(_wquantile(resid[sel], w[sel], 0.10)); q_hi.append(_wquantile(resid[sel], w[sel], 0.90))
+        else:
+            q_lo.append(_wquantile(resid, w, 0.10)); q_hi.append(_wquantile(resid, w, 0.90))
+    ic = _spearman_by_date(mh, "score", "realized_ret")
+    if weights is not None and ic.height:
+        dw = mh.select("date", "w").unique(subset=["date"]) if "w" in mh.columns else None
+        if dw is not None:
+            ic = ic.join(dw, on="date", how="left")
+            icv = float((ic["ic"] * ic["w"]).sum() / max(float(ic["w"].sum()), 1e-12))
+        else:
+            icv = float(ic["ic"].mean())
+    else:
+        icv = float(ic["ic"].mean()) if ic.height else 0.0
+    return HorizonCalibration(h, [float(v) for v in xs], [float(v) for v in ys], q_lo, q_hi, [float(v) for v in edges],
+                              icv, int(mh.height), last)
 
 
 def composite_score(scores: pl.DataFrame, weights: dict[int, float]) -> pl.DataFrame:

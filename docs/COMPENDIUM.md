@@ -829,6 +829,45 @@ honour the gross the weight function asked for (opt-in; the lab's numbers used
 the old behaviour). Symbol reuse in the free price feeds (SOLS ×487,399 in a
 day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
 
+* **Regime / fragility layer** (`regime.py`, `ts alpha regime`, 2026-09-21).
+  A daily state vector since 1990 — VIX/VXN, WTI/Brent level and realised
+  vol, OVX, Baa–10y credit, 10y–3m curve, real 10y, breakevens, dollar,
+  Nasdaq relative strength and drawdown (the dot-com fingerprint), plus from
+  the panel: market drawdown/vol/trend/breadth/dispersion, average pairwise
+  correlation and an **AI basket** (semis + AI cloud + hyperscalers) vol,
+  momentum and share of volume. Everything lagged a session and z-scored on
+  an *expanding* window (point-in-time). FRED series are cached under
+  `data/silver/regime/` and refreshed daily (`FRED_API_KEY`).
+  - **Analogs**: NaN-aware distance from today's z-vector to every past day;
+    rank-based weights `w ∝ exp(−rank/252)`; a similarity score per curated
+    episode (Gulf War 1990, LTCM, dot-com, 9/11, Iraq, 2008-H1 oil spike,
+    GFC, euro 2011, oil crash 2014-16, China 2015, Q4 2018, Covid, 2022
+    inflation/Ukraine, SVB, tariff shock 2025, Israel–Iran oil 2025).
+  - **Conditional evidence**: the backtest ledger's rank-IC and the book's
+    next-63-day return / drawdown distribution *in the analog days*, next to
+    the unconditional numbers (`conditional_skill`, `conditional_forward`).
+  - **Recalibration**: `ts alpha forecast` fits the calibrator twice — on the
+    trailing 3 years and on the whole matured history *weighted by analog
+    similarity* (weighted isotonic + weighted conformal quantiles) — and
+    blends them 50/50 (`--analog-weight`); bands take the wider side; horizon
+    weights follow the blended IC. First live reading (2026-09-18: Brent
+    $131, OVX 52, VIX 15, AI share of volume z +2.4): closest episodes
+    Israel–Iran oil 2025, tariff shock 2025, SVB, Q4 2018, 2022; in those
+    backgrounds the 21d IC was +0.008 vs +0.046 unconditional while the 63d
+    IC held (+0.070 vs +0.074) → the 21d horizon's vote fell from 0.28 to
+    0.23 and 63d rose to 0.63.
+  - **Model context**: nine date-level macro columns (`MACRO_FEATURES`) are
+    fed to the forecaster *raw* — `model.prepare` now rank-transforms only
+    cross-sectional features (a within-date rank of a date-constant is 0.5
+    everywhere, which is how the first version silently discarded its market
+    context).
+  - **Stress overlay**: `fragility_score` (stress = VIX, oil vol, OVX, credit
+    Δ, correlation, market vol; imbalance = oil level, real rates, rate Δ, AI
+    share, Nasdaq relative, AI vol) and `gross_multiplier` exist and are
+    reported, but the overlay is **off** by default: on 2004→26 it added
+    nothing over the 200-day trend rule (Sharpe 1.13 → 1.13, MaxDD −33 →
+    −32%), because partial trading already lags exposure changes.
+
 Tests: `tests/unit/test_alpha.py` (hand-checked features, backward-looking
 guarantee, PIT joins, purge/embargo, planted-signal recovery through the
 causal walk, ledger tally incl. delistings, calibrator monotonicity and band
