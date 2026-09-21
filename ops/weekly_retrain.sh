@@ -26,6 +26,12 @@ source venv/bin/activate
 echo "=== weekly retrain start $(date -Is) ===" >> "$LOG"
 timeout 14400 python3 $CODE/research/deploy.py >> "$LOG" 2>&1
 RC=$?
+# Alpha engine v2: refit the production forecasters on every matured label and
+# extend the causal walk-forward (new dates only) so the backtest report and the
+# ledger's calibration keep up with the live period. ~5 min on the GPU.
+echo "--- ts alpha train + backtest --extend ($(date -Is)) ---" >> "$LOG"
+timeout 3600 ts alpha train >> "$LOG" 2>&1 || echo "ts alpha train FAILED rc=$?" >> "$LOG"
+timeout 3600 ts alpha backtest --extend >> "$LOG" 2>&1 || echo "ts alpha backtest FAILED rc=$?" >> "$LOG"
 echo "=== weekly retrain done rc=$RC $(date -Is) ===" >> "$LOG"
 
 # quick post-deploy sanity: newest registry entry + a one-line backtest health

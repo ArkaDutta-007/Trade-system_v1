@@ -44,19 +44,35 @@ What Arka says → what you run:
   Override recipients for a one-off with BRIEF_RECIPIENTS="a@b,c@d".
 - "how is the model doing / model backtest" → `~/Desktop/Trade-system_v1/venv/bin/python3 ~/Desktop/Trade-system_v1/ops/research/daily_ml_backtest.py`
   (also a section in the daily digest; watch the "last 63d" decay flag)
-- "picks" / "good picks" → prefer **v2**:
-  `~/Desktop/Trade-system_v1/venv/bin/python3 ~/Desktop/Trade-system_v1/ops/portfolio/picks_v2.py --top 10   (add --compact for the phone card)`
-  Raw `ts picks` ranks on unadjusted score and measurably prefers volatile,
-  illiquid names (corr(score,vol)=+0.22, corr(score,$vol)=−0.19) — it returned
-  $1 stocks trading $92k/day. v2 adds price/liquidity/vol gates, ranks by
-  score/vol^0.5, and caps names per theme. `--compare` shows v1 vs v2.
+- "picks" / "good picks" / "the book" → **the alpha engine v2 book** (since 2026-09-21):
+  `~/ops/bin/ts-run alpha picks --top 20 --compact --prev ~/trade-ops/portfolio/books/alpha_v2.json`
+  (drop `--compact` for the full table with calibrated expected returns, 80%
+  bands and the model drivers per name; `--budget 10000` prints share counts).
+  It is a 1000-name point-in-time panel → 5/21/63-day rank forecasters blended
+  by their realised IC from the forecast ledger → gated (≥$5, ≥$20M/day, vol
+  ≤110%), ≤5 per sector, inverse-vol weighted, 8% cap, 18% vol target, traded
+  35% of the way toward target per month against the `alpha_v2` paper book.
+  Explanations: docs/COMPENDIUM.md §13a. Older engines are diagnostics only:
+  `picks_v2.py` (the 2026-09 gated version) and raw `ts picks` (prefers
+  volatile illiquid names — never use it for the brief).
+- "is the model any good / forecast skill / how accurate" → `~/ops/bin/ts-run alpha status`
+  Prints the realised rank-IC / hit rate / decile spread / band coverage of
+  every forecast the engine has made (live rows since 2026-09-21, backtest rows
+  2003→), the calibrator's horizon weights, and the rolling 63-date IC. A
+  rolling IC that sits below zero for weeks means the signal has decayed —
+  say so in the brief; the calibrator already down-weights that horizon.
+- "backtest the alpha engine" → `~/ops/bin/ts-run --timeout 3600 alpha backtest --extend`
+  (weekly via cron `trade-weekly-retrain`; the report is
+  `~/Desktop/Trade-system_v1/reports/alpha/backtest.md`). Read the
+  "Read this before believing any of it" section before quoting numbers.
 - "how are the paper books / which strategy is winning" →
   `… ~/Desktop/Trade-system_v1/ops/portfolio/portfolios.py --report`
-  Six competing $10k books. Five seeded 2026-09-08 (spy_benchmark, ml_raw,
-  ml_v2, momentum, blend, monthly full rebalance) plus **ml_v2_gp** seeded
-  2026-09-16 — the research winner xgb63|gp35: 63d model, top-20, 10% cap,
-  Garleanu-Pedersen partial trading at 0.35. Ignore the ranking until ~60
-  sessions.
+  Seven competing $10k books. Five seeded 2026-09-08 (spy_benchmark, ml_raw,
+  ml_v2, momentum, blend, monthly full rebalance), **ml_v2_gp** seeded
+  2026-09-16 (research winner xgb63|gp35: 63d model, top-20, 10% cap,
+  Garleanu-Pedersen partial trading at 0.35) and **alpha_v2** seeded
+  2026-09-21 (the alpha engine book, same GP execution — the two differ only
+  in the signal). Ignore the ranking until ~60 sessions.
 - "backtest the pick rules" → `… ~/Desktop/Trade-system_v1/ops/portfolio/backtest_v2.py --top 10`
 - "flags" / "why is the composite X" → `… ~/Desktop/Trade-system_v1/ops/flags/auto_flags.py` prints
   all five with their scores; the board itself is

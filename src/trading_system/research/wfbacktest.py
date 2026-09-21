@@ -122,6 +122,11 @@ class WalkForwardConfig:
     band_exit: float = 0.0
     partial_trade_rate: float = 1.0   # 1.0 = go all the way to target
     min_position_weight: float = 0.005  # below this an unwanted holding is closed
+    # False (historical behaviour): the tradable book is always renormalised to ``gross_exposure``,
+    # so a weight vector summing to less than that — a vol-targeted or regime-scaled target, or a
+    # partial trade away from cash — is silently levered back up. True: the gross the weight
+    # function (and partial trading) asked for is respected and the remainder stays in cash.
+    respect_target_gross: bool = False
     cost: RealisticCostModel = field(default_factory=RealisticCostModel)
 
     initial_cash: float = 1_000_000.0
@@ -446,7 +451,8 @@ def run_walk_forward(
             # not exist.
             tradable = panel.alive[i]
             frozen_w = np.where(tradable, 0.0, cur_w)
-            budget = max(cfg.gross_exposure - frozen_w.sum(), 0.0)
+            intended = min(float(w_adj.sum()), cfg.gross_exposure) if cfg.respect_target_gross else cfg.gross_exposure
+            budget = max(intended - frozen_w.sum(), 0.0)
             w_adj = np.where(tradable, w_adj, 0.0)
             tot = w_adj.sum()
             if tot > 1e-9:
@@ -510,7 +516,8 @@ def run_walk_forward(
                         raw = np.where(liq, raw, np.nan)
                         w_sub = weight_fn(
                             raw,
-                            {"dvol": panel.dvol[i, cidx], "adv": panel.adv[i, cidx]},
+                            {"dvol": panel.dvol[i, cidx], "adv": panel.adv[i, cidx],
+                             "price": panel.price[i, cidx], "ticker": panel.tickers[cidx], "date": d},
                             cfg,
                         )
                         w_full = np.zeros(N)

@@ -25,6 +25,7 @@ operational gotchas. Companion to the [README](../README.md) and the auto-genera
 11. [Decision pipeline](#11-decision-pipeline)
 12. [Playbook engine](#12-playbook-engine)
 13. [Backtesting & leakage tests](#13-backtesting--leakage-tests)
+13a. [Alpha engine v2 (`alpha/`, V5.2)](#13a-alpha-engine-v2-alpha-v52--forecast-ledger-continuous-learning-causal-backtest)
 14. [LLM layer (DeepSeek + RAG)](#14-llm-layer-deepseek--rag)
 15. [Compute & hardware layer](#15-compute--hardware-layer)
 16. [Parallelism map](#16-parallelism-map)
@@ -744,6 +745,94 @@ A decision-tree playbook encoded in `configs/playbook_v2.yaml`.
   (peeking forward should *not* improve Sharpe), `signal_delay_test` (extra delay
   should degrade gracefully), `label_shuffle_test` (shuffled weights → Sharpe ~0).
 * Golden-file backtest regression + data-quality + integration suites.
+
+---
+
+## 13a. Alpha engine v2 (`alpha/`, V5.2) — forecast ledger, continuous learning, causal backtest
+
+Built 2026-09-21 because the pick path above was measurably not working: the
+252d model's realised IC was 0.011, `ts picks` only ever ranked the ~54 names
+with a positive neutralised score, `compute_bounds` made picks take 15 minutes,
+and the HRP step produced 20% single-name weights. The engine is a separate,
+self-contained package (`src/trading_system/alpha/`, `ts alpha …`) that reuses
+the research simulator for its book backtest and leaves the old path in place
+as a diagnostic.
+
+* **Panel** (`panel.py`, ~10 s for 5M rows). Prices from
+  `bronze/massive/ohlcv_deep.parquet` (1000 names, 1998→, daily sessions
+  appended from `ohlcv_all`), 59 features as pure polars window expressions:
+  31 price/volume (momentum 1–12m, 12-1, vol/downside vol/skew/kurtosis,
+  max/min daily return, dollar volume, Amihud, volume ratio, 52w distances,
+  SMA gaps, up-day fraction, overnight vs intraday, Parkinson vol, range
+  position, beta/idio vol vs the panel's own EW market, Abdi–Ranaldo spread),
+  13 fundamentals **point-in-time on `filing_date` + 1** (TTM E/P, B/M, S/P,
+  CF/P, gross profitability, ROE/ROA, asset & revenue growth, accruals,
+  leverage, log mcap, filing age), 5 news (counts, sentiment, count z-score —
+  available the day *after* publication), 4 short (FINRA short interest +10d
+  lag, short-volume ratio), 6 market/sector context. Labels `fwd_h` and
+  `y_h` = per-date gaussianised rank of the forward return for h ∈ {5, 21, 63}.
+* **Model** (`model.py`). Features are per-date pct-ranked; XGBoost on CUDA
+  (~10 s per fit on 1.2M rows), squared error on the gaussian-rank label, 2
+  seeds bagged, 10-year half-life sample decay, training dates thinned by a
+  per-horizon stride so overlapping labels are not counted as independent.
+  `causal_scores` walks forward: refit every 63 trading days on rows whose
+  labels matured (`didx ≤ cut − h − 5`), score until the next refit.
+* **Ledger** (`ledger.py`, `data/ledger/alpha_forecasts.parquet`). One row per
+  (date, ticker, horizon, mode ∈ {backtest, live}): score, calibrated
+  `exp_ret`, conformal `q10/q90`, entry price, and — once `horizon` sessions
+  have passed — `realized_ret`, `hit`, `in_band`. `tally` fills outcomes from
+  prices (a delisted name is scored at its last print). `skill_report` /
+  `yearly_ic` / `rolling_ic` give rank-IC, ICIR, t-stat, hit rate, decile
+  spread, band coverage and calibration slope, overall and per year.
+* **Continuous learning** = `Calibrator`: refit on every run from the matured
+  rows of the trailing 3 years — isotonic score → expected return per horizon,
+  conformal 80% residual bands per score quintile, and **horizon blend weights
+  ∝ trailing IC⁺** (a horizon whose realised skill has gone to zero loses its
+  vote). Production models refit weekly (`ts alpha train`, ~1 min); the
+  calibration refits daily (`ts alpha forecast`).
+* **Book** (`portfolio.py`): gates (price ≥ $5, $vol ≥ $20M/d, vol ≤ 110%) →
+  rank on demeaned composite / vol^0.5 → greedy top-20 with ≤ 5 per SIC sector
+  → ½ inverse-vol + ½ equal weights, 8% cap → gross scaled to an 18% vol target
+  (constant-correlation estimate) → Gârleanu–Pedersen partial trading (35% of
+  the gap per monthly rebalance, 20% no-trade band). Optional regime overlay
+  (gross × 0.5 when breadth < 40% and the EW market fell > 8% in a quarter).
+  The same `target_weights` builds the backtest book and the live book.
+* **Backtest** (`backtest.py`, `ts alpha backtest`): walk-forward scores →
+  backtest ledger rows → tally → calibrator walked forward in 63-day blocks
+  (sees only outcomes known before each block) → composite replayed through
+  `research.wfbacktest.run_walk_forward` with the research cost model, against
+  momentum (same book rules), the equal-weight universe and SPY; stationary
+  bootstrap Sharpe CIs, deflated Sharpe over every variant tried, calendar-year
+  table. Report: `reports/alpha/backtest.md` (+ json, daily curves).
+  `--extend` scores only the dates after the cached run (weekly).
+* **Live**: `ts alpha panel → tally → forecast --days 3` in the daily pipeline
+  (~2 min), `ts alpha picks` for the brief, and the `alpha_v2` paper book in
+  `ops/portfolio/portfolios.py` (GP partial trading, monthly) so a live
+  track record accrues next to ml_v2_gp.
+
+**Results (2004-01 → 2026-09, 22.7 years, after costs, `reports/alpha/backtest.md`).**
+Signal: 63d rank-IC 0.073 (ICIR 0.75, t = 56, positive in 23 of 24 years;
+0.11–0.15 in 2024–26), 21d 0.045, 5d 0.030; top-decile minus bottom-decile
+63d spread +5.9%. Gross, the monthly top-20 earns ≈ +3.0%/month vs +1.4% for
+the gated universe. Book (production rules): **CAGR 17.2%, Sharpe 1.12
+[0.73, 1.56], MaxDD −31.7%, turnover 5.4×/yr, cost drag 1.5%/yr** vs
+momentum with the same rules 16.7% / 0.83 / −37.6%, the equal-weight
+*eligible* universe 14.6% / 0.78 / −53.9%, SPY 10.9% / 0.65 / −55.2%. Without
+the overlays the same signal makes 19.9% / 1.00 / −51.6%; the 200-day trend
+rule is what buys the drawdown. Two things learned the hard way and now
+encoded: (1) the simulator gated on *split-adjusted* prices, which silently
+excluded every future large-cap in its early years — eligibility is now
+decided on raw closes and passed in as a null score; (2) the simulator
+renormalised every book to full gross, so vol targets, regime scaling and
+partial trading from cash had no effect — `respect_target_gross=True` makes it
+honour the gross the weight function asked for (opt-in; the lab's numbers used
+the old behaviour). Symbol reuse in the free price feeds (SOLS ×487,399 in a
+day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
+
+Tests: `tests/unit/test_alpha.py` (hand-checked features, backward-looking
+guarantee, PIT joins, purge/embargo, planted-signal recovery through the
+causal walk, ledger tally incl. delistings, calibrator monotonicity and band
+coverage, causal composite, book gates/caps/vol target/partial trading).
 
 ---
 

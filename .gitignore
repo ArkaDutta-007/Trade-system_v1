@@ -33,3 +33,8 @@ logs/
 # state, and findings that belong to the operator rather than the repo.
 HANDOFF.md
 docs/RESEARCH_V5.md
+
+# Alpha engine v2 outputs (rebuilt by `ts alpha …`; the parquet ledger is machine state)
+data/ledger/*.parquet
+data/ledger/*.tmp
+data/models/

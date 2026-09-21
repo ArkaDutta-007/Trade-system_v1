@@ -160,6 +160,19 @@ ts features -u liquid            # fold everything into gold/features.parquet (+
 ts quality                       # sanity gate
 ```
 
+**Alpha engine v2** (`ts alpha …`, docs/COMPENDIUM.md §13a) is the pick engine
+since 2026-09-21 — it needs only the Massive bronze tables (`ts massive crawl`):
+
+```bash
+ts alpha panel                   # 1000-name point-in-time panel: prices ⊕ fundamentals ⊕ news ⊕ short data (~10 s)
+ts alpha train                   # production 5/21/63d rank forecasters, XGBoost on CUDA (~1 min)
+ts alpha backtest                # causal walk-forward (~40 min once; --extend weekly) → reports/alpha/backtest.md
+ts alpha forecast --days 3       # record today's forecasts, recalibrate on the tallied ledger
+ts alpha tally                   # score matured forecasts against realised prices
+ts alpha picks --top 20          # the book: gated, sector-capped, vol-targeted; --compact for the phone card
+ts alpha status                  # ledger, models, calibration weights, rolling realised IC
+```
+
 `ts backfill-history` is built to be run unattended (e.g. in `tmux`):
 
 * **Coverage-driven** — it retries the still-uncovered tickers round after round

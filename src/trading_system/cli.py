@@ -230,6 +230,9 @@ massive_app = typer.Typer(add_completion=False, help="Massive (ex-Polygon) API: 
                           "corporate actions, fundamentals, news. Free tier = 5 req/min, 2y history.")
 app.add_typer(massive_app, name="massive")
 
+from .alpha.cli import alpha_app  # noqa: E402  — `ts alpha …` (alpha engine v2)
+app.add_typer(alpha_app, name="alpha")
+
 
 def _massive_store(config: str, universe: str):
     from .ingestion.massive import MassiveStore

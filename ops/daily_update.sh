@@ -112,6 +112,13 @@ heavy_step "trade-ops self-test (pytest)" 600 $CODE/run_tests.sh
 # MASSIVE_API_KEY it prints a note and exits 0; `ts daily`/`ts ingest` then
 # fall back to yfinance on their own (data.source: auto).
 heavy_step "ts massive update (EOD bars + corp actions + news, 5 req/min)" 2400 ts massive update -u liquid
+# Alpha engine v2 (2026-09-21): point-in-time panel over the 1000-name Massive
+# universe → tally the forecasts that matured → recalibrate on the tally →
+# record today's forecasts. ~2 min; outputs are gitignored (data/gold, data/ledger,
+# data/models). The book itself is the `alpha_v2` paper book below.
+heavy_step "ts alpha panel (1000-name point-in-time feature panel)" 900 ts alpha panel
+heavy_step "ts alpha tally (score matured forecasts against prices)" 600 ts alpha tally
+heavy_step "ts alpha forecast (record today's forecasts, recalibrate)" 900 ts alpha forecast --days 3
 heavy_step "ts daily (ingest→quality→features→predict→paper-trade→future-update)" 5400 ts daily
 heavy_step "ts ledger --resolve (score matured predictions)" 900 ts ledger --resolve
 # ts daily rebuilds gold features on the CORE universe (69 cols), but the
@@ -144,11 +151,18 @@ digest_step "ML model backtest (deployed ensemble, after costs)" 400 python3 $CO
 # Every backtest CAGR above is inflated by roughly this much.
 digest_step "Survivorship bias check (ts bias-check) — context for every backtest number" 300 ts bias-check -u liquid
 
-# THE picks for the brief: quality-gated (price/liquidity/vol), James-Stein
-# shrunk, demeaned risk-adjusted, theme-capped, HRP x conviction weighted.
-# --compact = phone-width card. The brief agent is told to use ONLY this section.
-digest_step "🎯 TOP PICKS — use THIS section for the brief" 900 python3 $CODE/portfolio/picks_v2.py --top 8 --compact
-digest_step "Top picks v2 — full table (weights, vol, liquidity)" 900 python3 $CODE/portfolio/picks_v2.py --top 10
+# THE picks for the brief (since 2026-09-21): the alpha engine v2 book —
+# 1000-name point-in-time panel, 5/21/63d rank forecasters blended by realised
+# IC from the tallied forecast ledger, gated, sector-capped, inverse-vol
+# weighted, 18% vol target, GP partial trading against the live alpha_v2 paper
+# book. --compact = phone-width card. The brief agent is told to use ONLY this.
+digest_step "🎯 TOP PICKS — use THIS section for the brief" 600 ts alpha picks --top 20 --compact --prev $OPS/portfolio/books/alpha_v2.json
+digest_step "Alpha book — full table (targets, calibrated E[r], 80% bands, drivers)" 600 ts alpha picks --top 20 --prev $OPS/portfolio/books/alpha_v2.json
+digest_step "Alpha engine — realised forecast skill (ledger tally)" 300 ts alpha status
+
+# Previous pick engine, kept as a diagnostic/second opinion only (superseded
+# 2026-09-21: 54-name candidate set, IC 0.011, 20% single-name weights).
+digest_step "Legacy picks v2 (diagnostic — superseded by the alpha book)" 900 python3 $CODE/portfolio/picks_v2.py --top 10
 
 # Raw model ranking, UNFILTERED. Kept as a diagnostic only: it ranks on raw
 # forecast score, which measurably prefers volatile illiquid names
@@ -156,7 +170,7 @@ digest_step "Top picks v2 — full table (weights, vol, liquidity)" 900 python3 
 # stocks trading $90k/day. Never use it for the brief.
 digest_step "Raw model ranking (DIAGNOSTIC — unfiltered, do NOT use for picks)" 900 ts picks --horizon 252 --top 10 -u liquid
 
-# Competing $10k paper books (spy / ml_raw / ml_v2 / momentum / blend).
+# Competing $10k paper books (spy / ml_raw / ml_v2 / momentum / blend / ml_v2_gp / alpha_v2).
 # Rebalance is monthly and self-guarding, so calling it daily is safe.
 heavy_step "Dummy portfolios rebalance+mark" 1200 python3 $CODE/portfolio/portfolios.py --rebalance --mark
 digest_step "Dummy portfolios — long-run scoreboard" 300 python3 $CODE/portfolio/portfolios.py --report

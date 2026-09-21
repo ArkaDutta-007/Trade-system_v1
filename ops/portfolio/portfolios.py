@@ -27,6 +27,12 @@ Books
                  Sharpe 0.862 → 0.995 and cut turnover 57%. Uses the repo's
                  research.execution.GarleanuPedersenPolicy with signal_decay=0,
                  which is exactly the form the simulator scored.
+  alpha_v2       THE ALPHA ENGINE v2 book (added 2026-09-21): `ts alpha picks`
+                 targets — 1000-name panel, 5/21/63d rank forecasters blended
+                 by trailing realised IC from the forecast ledger, gated,
+                 sector-capped, inverse-vol weighted, 18% vol target — traded
+                 with the same GP partial rate (0.35) as ml_v2_gp, so the two
+                 books differ only in the signal.
 
 Design decisions that matter
   * MONTHLY rebalance (not daily). The 2026-07 research showed 3x costs halve
@@ -67,7 +73,8 @@ START_CASH = 10_000.0
 N_HOLD = 10
 COST_BPS = 4.0
 IMPACT_BPS = 10.0
-BOOKS = ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend", "ml_v2_gp"]
+BOOKS = ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend", "ml_v2_gp", "alpha_v2"]
+ALPHA_TOP = 20            # alpha_v2 book width (its own cap/vol target live in trading_system.alpha.portfolio)
 
 # ml_v2_gp — the research winner's configuration (reports/research/REPORT.md,
 # variant xgb63|gp35). Kept as a SEPARATE book so the five that have been
@@ -81,8 +88,18 @@ GP_TRADE_RATE = 0.35      # move 35% of the way toward target each rebalance
 
 # ── price helpers ───────────────────────────────────────────────────────────
 def price_frame() -> pl.DataFrame:
-    return pl.read_parquet(REPO / "data/bronze/ohlcv_daily.parquet",
-                           columns=["date", "ticker", "adj_close"])
+    """Liquid-universe bronze prices, plus the Massive whole-market table for any name the alpha_v2
+    book holds outside that universe (its panel is the top-1000 by liquidity)."""
+    px = pl.read_parquet(REPO / "data/bronze/ohlcv_daily.parquet", columns=["date", "ticker", "adj_close"])
+    massive = REPO / "data/bronze/massive/ohlcv_all.parquet"
+    if massive.exists():
+        have = set(px["ticker"].unique().to_list())
+        extra = (pl.scan_parquet(massive).select("date", "ticker", "adj_close")
+                   .filter(~pl.col("ticker").is_in(list(have)), pl.col("adj_close") > 0)
+                   .with_columns(pl.col("date").cast(px.schema["date"])).collect())
+        if extra.height:
+            px = pl.concat([px, extra.select(px.columns)], how="vertical_relaxed")
+    return px
 
 
 def prices_on(px: pl.DataFrame, d) -> dict[str, float]:
@@ -125,6 +142,10 @@ def select(book: str, n: int = N_HOLD) -> list[str]:
 
 def select_weighted(book: str) -> dict[str, float]:
     """Target WEIGHTS (not just names) — needed for partial trading."""
+    if book == "alpha_v2":
+        from trading_system.alpha.live import targets_as_dict
+        from trading_system.config import get_config
+        return targets_as_dict(get_config(str(REPO / "configs/default.yaml")), ALPHA_TOP)
     if book != "ml_v2_gp":
         raise ValueError(book)
     from picks_v2 import build
@@ -238,7 +259,7 @@ def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float],
 
 def _rebalance(b: dict, name: str, p: dict[str, float], d) -> None:
     """Dispatch: the GP book trades toward weights; the others equal-weight names."""
-    if name == "ml_v2_gp":
+    if name in ("ml_v2_gp", "alpha_v2"):
         rebalance_book_gp(b, select_weighted(name), p, d)
     else:
         rebalance_book(b, select(name), p, d)
