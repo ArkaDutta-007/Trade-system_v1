@@ -24,14 +24,18 @@ cd "$REPO" || exit 1
 source venv/bin/activate
 
 echo "=== weekly retrain start $(date -Is) ===" >> "$LOG"
-timeout 14400 python3 $CODE/research/deploy.py >> "$LOG" 2>&1
-RC=$?
-# Alpha engine v2: refit the production forecasters on every matured label and
-# extend the causal walk-forward (new dates only) so the backtest report and the
-# ledger's calibration keep up with the live period. ~5 min on the GPU.
+# Alpha engine v2 FIRST (~6 min on the GPU): it drives the picks, so a slow
+# legacy step must never starve it. Refits the production forecasters on every
+# matured label and extends the causal walk-forward with the new dates only.
 echo "--- ts alpha train + backtest --extend ($(date -Is)) ---" >> "$LOG"
 timeout 3600 ts alpha train >> "$LOG" 2>&1 || echo "ts alpha train FAILED rc=$?" >> "$LOG"
 timeout 3600 ts alpha backtest --extend >> "$LOG" 2>&1 || echo "ts alpha backtest FAILED rc=$?" >> "$LOG"
+# Legacy 14-model ensemble (feeds only the ml_raw/ml_v2/ml_v2_gp paper books and
+# the "ML model backtest" digest section). 26 purged folds + refit took 3h51m on
+# 2026-09-19 and was killed at the 4h cap on 09-17 and 09-26 → 5h cap.
+echo "--- legacy deploy.py ($(date -Is)) ---" >> "$LOG"
+timeout 18000 python3 $CODE/research/deploy.py >> "$LOG" 2>&1
+RC=$?
 echo "=== weekly retrain done rc=$RC $(date -Is) ===" >> "$LOG"
 
 # quick post-deploy sanity: newest registry entry + a one-line backtest health

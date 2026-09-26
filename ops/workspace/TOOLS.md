@@ -61,6 +61,15 @@ What Arka says → what you run:
   2003→), the calibrator's horizon weights, and the rolling 63-date IC. A
   rolling IC that sits below zero for weeks means the signal has decayed —
   say so in the brief; the calibrator already down-weights that horizon.
+- "what data do we have / is the data fresh / data state" → `~/ops/bin/ts-run data status`
+  One table: every dataset (prices, minute bars, fundamentals, news, short data,
+  FRED, panel, ledger) with rows, tickers, span, sessions behind and ok/stale,
+  plus crawler liveness, parked endpoint families and calls/day, and disk.
+  Anything red = say so first in the reply.
+- "try a model change / is X better" → `~/ops/bin/ts-run --timeout 7200 alpha experiment --variants base,<v>`
+  Runs variants on identical causal folds; adoption needs paired-t ≥ 2 on IC
+  OR a book-level excess with CI > 0 and ≥70% years won (see experiment.py).
+  Never change the production model without that report.
 - "what regime are we in / is this like 2008 / oil shock / AI bubble" → `~/ops/bin/ts-run alpha regime`
   Oil, vol, credit, rates, AI-concentration state (z-scores), the closest
   historical episodes (Gulf War, dot-com, 2008, 2022, tariff shock 2025 …)

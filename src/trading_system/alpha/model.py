@@ -49,6 +49,10 @@ class TrainSpec:
     half_life_days: float = 252 * 10       # time-decay of sample weights (0 = flat)
     max_train_rows: int = 2_500_000
     device: str = "auto"                   # auto | cuda | cpu
+    # rank (pairwise, per-date groups) since 2026-09-26: same folds 2012→2026, the book went CAGR 16.5% → 29.1%,
+    # Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr, excess CI [+6.3%, +15.8%], 12 of 15 years better
+    # (reports/alpha/experiments/2026-09-26). IC barely moved — the gain is concentrated in the top tail.
+    objective: str = "rank"                # rank | reg (squared error on the gaussian-rank label)
     features: tuple[str, ...] = tuple(MODEL_FEATURES)   # cross-sectional only; see panel.DATE_LEVEL_FEATURES
 
     def stride_for(self, h: int) -> int:
@@ -102,7 +106,8 @@ class AlphaGBM:
 
     def _params(self, seed: int) -> dict:
         s = self.spec
-        p = {"objective": "reg:squarederror", "max_depth": s.max_depth, "eta": s.learning_rate,
+        p = {"objective": "rank:pairwise" if s.objective == "rank" else "reg:squarederror",
+             "max_depth": s.max_depth, "eta": s.learning_rate,
              "subsample": s.subsample, "colsample_bytree": s.colsample_bytree,
              "min_child_weight": s.min_child_weight, "lambda": s.reg_lambda, "tree_method": "hist",
              "device": self.device, "seed": seed, "max_bin": 128, "verbosity": 0}
@@ -111,10 +116,17 @@ class AlphaGBM:
             p["nthread"] = max(2, (os.cpu_count() or 4) - 2)
         return p
 
-    def fit(self, X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> "AlphaGBM":
+    def fit(self, X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None, qid: np.ndarray | None = None) -> "AlphaGBM":
+        """``qid`` (the date index, rows sorted by it) is required for the ranking objective, where XGBoost
+        weights whole groups — so per-row time-decay weights are dropped there."""
         import xgboost as xgb
         self.boosters = []
-        dm = xgb.QuantileDMatrix(X, label=y, weight=w, feature_names=self.feature_names, max_bin=128)
+        if self.spec.objective == "rank":
+            if qid is None:
+                raise ValueError("rank objective needs qid")
+            dm = xgb.QuantileDMatrix(X, label=y, qid=qid, feature_names=self.feature_names, max_bin=128)
+        else:
+            dm = xgb.QuantileDMatrix(X, label=y, weight=w, feature_names=self.feature_names, max_bin=128)
         for seed in self.spec.seeds:
             try:
                 b = xgb.train(self._params(seed), dm, num_boost_round=self.spec.n_rounds)
@@ -190,7 +202,7 @@ def training_rows(frame: pl.DataFrame, h: int, cut_idx: int, spec: TrainSpec) ->
                         & ((pl.col("didx") % stride) == (last % stride)))
     if rows.height > spec.max_train_rows:
         rows = rows.sample(n=spec.max_train_rows, seed=cut_idx)
-    return rows
+    return rows.sort("didx")                         # grouped by date: required by the ranking objective
 
 
 def sample_weights(rows: pl.DataFrame, cut_idx: int, spec: TrainSpec) -> np.ndarray | None:
@@ -234,7 +246,7 @@ def causal_scores(panel: pl.DataFrame, spec: TrainSpec | None = None, refit_ever
             if tr.height < 5000:
                 continue
             X, y = _xy(tr, rcols, h)
-            m = AlphaGBM(spec, h, rcols, device=device).fit(X, y, sample_weights(tr, cut, spec))
+            m = AlphaGBM(spec, h, rcols, device=device).fit(X, y, sample_weights(tr, cut, spec), qid=tr["didx"].to_numpy())
             device = m.device
             cols[f"s_{h}"] = pl.Series(m.predict(Xs))
             if on_refit:
@@ -275,7 +287,7 @@ def fit_production(panel: pl.DataFrame, spec: TrainSpec | None = None, out_dir: 
         tr = training_rows(frame, h, cut, spec)
         X, y = _xy(tr, rcols, h)
         t0 = time.time()
-        m = AlphaGBM(spec, h, rcols, device=device).fit(X, y, sample_weights(tr, cut, spec))
+        m = AlphaGBM(spec, h, rcols, device=device).fit(X, y, sample_weights(tr, cut, spec), qid=tr["didx"].to_numpy())
         device = m.device
         m.trained_through = str(tr["date"].max())
         models[h] = m

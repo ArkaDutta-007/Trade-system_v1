@@ -868,6 +868,22 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
     nothing over the 200-day trend rule (Sharpe 1.13 → 1.13, MaxDD −33 →
     −32%), because partial trading already lags exposure changes.
 
+* **Model changes go through `ts alpha experiment`** (`experiment.py`, 2026-09-26): candidate
+  `TrainSpec`s walked forward on identical folds (refit 126, OOS 2011→), per-date IC, ICIR,
+  recent IC, decile spread, paired t on non-overlapping dates, years won. Adoption: paired t ≥ 2
+  on 63d IC **or** a book-level excess (same simulator/costs/overlays) whose bootstrap CI is
+  above zero with ≥70% of years won. First run:
+  - **Earnings surprise features** (SUE, revenue SUE, ΔSUE, announcement-window return; PIT on
+    the SEC filing date, Q4 from the 10-K at end+75d) — **rejected** (paired t −0.3). Kept in the
+    panel for research; not in `MODEL_FEATURES`' effect because the ranker ignores them.
+  - **Pairwise ranking objective** (`TrainSpec.objective="rank"`, per-date query groups) —
+    IC flat (t +0.5) but top–bottom decile spread 4.7% → 9.4% (63d). Book test 2012→2026:
+    CAGR 16.5% → 29.1%, Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr at beta 0.72 → 0.90,
+    excess +11.0%/yr CI [+6.3%, +15.8%], 12/15 years better → **adopted** as the production
+    objective. MaxDD rose −28% → −39%.
+* **`ts data status`** (`datastatus.py`): every store's rows/tickers/span, sessions behind the
+  last close and an ok/stale verdict, crawler liveness/parked families/calls-per-day, disk.
+
 Tests: `tests/unit/test_alpha.py` (hand-checked features, backward-looking
 guarantee, PIT joins, purge/embargo, planted-signal recovery through the
 causal walk, ledger tally incl. delistings, calibrator monotonicity and band

@@ -94,6 +94,12 @@ class MassiveEntitlementError(MassiveError):
     parks the endpoint family for a week instead of burning calls on it."""
 
 
+class MassiveNotPublished(MassiveError):
+    """A dated resource the plan *does* include but has not released yet (the free plan answers 403 for
+    yesterday's grouped bars until ~04:00 UTC). Retried soon; never parks the endpoint family."""
+    retry_s = 1800.0
+
+
 class MassiveNotReady(RuntimeError):
     """The local Massive cache is empty/too stale to build from — run `ts massive backfill`."""
 
@@ -1495,7 +1501,8 @@ class Crawler:
            "news_backfill": 60 * _DAY, "events": 30 * _DAY,
            "details_market": 45 * _DAY, "financials_market": 14 * _DAY, "news_market": 30 * _DAY,
            "aggs_qa": 7 * _DAY}
-    PUBLISH_LAG_H = 1.5             # grouped bar for D is tried from D+1 01:30 UTC (≈21:30 ET)
+    PUBLISH_LAG_H = 4.25            # grouped bar for D is tried from D+1 04:15 UTC — the free plan releases it
+                                    # at ~04:00 UTC and answers 403 before that (measured 2026-09-22..26)
     ONCE_MAX_TIER = 5               # --once drains up to and including this tier (…extended)
 
     def __init__(self, store: MassiveStore, universe_tickers: Iterable[str], state_path: Path | None = None,
@@ -1722,7 +1729,7 @@ class Crawler:
 
         # tier 0 — freshest bars, current corp actions, today's news
         for d in sorted(st.missing_days(today - timedelta(days=7), today), reverse=True):
-            if d in hol or not self._publish_ready(d):
+            if d in hol or not self._publish_ready(d) or self.blocked("grouped"):
                 continue
             yield Task(0, f"grouped {d}", self._mark(0, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)), "grouped")
         for lo, hi in month_windows(today - timedelta(days=45), today):
@@ -1745,7 +1752,7 @@ class Crawler:
 
         # tier 1 — 2-year grouped backfill, newest first
         for d in sorted(st.missing_days(), reverse=True):
-            if d in hol or not self._publish_ready(d):
+            if d in hol or not self._publish_ready(d) or self.blocked("grouped"):
                 continue
             yield Task(1, f"grouped {d}", self._mark(1, ohlcv=True)(lambda d=d: self._fetch_day_calls(d)), "grouped")
 
@@ -1813,7 +1820,15 @@ class Crawler:
         return self.store.client.calls - c0
 
     def _fetch_day_calls(self, d: date) -> int:
-        return self._calls(lambda: self.store.fetch_day(d))
+        try:
+            return self._calls(lambda: self.store.fetch_day(d))
+        except MassiveEntitlementError as e:
+            # a 403 on a day a few sessions old is "not released to this plan yet", not "not in plan":
+            # retry in 30 min instead of parking the whole grouped family (which, before 2026-09-26, the
+            # grouped tasks did not even honour — they retried ~10×/min for hours every night)
+            if (self.store.today - d).days <= 5:
+                raise MassiveNotPublished(f"grouped {d} not released yet: {str(e)[:80]}") from e
+            raise
 
     # ---- execution -----------------------------------------------------------------
     FAIL_BACKOFF_S = (6 * 3600, 24 * 3600, 7 * _DAY)   # 1st, 2nd, 3rd+ failure of the same task
@@ -1827,6 +1842,10 @@ class Crawler:
         return None
 
     def _note_failure(self, task: Task, err: Exception) -> None:
+        if isinstance(err, MassiveNotPublished):
+            self._skip_until[task.name] = time.time() + err.retry_s
+            logger.info(f"crawler: {task.name} not released yet — retry in {err.retry_s / 60:.0f} min")
+            return
         n = self._fail_count.get(task.name, 0) + 1
         self._fail_count[task.name] = n
         back = self.FAIL_BACKOFF_S[min(n, len(self.FAIL_BACKOFF_S)) - 1]

@@ -158,6 +158,7 @@ digest_step "Survivorship bias check (ts bias-check) — context for every backt
 # book. --compact = phone-width card. The brief agent is told to use ONLY this.
 digest_step "🎯 TOP PICKS — use THIS section for the brief" 600 ts alpha picks --top 20 --compact --prev $OPS/portfolio/books/alpha_v2.json
 digest_step "Alpha book — full table (targets, calibrated E[r], 80% bands, drivers)" 600 ts alpha picks --top 20 --prev $OPS/portfolio/books/alpha_v2.json
+digest_step "Data status — every dataset, sessions behind, crawler budget" 300 ts data status
 digest_step "Alpha engine — realised forecast skill (ledger tally)" 300 ts alpha status
 # Macro/fragility background: oil, vol, credit, rates, AI concentration → closest
 # historical episodes → how the signal and the book behaved in those backgrounds.

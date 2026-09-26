@@ -230,6 +230,38 @@ massive_app = typer.Typer(add_completion=False, help="Massive (ex-Polygon) API: 
                           "corporate actions, fundamentals, news. Free tier = 5 req/min, 2y history.")
 app.add_typer(massive_app, name="massive")
 
+data_app = typer.Typer(add_completion=False, help="Dataset inventory and freshness.")
+app.add_typer(data_app, name="data")
+
+
+@data_app.command("status")
+def data_status(json_out: bool = typer.Option(False, "--json", help="machine-readable output")):
+    """Every dataset: rows, tickers, span, sessions behind, verdict; crawler budget; disk."""
+    import json as _json
+    from rich.table import Table
+    from .config import find_project_root
+    from .datastatus import collect
+    st = collect(find_project_root())
+    if json_out:
+        print(_json.dumps(st, indent=1, default=str)); return
+    t = Table(title=f"Data status · last session {st['last_session']}")
+    for c in ("store", "rows", "tickers", "first", "last", "behind", "age", "status"):
+        t.add_column(c, justify="left" if c in ("store", "status") else "right")
+    colour = {"ok": "green", "reference": "dim", "stale": "yellow", "STALE": "red", "missing": "red"}
+    for r in st["stores"]:
+        stt = r["status"]
+        t.add_row(r["store"], f"{r['rows']:,}" if r["rows"] is not None else "—", f"{r['tickers']:,}" if r["tickers"] else "—",
+                  r["first"] or "—", r["last"] or "—", "—" if r["lag"] is None else str(r["lag"]),
+                  "—" if r["age_h"] is None else f"{r['age_h']:.0f}h", f"[{colour.get(stt, 'red')}]{stt}[/]")
+    rprint(t)
+    c = st["crawler"]
+    rprint(f"crawler {'[green]running[/green]' if c.get('alive') else '[red]DOWN[/red]'} · now {c.get('current') or 'idle'} · "
+           f"parked {c.get('blocked') or 'none'} · failing {len(c.get('failing') or [])} · calls/day "
+           + ", ".join(f"{k[4:6]}/{k[6:]} {v:,}" for k, v in c.get("calls_by_day", {}).items()))
+    d = st["disk"]
+    rprint(f"disk: data/ {d['data_gb']} GB · {d['free_gb']} GB free ({d['used_pct']}% used)")
+
+
 from .alpha.cli import alpha_app  # noqa: E402  — `ts alpha …` (alpha engine v2)
 app.add_typer(alpha_app, name="alpha")
 

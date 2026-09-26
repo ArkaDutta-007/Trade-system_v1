@@ -251,6 +251,42 @@ def alpha_picks(config: str = CONFIG_OPT, top: int = typer.Option(20), compact: 
         rprint(f"[dim]targets → {p}[/dim]")
 
 
+@alpha_app.command("experiment")
+def alpha_experiment(config: str = CONFIG_OPT,
+                     variants: str = typer.Option("base,earn,rank,earn_rank", help="comma list from experiment.default_variants"),
+                     blends: str = typer.Option("earn+earn_rank", help="comma list of a+b z-score blends to evaluate too"),
+                     refit_every: int = typer.Option(126), oos_start: str = typer.Option("2011-01-01"),
+                     tag: str = typer.Option("", help="results folder name (default: today)")):
+    """Walk candidate models forward on identical causal folds; adopt only on a paired-t win (see experiment.py)."""
+    from . import experiment as X
+    from .panel import load_panel
+    cfg = _cfg(config)
+    pn = load_panel(cfg)
+    out = cfg.path("reports") / "alpha" / "experiments" / (tag or str(date.today()))
+    allv = X.default_variants()
+    names = [v.strip() for v in variants.split(",") if v.strip()]
+    scores = X.run(pn, [allv[n] for n in names], refit_every=refit_every, oos_start=date.fromisoformat(oos_start), cache_dir=out)
+    for b in [x.strip() for x in blends.split(",") if x.strip()]:
+        a, c = b.split("+")
+        if a in scores and c in scores:
+            scores[b] = X.blend(scores[a], scores[c])
+    ics = {k: X.daily_ic(v, pn) for k, v in scores.items()}
+    table = X.compare(ics, baseline=names[0])
+    verdicts = [X.verdict(table, k, baseline=names[0])[1] for k in scores if k != names[0]]
+    p = X.write_report(out / "report.md", table, verdicts, {"refit_every": refit_every, "oos_start": oos_start, "variants": list(scores)})
+    t = Table(title=f"experiment · refit {refit_every} · OOS {oos_start}")
+    for c in ("variant", "h", "IC", "ICIR", "IC≥2020", "spread", "paired t", "yrs won"):
+        t.add_column(c, justify="right")
+    for r in table.iter_rows(named=True):
+        t.add_row(r["variant"], str(r["horizon"]), f"{r['ic']:+.4f}", f"{r['icir']:.2f}", f"{r['ic_recent']:+.4f}",
+                  f"{r['spread']:+.2%}", "—" if r.get("paired_t") is None else f"{r['paired_t']:+.1f}",
+                  "—" if r.get("years_won") is None else f"{r['years_won']:.0%}")
+    rprint(t)
+    for v in verdicts:
+        rprint(v)
+    rprint(f"[green]report:[/green] {p}")
+
+
 @alpha_app.command("regime")
 def alpha_regime(config: str = CONFIG_OPT, k: int = typer.Option(10, help="nearest analog dates to show"),
                  compact: bool = typer.Option(False, help="digest-sized summary")):

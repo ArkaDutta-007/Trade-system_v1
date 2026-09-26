@@ -834,3 +834,21 @@ def test_financials_keep_acceptance_datetime():
                                 "source_filing_file_url": "https://sec/x.htm",
                                 "financials": {"income_statement": {"revenues": {"value": 1.0}}}}])
     assert df["acceptance_datetime"][0] == "20260731T203015" and df["source_filing_file_url"][0].endswith("x.htm")
+
+
+def test_recent_grouped_403_is_not_released_yet_and_never_parks_or_loops(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/v2/aggs/grouped", FakeResp(403, {"status": "NOT_AUTHORIZED"}))
+    s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    t = next(t for t in cr.due_tasks() if t.name.startswith("grouped"))
+    with pytest.raises(M.MassiveNotPublished):
+        t.run()
+    cr._note_failure(t, M.MassiveNotPublished("x"))
+    assert "grouped" not in cr.blocked_families()
+    assert cr.next_task().name != t.name                                 # backed off ~30 min, others proceed
+    assert cr._fail_count.get(t.name, 0) == 0                            # not an escalating failure
+    # a parked family is honoured by the grouped tiers (previously it was ignored → retry storm)
+    cr.block("grouped", "test")
+    assert not any(x.name.startswith("grouped") for x in cr.due_tasks())
+    assert M.Crawler.PUBLISH_LAG_H >= 4.0

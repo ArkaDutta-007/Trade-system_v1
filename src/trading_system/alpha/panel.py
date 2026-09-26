@@ -52,10 +52,12 @@ FUND_FEATURES = [
     "asset_growth", "rev_growth", "accruals", "leverage", "log_mcap", "fund_age_days",
 ]
 NEWS_FEATURES = ["news_n_5", "news_n_21", "news_sent_5", "news_sent_21", "news_n_z"]
+# post-earnings drift inputs (Bernard–Thomas SUE, revenue surprise, announcement-window return)
+EARN_FEATURES = ["sue", "rev_sue", "sue_chg", "ear_3d"]
 SHORT_FEATURES = ["si_days_to_cover", "si_ratio", "si_chg", "sv_ratio_5"]
 MARKET_FEATURES = ["mkt_ret_21", "mkt_ret_63", "mkt_vol_21", "breadth_200", "dispersion_21", "sector_rel_63"]
 from .regime import MACRO_FEATURES  # noqa: E402  (date-level macro/fragility state, see regime.py)
-FEATURE_COLS = PRICE_FEATURES + FUND_FEATURES + NEWS_FEATURES + SHORT_FEATURES + MARKET_FEATURES + MACRO_FEATURES
+FEATURE_COLS = PRICE_FEATURES + FUND_FEATURES + EARN_FEATURES + NEWS_FEATURES + SHORT_FEATURES + MARKET_FEATURES + MACRO_FEATURES
 # constant within a date → they cannot be within-date ranks. Tested 2003→2026 as raw model inputs: the
 # regime-aware walk-forward was WORSE (63d IC 0.074 → 0.065, ICIR 0.76 → 0.51, paired t −7.8) — the ranker
 # overfits regime-specific cross-sectional patterns it has seen only a handful of times. So they stay in the
@@ -306,6 +308,67 @@ def _date_col(df: pl.DataFrame, name: str) -> pl.Expr:
     return pl.col(name).cast(pl.Utf8).str.slice(0, 10).str.to_date("%Y-%m-%d", strict=False)
 
 
+EARN_STALE_DAYS = 100          # a surprise older than ~a quarter is replaced by the next or dropped
+
+
+def earnings_events(fin: pl.DataFrame) -> pl.DataFrame:
+    """One row per (ticker, fiscal quarter): standardized unexpected earnings (seasonal random walk,
+    scaled by the std of the last 8 seasonal differences), the same for revenue, and the change in SUE.
+
+    Availability: the SEC filing date (10-Q ≈ the earnings release for most large caps). Massive derives
+    Q4 from the 10-K with no filing date — those are made available ``end_date + 75d`` (conservative)."""
+    I = "income_statement__"
+    col = lambda n: pl.col(n).cast(pl.Float64) if n in fin.columns else pl.lit(None, dtype=pl.Float64)
+    q = (fin.filter(pl.col("timeframe") == "quarterly")
+            .select("ticker", end_date=_date_col(fin, "end_date"), filing_date=_date_col(fin, "filing_date"),
+                    eps=pl.coalesce(col(I + "diluted_earnings_per_share"), col(I + "basic_earnings_per_share")),
+                    rev=col(I + "revenues"))
+            .drop_nulls("end_date")
+            .with_columns(filing_date=pl.coalesce(pl.col("filing_date"), pl.col("end_date") + pl.duration(days=75)))
+            .unique(subset=["ticker", "end_date"], keep="last").sort(["ticker", "end_date"]))
+    T = "ticker"
+    gap = (pl.col("end_date") - pl.col("end_date").shift(4).over(T)).dt.total_days()
+    seasonal = (gap >= 330) & (gap <= 400)
+    q = q.with_columns(d_eps=pl.when(seasonal).then(pl.col("eps") - pl.col("eps").shift(4).over(T)),
+                       d_rev=pl.when(seasonal).then(pl.col("rev") - pl.col("rev").shift(4).over(T)))
+    # scale by the dispersion of PRIOR surprises only (shift 1) so the current one cannot shrink its own z
+    sd = lambda c: pl.col(c).shift(1).rolling_std(8, min_samples=4).over(T)
+    q = q.with_columns(sue=(pl.col("d_eps") / (sd("d_eps") + 1e-9)).clip(-10, 10),
+                       rev_sue=(pl.col("d_rev") / (sd("d_rev") + 1e-9)).clip(-10, 10))
+    q = q.with_columns(sue_chg=pl.col("sue") - pl.col("sue").shift(1).over(T))
+    return q.select(T, "end_date", "filing_date", "sue", "rev_sue", "sue_chg").drop_nulls("filing_date")
+
+
+def _join_earnings(panel: pl.DataFrame, ev: pl.DataFrame) -> pl.DataFrame:
+    """SUE-type features as of each date (usable from filing_date + 1), and the market-adjusted return from
+    two sessions before to one session after the filing (usable from the session after that window)."""
+    T, D = "ticker", "date"
+    if ev.height == 0:
+        return panel.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in EARN_FEATURES])
+    ev = ev.with_columns(avail_date=pl.col("filing_date") + pl.duration(days=1)).sort([T, "avail_date"])
+    out = panel.sort([T, D]).join_asof(ev.select(T, "avail_date", "filing_date", "sue", "rev_sue", "sue_chg"),
+                                      left_on=D, right_on="avail_date", by=T, strategy="backward",
+                                      tolerance=timedelta(days=EARN_STALE_DAYS), check_sortedness=False)
+    # announcement-window return: session index per ticker, EW-market-adjusted
+    mkt = (panel.group_by(D).agg(m=pl.col("ret_1").mean()).sort(D)
+                .with_columns(mix=(1 + pl.col("m").fill_null(0.0)).cum_prod()).select(D, "mix"))
+    px = (panel.select(T, D, "adj_close").join(mkt, on=D, how="left").sort([T, D])
+               .with_columns(k=pl.int_range(pl.len()).over(T)))
+    fil = ev.select(T, "filing_date").unique()
+    # session on/after the filing date (k0), then the window [k0-2, k0+1]
+    k0 = (fil.sort("filing_date").join_asof(px.select(T, D, "k").sort(D), left_on="filing_date", right_on=D, by=T,
+                                            strategy="forward", check_sortedness=False)
+             .drop_nulls("k").select(T, "filing_date", k0="k"))
+    win = (k0.with_columns(ka=pl.col("k0") - 2, kb=pl.col("k0") + 1)
+             .join(px.select(T, ka="k", pa="adj_close", ma="mix"), on=[T, "ka"], how="inner")
+             .join(px.select(T, kb="k", pb="adj_close", mb="mix", win_end=D), on=[T, "kb"], how="inner")
+             .with_columns(ear_3d=(pl.col("pb") / pl.col("pa")) - (pl.col("mb") / pl.col("ma")))
+             .select(T, "filing_date", "ear_3d", "win_end"))
+    out = out.join(win, on=[T, "filing_date"], how="left")
+    out = out.with_columns(ear_3d=pl.when(pl.col(D) > pl.col("win_end")).then(pl.col("ear_3d")))
+    return out.drop(["avail_date", "filing_date", "win_end"])
+
+
 def news_daily(news: pl.DataFrame) -> pl.DataFrame:
     """(ticker, avail_date) → article count + mean sentiment; available the day after publication."""
     d = (news.select("ticker", pub=pl.col("published_utc").dt.date(), sentiment="sentiment")
@@ -432,6 +495,7 @@ def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "
     fin_p, news_p, si_p, sv_p = B / "financials.parquet", B / "news.parquet", B / "short_interest.parquet", B / "short_volume.parquet"
     fund = fundamental_features(pl.read_parquet(fin_p)) if fin_p.exists() else pl.DataFrame()
     panel = _join_fundamentals(panel, fund)
+    panel = _join_earnings(panel, earnings_events(pl.read_parquet(fin_p)) if fin_p.exists() else pl.DataFrame())
     nd = news_daily(pl.read_parquet(news_p, columns=["ticker", "published_utc", "sentiment"])) if news_p.exists() else pl.DataFrame()
     panel = _join_news(panel, nd)
     si = pl.read_parquet(si_p) if si_p.exists() else None

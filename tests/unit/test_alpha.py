@@ -375,3 +375,55 @@ def test_calibrator_analog_blend_uses_the_weights():
     half = L.Calibrator.fit(led, (21,), window_days=10_000, date_weights=w, analog_blend=0.5)
     assert plain.horizons[21].expected(s)[0] < half.horizons[21].expected(s)[0] < mixed.horizons[21].expected(s)[0]
     assert half.horizons[21].q_hi[2] >= plain.horizons[21].q_hi[2] - 1e-9                # bands never narrower than trailing
+
+
+# ── earnings surprise / experiment harness / data status ─────────────────────
+
+def test_earnings_events_sue_uses_prior_dispersion_and_is_point_in_time():
+    ends = [date(2018 + i // 4, 3 * (i % 4) + 1, 28) for i in range(12)]
+    eps = [1.0, 1.0, 1.0, 1.0, 1.1, 1.0, 1.1, 1.0, 1.2, 1.0, 1.2, 2.0]      # last quarter: a big beat
+    fin = pl.DataFrame({"ticker": ["T00"] * 12, "timeframe": ["quarterly"] * 12,
+                        "end_date": [str(d) for d in ends], "filing_date": [str(d + timedelta(days=35)) for d in ends],
+                        "income_statement__diluted_earnings_per_share": eps,
+                        "income_statement__revenues": [100.0 + i for i in range(12)]})
+    ev = P.earnings_events(fin).sort("end_date")
+    assert ev["sue"][:4].is_null().all()                                   # needs a year of seasonal history
+    assert ev["sue"][-1] > 3 and ev["sue"][-1] > ev["sue"][-2]            # scaled by PRIOR surprises only
+    px = synth_prices(n_tickers=1, n_days=1200, seed=1)
+    pn = P.price_features(px)
+    j = P._join_earnings(pn, ev).sort("date")
+    f_last = ev["filing_date"][-1]
+    assert j.filter(pl.col("date") <= f_last)["sue"].drop_nulls().max() < 3       # not visible on the filing day
+    after = j.filter(pl.col("date") > f_last).head(1)
+    assert after["sue"][0] > 3
+    w = j.filter(pl.col("date") > f_last).head(3)["ear_3d"].to_list()
+    assert w[0] is None and w[-1] is not None                              # window return only after the window closes
+
+
+def test_experiment_compare_and_verdict():
+    from trading_system.alpha import experiment as X
+    days = _bdays(400)
+    rng = np.random.default_rng(0)
+    base = pl.DataFrame({"date": days, "horizon": [63] * 400, "ic": rng.normal(0.02, 0.05, 400), "spread": [0.01] * 400})
+    good = base.with_columns(ic=pl.col("ic") + 0.05)
+    tab = X.compare({"base": base, "good": good, "same": base})
+    ok, msg = X.verdict(tab, "good")
+    assert ok and "ADOPT" in msg
+    assert not X.verdict(tab, "same")[0]
+    a = pl.DataFrame({"date": [days[0]] * 3, "ticker": ["A", "B", "C"], "horizon": [63] * 3, "score": [1.0, 2.0, 3.0]})
+    b = a.with_columns(score=pl.Series([3.0, 2.0, 1.0]))
+    assert X.blend(a, b)["score"].abs().max() < 1e-6                        # opposite signals cancel
+
+
+def test_data_status_freshness_rules(tmp_path):
+    from trading_system import datastatus as DS
+    assert DS.last_session(date(2026, 9, 26)) == date(2026, 9, 25)          # Saturday → Friday
+    assert DS.sessions_between(date(2026, 9, 18), date(2026, 9, 25)) == 5
+    (tmp_path / "data/bronze").mkdir(parents=True)
+    pl.DataFrame({"date": [date(2026, 9, 10), date(2026, 9, 25)], "ticker": ["A", "B"]}).write_parquet(tmp_path / "data/bronze/ohlcv_daily.parquet")
+    s = DS.Store("x", "data/bronze/ohlcv_daily.parquet", "date", "t", 1)
+    r = DS.inspect(tmp_path, s, date(2026, 9, 26))
+    assert r["status"] == "ok" and r["rows"] == 2 and r["tickers"] == 2 and r["lag"] == 0
+    r2 = DS.inspect(tmp_path, s, date(2026, 10, 20))
+    assert r2["status"] == "STALE"
+    assert DS.inspect(tmp_path, DS.Store("y", "nope.parquet", "date", "t", 1), date(2026, 9, 26))["status"] == "missing"
