@@ -75,7 +75,9 @@ class OllamaClient:
         return data["message"]["content"]
 
     def is_available(self) -> bool:
-        """Quick health check — returns True if Ollama is reachable."""
+        """Quick health check — returns True if Ollama is reachable. ``OLLAMA_HOST=off`` (or empty) disables it."""
+        if not self.host or self.host.strip().lower() in ("off", "none", "disabled") or self.host.startswith("off"):
+            return False
         try:
             resp = requests.get(f"{self.host.rstrip('/')}/api/tags", timeout=3)
             return resp.status_code == 200

@@ -3,8 +3,8 @@
 decisions.
 
 Flow:
-  1. OCR the screenshot with a vision LLM (default gemma4:31b-cloud via the
-     local Ollama gateway) into a strict holdings JSON.
+  1. OCR the screenshot with a vision LLM (default qwen3.7-flash via the Qwen /
+     DashScope API, key from the repo .env) into a strict holdings JSON.
   2. Validate, then MERGE into the gitignored, private
      "portfolio and watchlist.json" (the playbook's source of truth) — the
      screenshot is treated as *current truth* for positions/prices, while
@@ -22,9 +22,9 @@ Safety:
   * The portfolio file and every backup are chmod 600; backups live in a 700 dir.
   * Holdings values are never written to any shared log.
 
-Privacy note: gemma4:31b-cloud is an Ollama *cloud* model, so the image bytes
-leave the box for OCR. Set VISION_MODEL to a locally-pulled vision model
-(e.g. llama3.2-vision) for fully on-device parsing.
+Privacy note: the image bytes go to Alibaba Cloud's DashScope API for OCR
+(same provider as every other LLM call in this system since 2026-09-26).
+Override with VISION_MODEL / LLM_BASE_URL.
 """
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-VISION_MODEL = os.environ.get("VISION_MODEL", "gemma4:31b-cloud")
+VISION_MODEL = os.environ.get("VISION_MODEL", "qwen3.7-flash")
+QWEN_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from paths import repo_root, ops_root  # noqa: E402
 
@@ -68,25 +68,41 @@ def die(msg: str, code: int = 1) -> "None":
     raise SystemExit(code)
 
 
-def ollama_vision(image_path: Path) -> str:
+def _qwen_key() -> str | None:
+    key = os.environ.get("QWEN_API") or os.environ.get("LLM_API_KEY")
+    if key:
+        return key
+    env = REPO / ".env"                      # same loader semantics as trading_system.config
+    if env.exists():
+        for line in env.read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k.strip() in ("QWEN_API", "LLM_API_KEY") and v.strip():
+                return v.strip().strip('"').strip("'")
+    return None
+
+
+def qwen_vision(image_path: Path) -> str:
     import urllib.request
 
+    key = _qwen_key()
+    if not key:
+        die("no QWEN_API / LLM_API_KEY in the environment or repo .env")
+    mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
     b64 = base64.b64encode(image_path.read_bytes()).decode()
     payload = {
         "model": VISION_MODEL,
-        "stream": False,
-        "prompt": EXTRACT_PROMPT,
-        "images": [b64],
-        "options": {"temperature": 0},
+        "temperature": 0,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            {"type": "text", "text": EXTRACT_PROMPT}]}],
     }
     req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/generate",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        os.environ.get("VISION_URL", QWEN_URL), data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
-            return json.load(r).get("response", "")
+            return json.load(r)["choices"][0]["message"]["content"] or ""
     except Exception as e:  # noqa: BLE001
         die(f"vision call to {VISION_MODEL} failed: {e!r}")
 
@@ -281,7 +297,7 @@ def main() -> int:
     else:
         if not a.image or not a.image.exists():
             die("provide an existing <image> or --from-json <file>")
-        parsed = parse_json_blob(ollama_vision(a.image))
+        parsed = parse_json_blob(qwen_vision(a.image))
     new_h, new_c = validate(parsed)
     existing = json.loads(PORTFOLIO.read_text())
     merged, diff = merge(existing, new_h, new_c)

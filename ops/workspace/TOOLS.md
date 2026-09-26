@@ -123,8 +123,7 @@ What Arka says → what you run:
   ~/trade-ops/research/, deploys to reports/models — gitignored, safe)
 
 Long jobs: warn that it takes a while, run it, report back when done — don't
-block the conversation. GPU note: before delegating to local qwen, run
-`bash ~/.openclaw/workspace/gpu_guard.sh` (never contend with a training run).
+block the conversation.
 
 ## Portfolio update from a Fidelity screenshot
 
@@ -132,7 +131,7 @@ Arka sends a Fidelity "Positions" screenshot on Telegram with a caption
 containing **"update portfolio"**. The keyword is REQUIRED — never run this on an
 uncaptioned or unrelated image (it overwrites his portfolio state). Then:
 
-1. OCR the image yourself — vision routes to `gemma4:31b-cloud` (flash can't see
+1. OCR the image yourself — you (qwen3.7-flash) can read images directly (older note: flash couldn't see
    images). Produce STRICT minified JSON and nothing else:
    `{"holdings":[{"symbol","quantity","last_price","current_value","average_cost","total_gain_loss","total_gain_loss_pct"}],"cash":[{"symbol","name","value"}]}`
    Money-market rows (SPAXX/FDRXX/"Cash") go in `cash`. Numbers plain — no `$` `,`
@@ -142,7 +141,7 @@ uncaptioned or unrelated image (it overwrites his portfolio state). Then:
    `~/Desktop/Trade-system_v1/ops/bin/portfolio-from-screenshot --from-json ~/trade-ops/private/inbound_holdings.json --apply`
    (Alternatively, if the image is saved to a real path, run
    `~/Desktop/Trade-system_v1/ops/bin/portfolio-from-screenshot <path> --apply` — it OCRs via
-   gemma4 itself. Drop `--apply` for a dry-run diff first if unsure.)
+   qwen3.7-flash via the Qwen API itself. Drop `--apply` for a dry-run diff first if unsure.)
 4. Reply with the script's decision report (regime + per-holding buy/sell/hold +
    12-month picks). It backs up the prior state to `~/trade-ops/private/backups/`
    and updates the private, gitignored "portfolio and watchlist.json" — this is
@@ -184,26 +183,11 @@ Check `df -h` before pulling anything large; the disk is at 83%.
   logs: `journalctl --user -u openclaw-gateway -n 50`
 - Pipeline logs: `~/trade-ops/logs/`, wrapper logs: `~/ops/logs/`
 
-## Local models (offline / free / private) — added 2026-07-23
+## Models — Qwen API only (2026-09-26)
 
-Two strong local models now run on the 8 GB GPU (both 20–30B MoE, ~3B active,
-~24 tok/s with CPU offload — see MODEL_ROUTING.md Tier 1.5):
-- `ollama/qwen3-coder:30b` — coding: write/refactor/debug, code review.
-- `ollama/gpt-oss:20b` — general reasoning, structured analysis, summaries.
-  Also wired as failover #2 (qwen-plus → nemotron-3-ultra → **gpt-oss** → qwen3.5),
-  so if the API and cloud are both down a *capable* local model still answers.
-
-Prefer these over paid deepseek / cloud gemma for mid-tier coding & analysis
-**when the GPU is FREE** — always gate on `bash ~/.openclaw/workspace/gpu_guard.sh`
-first (it now works even while `nvidia-smi` is down; FREE ⇒ go, BUSY ⇒ use
-nemotron-cloud or do it yourself). Delegate with an explicit model, e.g. spawn a
-subagent with `model=ollama/qwen3-coder:30b`. Quick one-shot from the shell:
-`openclaw agent --local --model ollama/qwen3-coder:30b --message "<task>"`
-(add `--deliver` only if the reply should go to a channel).
-
-Note: `nvidia-smi` currently fails ("NVML Driver/library version mismatch") after
-a driver update — GPU compute is FINE (Ollama runs on it), only the monitoring
-tool is broken; a reboot fixes it. `nvtop` still works.
+Everything runs on `qwen/qwen3.7-flash` (text + tools + images), fallback
+`qwen/qwen3.8-flash`. No Ollama, no local-GPU models, no gpu_guard. Don't
+switch to pricier models unless Arka asks. See MODEL_ROUTING.md for prices.
 
 ## Other projects (the same pattern extends everywhere)
 
