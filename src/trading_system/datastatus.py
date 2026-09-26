@@ -38,6 +38,8 @@ STORES = [
     Store("short interest (2017→)", "data/bronze/massive/short_interest.parquet", "settlement_date", "short features", 25),
     Store("short volume (2024→)", "data/bronze/massive/short_volume.parquet", "date", "short features", 5),
     Store("ticker overview (SIC, mcap)", "data/bronze/massive/details.parquet", None, "sector map", None),
+    Store("ticker directory history (monthly, 2008→)", "data/bronze/massive/tickers_history.parquet", "snapshot",
+          "survivorship-free membership", 45),
     Store("splits", "data/bronze/massive/splits.parquet", None, "price adjustment", None),
     Store("dividends", "data/bronze/massive/dividends.parquet", None, "price adjustment", None),
     Store("regime · FRED oil/vol/credit/rates", "data/silver/regime", "date", "regime layer", 3, None, series_dir=True),

@@ -852,3 +852,19 @@ def test_recent_grouped_403_is_not_released_yet_and_never_parks_or_loops(tmp_pat
     cr.block("grouped", "test")
     assert not any(x.name.startswith("grouped") for x in cr.due_tasks())
     assert M.Crawler.PUBLISH_LAG_H >= 4.0
+
+
+def test_directory_history_is_lowest_priority_immutable_and_built(tmp_path):
+    s = FakeSession(); s.add("https://api.massive.com/", FakeResp(200, {"results": [{"ticker": "LEH", "name": "Lehman", "type": "CS"}]}))
+    cr, st, client = _crawler(tmp_path, s)
+    tasks = list(cr.due_tasks())
+    dirs = [t for t in tasks if t.name.startswith("directory ")]
+    assert dirs and all(t.tier == 8 for t in dirs) and tasks[-len(dirs):] == dirs          # last in line
+    assert dirs[0].name == "directory 2008-01-01" and all(date.fromisoformat(t.name.split()[1]).weekday() < 5 for t in dirs)
+    dirs[0].run()
+    _, params, _ = s.log[-1]
+    assert params["date"] == "2008-01-01" and params["active"] == "true"
+    assert "directory 2008-01-01" not in [t.name for t in cr.due_tasks()]                  # immutable once fetched
+    n = st.build_extra_tables()
+    h = pl.read_parquet(st.bronze_dir / "tickers_history.parquet")
+    assert n["tickers_history"] == 1 and h["ticker"][0] == "LEH" and h["snapshot"][0] == date(2008, 1, 1)

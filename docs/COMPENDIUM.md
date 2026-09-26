@@ -174,6 +174,14 @@ The free plan is **5 req/min, EOD, 2 years of history**, so the design is:
   2026-09-21, 403): trades/quotes, Benzinga earnings calendar / analyst ratings
   / guidance — the nearest free proxies for "event time" are news
   `published_utc`, filing `acceptance_datetime` and the minute bars.
+* **Directory history** (tier 8, lowest priority, 2026-09-26): `/v3/reference/tickers?date=` on the
+  first weekday of every month since 2008 (empty before ~2008 on the free plan) →
+  `bronze/massive/tickers_history.parquet` (snapshot, ticker, type, exchange, CIK, FIGI). ~8.3k
+  securities per 2008 snapshot incl. LEH/BSC/WM/CFC — the point-in-time universe membership needed
+  to measure survivorship. Historical `tickers/{t}?date=` snapshots are NOT usable (market cap is
+  today's price × old shares). Re-probed 2026-09-26: minute AND daily bars older than 2 years are
+  403 on the free plan; 10y needs Stocks Developer ($79/mo), 20y+ Advanced ($199/mo), both with
+  flat files (whole-market daily files — one month's subscription would be enough to backfill).
 * **Deep prices** — the plan hard-caps bars at 2 years (a request from 2000
   returns 2024-09→, verified), so `ohlcv_deep.parquet` (universe + extended,
   `source` column) is built weekly in a crawler background thread from yfinance

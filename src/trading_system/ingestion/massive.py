@@ -424,6 +424,14 @@ class MassiveClient:
                          "limit": 1000, "sort": "ticker", "order": "asc"},
                         cache_key=f"reference/tickers_{'active' if active else 'delisted'}", ttl_s=ttl_s)
 
+    def tickers_asof(self, d: date, *, ttl_s: float | None = None) -> dict:
+        """The directory as it stood on ``d`` — every listed stock/ETF/ADR incl. names that later delisted.
+        Free plan serves this back to ~2008 (empty for 2003). Immutable once fetched."""
+        return self.get("/v3/reference/tickers",
+                        {"market": "stocks", "date": d.isoformat(), "active": "true",
+                         "limit": 1000, "sort": "ticker", "order": "asc"},
+                        cache_key=f"tickers_asof/{d.isoformat()}", ttl_s=ttl_s, max_pages=40)
+
     def ticker_details(self, ticker: str, *, ttl_s: float = 30 * _DAY) -> dict:
         return self.get(f"/v3/reference/tickers/{api_ticker(ticker)}", cache_key=f"details/{normalize_ticker(ticker)}",
                         ttl_s=ttl_s, paginate=False)
@@ -1276,6 +1284,19 @@ class MassiveStore:
         write("short_interest", [r for folder in ("short_interest", "short_interest_ticker")
                                  for _, doc in self._docs_in(folder) for r in flat_rows(doc["results"])],
               ["ticker", "settlement_date"])
+        hist = []
+        for snap, doc in self._docs_in("tickers_asof"):
+            for r in doc["results"]:
+                if r.get("ticker"):
+                    hist.append({"snapshot": snap, "ticker": normalize_ticker(r["ticker"]), "name": r.get("name"),
+                                 "type": r.get("type"), "primary_exchange": r.get("primary_exchange"), "cik": r.get("cik"),
+                                 "composite_figi": r.get("composite_figi"), "currency": r.get("currency_name")})
+        if hist:
+            df = (pl.DataFrame(hist, infer_schema_length=None)
+                    .with_columns(pl.col("snapshot").str.to_date("%Y-%m-%d"))
+                    .unique(subset=["snapshot", "ticker"], keep="last").sort(["snapshot", "ticker"]))
+            df.write_parquet(self.bronze_dir / "tickers_history.parquet", compression="zstd")
+            out["tickers_history"] = df.height
         write("short_volume", [r for folder in ("short_volume", "short_volume_ticker")
                                for _, doc in self._docs_in(folder) for r in flat_rows(doc["results"])],
               ["ticker", "date"])
@@ -1813,6 +1834,28 @@ class Crawler:
                     yield Task(7, f"aggs-qa {t}", self._mark(7)(lambda t=t, key=key: self._calls(
                         lambda: c.get(f"/v2/aggs/ticker/{api_ticker(t)}/range/1/day/{start.isoformat()}/{today.isoformat()}",
                                       {"adjusted": "true", "sort": "asc", "limit": 50000}, cache_key=key, ttl_s=0))), "aggs")
+
+        # tier 8 — history backfill: the point-in-time ticker directory, first session of every month
+        #          since 2008 (survivorship-free universe membership). Immutable; ~10 pages per snapshot.
+        if not self.blocked("tickers_asof"):
+            for d in self.directory_snapshot_dates():
+                if self._age(f"tickers_asof/{d.isoformat()}") is None:
+                    yield Task(8, f"directory {d}", self._mark(8, ref=True)(lambda d=d: self._calls(lambda: c.tickers_asof(d))), "tickers_asof")
+
+    DIRECTORY_START = date(2008, 1, 1)
+
+    def directory_snapshot_dates(self) -> list[date]:
+        """First weekday of each month from DIRECTORY_START to last month (holidays just give that
+        day's listing, which is equally valid)."""
+        out, d = [], self.DIRECTORY_START
+        today = self.store.today
+        while d < date(today.year, today.month, 1):
+            wd = d
+            while wd.weekday() >= 5:
+                wd += timedelta(days=1)
+            out.append(wd)
+            d = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+        return out
 
     def _calls(self, fn: Callable[[], Any]) -> int:
         c0 = self.store.client.calls
