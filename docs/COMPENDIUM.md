@@ -889,6 +889,26 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
     CAGR 16.5% → 29.1%, Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr at beta 0.72 → 0.90,
     excess +11.0%/yr CI [+6.3%, +15.8%], 12/15 years better → **adopted** as the production
     objective. MaxDD rose −28% → −39%.
+* **Selection-bias audit (2026-09-27) — read before quoting any backtest number above.** The panel
+  universe is TODAY's top-1000 by liquidity, so a stock that was small in 2023 is only in it if it later
+  grew; the model learns "illiquid names in this list go up" (its top features are liquidity/size). Clean
+  test (`ops/research/pit_universe_test.py`): universe rebuilt point-in-time each day from whole-market bars
+  (top-1000 by trailing $vol using data to that day; 1,431 names incl. 60+ that later faded/delisted, all
+  given identical data), models trained causally, same book/costs. 2024-11 → 2026-09, after costs:
+  | | IC 63d | CAGR | Sharpe | MaxDD |
+  |:--|--:|--:|--:|--:|
+  | ranking objective | 0.034 (t 0.6) | 11.9% | 0.71 | −19% |
+  | **regression objective (restored)** | **0.062 (t 1.6)** | **12.8%** | **0.90** | **−11%** |
+  | same window on the biased universe | 0.087 | 56.4% | 2.13 | −22% |
+  | PIT eligible equal-weight | — | 11.0% | 0.67 | −20% |
+  | SPY | — | 16.5% | 0.99 | −19% |
+  No statistically significant edge over the market in this window (excess over PIT EW +0.8%/yr, CI
+  [−21%, +23%]); the trend overlay cut the tariff crash (−11.5% vs SPY −18.6%) and then missed the rebound.
+  Placebo scores earn ~0; a 1–5 day stale signal changes nothing (not a timing leak). Also fixed: price
+  cleaning dropped a reused symbol's *earlier* history using a *later* break (ABVX, PARA, WOLF) — now kept
+  as a separate security. The 2004→2026 numbers (17–26% CAGR) carry the same bias and are upper bounds of
+  unknown size; a point-in-time universe for the full history needs whole-market bars before 2024-09
+  (Massive Developer/Advanced flat files). Future model changes must pass `pit_universe_test.py` too.
 * **`ts data status`** (`datastatus.py`): every store's rows/tickers/span, sessions behind the
   last close and an ok/stale verdict, crawler liveness/parked families/calls-per-day, disk.
 

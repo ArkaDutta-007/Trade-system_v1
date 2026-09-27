@@ -14,6 +14,10 @@ from it beats the baseline book on identical folds with the bootstrap CI of the 
 above zero and ≥ 70% of calendar years won. Both rules are reported; neither is applied after
 peeking at a single number.
 
+Third rule (2026-09-27): both rules above run on TODAY's top-1000 universe, which is conditioned on future
+success. A candidate must also not lose to the baseline on ``ops/research/pit_universe_test.py`` (point-in-time
+universe from whole-market bars). The ranking objective passed rule 2 and failed this one.
+
 ``blend`` averages two finished variants (per-date z-scores) without refitting.
 """
 from __future__ import annotations

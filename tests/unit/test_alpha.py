@@ -427,3 +427,14 @@ def test_data_status_freshness_rules(tmp_path):
     r2 = DS.inspect(tmp_path, s, date(2026, 10, 20))
     assert r2["status"] == "STALE"
     assert DS.inspect(tmp_path, DS.Store("y", "nope.parquet", "date", "t", 1), date(2026, 9, 26))["status"] == "missing"
+
+
+def test_sanitize_prices_splits_reused_symbols_without_look_ahead():
+    px = pl.DataFrame({"date": [date(2020, 1, d) for d in (1, 2, 3, 6, 7)], "ticker": ["X"] * 5,
+                       "close": [10., 10.5, 1000., 1010., 1020.], "adj_close": [10., 10.5, 1000., 1010., 1020.]})
+    out = P.sanitize_prices(px).sort("date")
+    assert out["ticker"].to_list() == ["X~2020-01-03", "X~2020-01-03", "X", "X", "X"]      # history kept, as a separate security
+    before = P.sanitize_prices(px.filter(pl.col("date") <= date(2020, 1, 2)))
+    assert before.height == 2                                                           # nothing on an earlier date disappears
+    r = out.with_columns(r=pl.col("adj_close") / pl.col("adj_close").shift(1).over("ticker") - 1)["r"].drop_nulls()
+    assert r.abs().max() < 1.0                                                          # no return across the break

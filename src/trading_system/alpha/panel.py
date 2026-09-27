@@ -110,26 +110,34 @@ BREAK_UP, BREAK_DOWN, MIN_PRICE = 4.0, -0.85, 0.01
 
 
 def sanitize_prices(px: pl.DataFrame) -> pl.DataFrame:
-    """Drop the part of a ticker's history that belongs to a *different* security.
+    """Split a ticker's history where the symbol was reused by a *different* security.
 
-    Free price feeds reuse symbols (BNY, CHRD, SOLS…): the series jumps ×250 or ÷1000 on the day
-    the new listing starts. Any single-day move above +400% or below −85% is treated as a series
-    break and everything before the *last* break is discarded, so features never straddle two
-    companies and the equal-weight benchmark cannot post a +487,399% day. Sub-cent prints go too.
-    """
+    Free price feeds reuse symbols (BNY, CHRD, SOLS…): the series jumps ×250 or ÷1000 on the day the
+    new listing starts. Any single-day move above +400% or below −85% is a series break. Rows before a
+    break are kept as a separate security, ``<TICKER>~<first date of the next segment>``, which simply
+    stops trading at the break — so no return is ever computed across two companies.
+
+    (Until 2026-09-26 the pre-break history was *dropped*. That used future information: on a date
+    before the break the name was already missing from the universe — caught by the truncation audit
+    for ABVX, PARA and WOLF.) Sub-cent prints are removed."""
     px = px.filter(pl.col("adj_close") >= MIN_PRICE, pl.col("close") >= MIN_PRICE).sort(["ticker", "date"])
     r = pl.col("adj_close") / pl.col("adj_close").shift(1).over("ticker") - 1
-    brk = px.with_columns(brk=((r > BREAK_UP) | (r < BREAK_DOWN)).fill_null(False))
-    last_break = (brk.filter(pl.col("brk")).group_by("ticker").agg(pl.col("date").max().alias("segment_start")))
-    if last_break.height == 0:
-        return px
-    out = (px.join(last_break, on="ticker", how="left")
-             .filter(pl.col("segment_start").is_null() | (pl.col("date") >= pl.col("segment_start")))
-             .drop("segment_start"))
-    logger.info(f"prices: {last_break.height} series breaks (symbol reuse) → dropped {px.height - out.height:,} pre-break rows "
-                f"({', '.join(last_break.sort('ticker')['ticker'].head(8).to_list())}…)")
+    px = px.with_columns(brk=((r > BREAK_UP) | (r < BREAK_DOWN)).fill_null(False))
+    n_breaks = int(px["brk"].sum())
+    if n_breaks == 0:
+        return px.drop("brk")
+    px = px.with_columns(seg=pl.col("brk").cast(pl.Int32).cum_sum().over("ticker"))
+    last_seg = pl.col("seg").max().over("ticker")
+    # label every non-final segment by the date the NEXT segment begins (known only at that date)
+    nxt = (px.filter(pl.col("brk")).select("ticker", "seg", next_start="date")
+             .with_columns(seg=pl.col("seg") - 1))
+    px = px.join(nxt, on=["ticker", "seg"], how="left")
+    px = px.with_columns(ticker=pl.when(pl.col("seg") < last_seg)
+                                  .then(pl.col("ticker") + "~" + pl.col("next_start").cast(pl.Utf8))
+                                  .otherwise(pl.col("ticker")))
+    out = px.drop("brk", "seg", "next_start")
+    logger.info(f"prices: {n_breaks} series breaks (symbol reuse) → earlier segments kept as separate securities")
     return out
-
 
 def _sector_map(cfg) -> pl.DataFrame:
     """ticker → coarse sector from the Massive SIC code (2-digit division, ~10 buckets)."""
@@ -484,12 +492,14 @@ def _norm_ppf(u: np.ndarray) -> np.ndarray:
 
 def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "1998-01-01",
                 end: date | None = None, horizons: Iterable[int] = HORIZONS,
-                min_dollar_vol: float = 1e6, deep_path: Path | None = None) -> pl.DataFrame:
-    """Prices → features → PIT joins → labels. Returns the long panel (float32 features)."""
+                min_dollar_vol: float = 1e6, deep_path: Path | None = None,
+                prices: pl.DataFrame | None = None) -> pl.DataFrame:
+    """Prices → features → PIT joins → labels. Returns the long panel (float32 features).
+    ``prices`` (long OHLCV incl. adj_close) overrides the default price source — e.g. the whole market."""
     import time as _t
     t0 = _t.time()
     B = cfg.path("data_bronze") / "massive"
-    px = load_prices(cfg, tickers, start=start, end=end, deep_path=deep_path)
+    px = sanitize_prices(prices) if prices is not None else load_prices(cfg, tickers, start=start, end=end, deep_path=deep_path)
     panel = price_features(px)
     panel = panel.join(_sector_map(cfg), on="ticker", how="left").with_columns(pl.col("sector").fill_null("unknown"))
     fin_p, news_p, si_p, sv_p = B / "financials.parquet", B / "news.parquet", B / "short_interest.parquet", B / "short_volume.parquet"

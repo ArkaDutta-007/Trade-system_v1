@@ -78,6 +78,10 @@ What Arka says → what you run:
   calibration (50/50 with the trailing 3y) — so "recalibrated for the regime"
   is automatic; quote the analog-vs-unconditional IC when asked how much to
   trust the picks right now.
+- "how good is the model really / backtest returns" → the HONEST number is the point-in-time test
+  (2026-09-27): 2024-11→2026-09 the book made 12.8%/yr, Sharpe 0.90, vs SPY 16.5% / 0.99 — no proven
+  edge over the market yet. The long 2004→2026 backtest (17–26% CAGR) uses today's survivors as the
+  universe and is inflated; always say so when quoting it. Details: COMPENDIUM "Selection-bias audit".
 - "backtest the alpha engine" → `~/ops/bin/ts-run --timeout 3600 alpha backtest --extend`
   (weekly via cron `trade-weekly-retrain`; the report is
   `~/Desktop/Trade-system_v1/reports/alpha/backtest.md`). Read the

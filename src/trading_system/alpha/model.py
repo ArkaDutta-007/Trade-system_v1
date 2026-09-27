@@ -49,10 +49,11 @@ class TrainSpec:
     half_life_days: float = 252 * 10       # time-decay of sample weights (0 = flat)
     max_train_rows: int = 2_500_000
     device: str = "auto"                   # auto | cuda | cpu
-    # rank (pairwise, per-date groups) since 2026-09-26: same folds 2012→2026, the book went CAGR 16.5% → 29.1%,
-    # Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr, excess CI [+6.3%, +15.8%], 12 of 15 years better
-    # (reports/alpha/experiments/2026-09-26). IC barely moved — the gain is concentrated in the top tail.
-    objective: str = "rank"                # rank | reg (squared error on the gaussian-rank label)
+    # "reg" (restored 2026-09-27). "rank" was adopted on 2026-09-26 from the 2012→26 book test (Sharpe 1.09→1.42),
+    # but that universe is TODAY's top-1000 — conditioned on future success. On a point-in-time universe built from
+    # whole-market bars (2024-11→2026-09) rank was worse: IC 0.034 vs 0.062, book Sharpe 0.71 vs 0.90, MaxDD −19% vs
+    # −11%. It had learned to exploit the selection bias harder. See reports/alpha/pit_test.log.
+    objective: str = "reg"                 # reg (squared error on the gaussian-rank label) | rank
     features: tuple[str, ...] = tuple(MODEL_FEATURES)   # cross-sectional only; see panel.DATE_LEVEL_FEATURES
 
     def stride_for(self, h: int) -> int:
