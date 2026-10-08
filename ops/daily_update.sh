@@ -116,6 +116,9 @@ heavy_step "ts massive update (EOD bars + corp actions + news, 5 req/min)" 2400 
 # universe → tally the forecasts that matured → recalibrate on the tally →
 # record today's forecasts. ~2 min; outputs are gitignored (data/gold, data/ledger,
 # data/models). The book itself is the `alpha_v2` paper book below.
+# Fundamentals from SEC EDGAR (Massive retired its free financials endpoint 2026-09-28):
+# reads EDGAR's daily filing index, refetches only companies that filed a 10-Q/10-K. ~1 min.
+heavy_step "ts data fundamentals (SEC EDGAR 10-Q/10-K, as first reported)" 1200 ts data fundamentals
 heavy_step "ts alpha panel (1000-name point-in-time feature panel)" 900 ts alpha panel
 heavy_step "ts alpha tally (score matured forecasts against prices)" 600 ts alpha tally
 heavy_step "ts alpha forecast (record today's forecasts, recalibrate)" 900 ts alpha forecast --days 3

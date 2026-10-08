@@ -54,6 +54,16 @@ def llm_model() -> str:
     return os.environ.get("LLM_MODEL", _DEFAULT_MODEL)
 
 
+def llm_extra_params() -> dict:
+    """Provider-specific request fields. Qwen 3.x models think before answering by default; for the
+    short extraction/narration calls made here that costs ~30x the output tokens and ~8x the latency
+    for the same answer (measured 2026-10-08: 12s → 1.5s, 1,235 → 41 tokens), and pushed calls past
+    their timeouts. ``LLM_THINKING=1`` re-enables it."""
+    if llm_provider() == "qwen" and os.environ.get("LLM_THINKING", "0") not in ("1", "true", "yes"):
+        return {"enable_thinking": False}
+    return {}
+
+
 def llm_provider() -> str:
     """Short provider label derived from the base URL, for logs and reports."""
     url = llm_base_url()

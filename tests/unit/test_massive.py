@@ -868,3 +868,20 @@ def test_directory_history_is_lowest_priority_immutable_and_built(tmp_path):
     n = st.build_extra_tables()
     h = pl.read_parquet(st.bronze_dir / "tickers_history.parquet")
     assert n["tickers_history"] == 1 and h["ticker"][0] == "LEH" and h["snapshot"][0] == date(2008, 1, 1)
+
+
+def test_retired_endpoint_410_parks_the_family_for_a_year(tmp_path):
+    s = FakeSession()
+    s.add("https://api.massive.com/vX/reference/financials", FakeResp(410, {"status": "GONE", "error": "deprecated"}))
+    s.add("https://api.massive.com/", FakeResp(200, {"results": []}))
+    cr, st, client = _crawler(tmp_path, s)
+    for d in M.business_days(st.history_start(), st.today):
+        client.cache_write(f"grouped/{d.isoformat()}", {"results": [grouped_row("AAPL", 1)], "fetched_at": 0})
+    cr.run(once=True, idle_sleep=0)
+    assert "financials" in cr.blocked_families()
+    assert sum(1 for u, _, _ in s.log if "/vX/reference/financials" in u) == 1          # one probe, never again
+    marker = cr.blocked_dir / "financials"
+    old = time.time() - 30 * 86400; os.utime(marker, (old, old))
+    assert cr.blocked("financials")                                                    # still parked after a month
+    with pytest.raises(M.MassiveGoneError):
+        client._request("https://api.massive.com/vX/reference/financials", None)

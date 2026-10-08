@@ -1,3 +1,5 @@
+# 2026-10-08: ticker renames (same FIGI) SQ→XYZ, BK→BNY, MMC→MRSH, FI→FISV; removed after
+# acquisition/take-private: IPG (Omnicom), K (Mars), DFS (Capital One), HOLX, HES (Chevron).
 # Large liquid US universe — S&P-500-scale breadth for cross-sectional training.
 # Union of a curated liquid large/mid-cap set (all 11 sectors) with the core
 # universe, so `--priority-universe core` is always a subset. Use for breadth:
@@ -68,7 +70,7 @@ required:
 - DASH
 - COIN
 - HOOD
-- SQ
+- XYZ
 - PYPL
 - TSM
 - ARM
@@ -96,7 +98,6 @@ required:
 - EA
 - TTWO
 - OMC
-- IPG
 - HD
 - LOW
 - NKE
@@ -134,7 +135,6 @@ required:
 - CL
 - KMB
 - GIS
-- K
 - HSY
 - STZ
 - MO
@@ -159,7 +159,7 @@ required:
 - PNC
 - TFC
 - COF
-- BK
+- BNY
 - STT
 - SPGI
 - MCO
@@ -167,7 +167,7 @@ required:
 - CME
 - CBOE
 - MSCI
-- MMC
+- MRSH
 - AON
 - AJG
 - PGR
@@ -180,10 +180,9 @@ required:
 - V
 - MA
 - FIS
-- FI
+- FISV
 - GPN
 - NDAQ
-- DFS
 - UNH
 - JNJ
 - LLY
@@ -220,7 +219,6 @@ required:
 - RMD
 - MTD
 - WST
-- HOLX
 - CAT
 - DE
 - HON
@@ -273,7 +271,6 @@ required:
 - WMB
 - KMI
 - OKE
-- HES
 - DVN
 - FANG
 - HAL

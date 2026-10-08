@@ -23,7 +23,7 @@ import requests
 
 from ..ingestion.llm_extractor import LLMRouter
 from ..utils import get_logger
-from ..ingestion.llm_config import llm_api_key, llm_base_url, llm_model
+from ..ingestion.llm_config import llm_api_key, llm_base_url, llm_extra_params, llm_model, llm_provider
 
 logger = get_logger(__name__)
 
@@ -167,6 +167,7 @@ def explain_report(
         ],
         "temperature": 0.3,
         "max_tokens": 420,
+        **llm_extra_params(),
     }
     try:
         resp = requests.post(
@@ -177,5 +178,5 @@ def explain_report(
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"DeepSeek explain failed: {e}")
-        return f"Error calling DeepSeek API: {e}"
+        logger.error(f"{llm_provider()} explain failed: {e}")
+        return f"Error calling the {llm_provider()} API: {e}"

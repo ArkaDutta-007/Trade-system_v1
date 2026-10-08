@@ -19,7 +19,7 @@ from typing import Any
 import requests
 
 from ..utils import get_logger
-from .llm_config import llm_api_key, llm_base_url, llm_model, llm_provider
+from .llm_config import llm_api_key, llm_base_url, llm_extra_params, llm_model, llm_provider
 
 logger = get_logger(__name__)
 
@@ -187,6 +187,7 @@ class LLMRouter:
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                **llm_extra_params(),
             }
             if require_json:
                 payload["response_format"] = {"type": "json_object"}
@@ -218,7 +219,8 @@ class LLMRouter:
                     )
                 return data["choices"][0]["message"]["content"]
             except Exception as e:
-                logger.warning(f"DeepSeek API failed ({e}), falling back to Ollama…")
+                logger.warning(f"{llm_provider()} API call failed ({str(e)[:160]})"
+                               + (" — falling back to Ollama" if self.ollama.is_available() else ""))
 
         # --- Ollama local fallback ---
         if self.ollama.is_available():
@@ -306,6 +308,7 @@ def enrich_event(
         "temperature": 0.1,
         "max_tokens": 256,
         "response_format": {"type": "json_object"},
+        **llm_extra_params(),
     }
 
     try:

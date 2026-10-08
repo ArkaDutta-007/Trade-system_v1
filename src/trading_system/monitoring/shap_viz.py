@@ -103,9 +103,8 @@ def compute_shap_waterfall(
                 sv = shap_values[0][0]  # multi-output: take first output
             else:
                 sv = shap_values[0]
-        else:
-            # Fall back to linear model or KernelExplainer
-            linear_model = None
+        linear_model = None
+        if tree_model is None:          # fall back to a linear model
             for model_name in ["ridge", "elastic_net", "huber", "bayesian_ridge"]:
                 m = getattr(ensemble, "_models", {}).get(model_name)
                 if m is not None:
@@ -120,8 +119,14 @@ def compute_shap_waterfall(
                 logger.warning("No compatible model found for SHAP computation.")
                 return None
 
-        # Get model prediction
-        prediction = float(ensemble.predict(X)[0])
+        # The prediction of the model that was EXPLAINED, so base_value + Σ SHAP adds up to it.
+        # (EnsembleModel.predict returns a dict of per-model arrays — indexing it with [0] raised
+        # KeyError: 0 and silently disabled every waterfall since the ensemble API changed.)
+        explained = tree_model if tree_model is not None else linear_model
+        pred = explained.predict(X)
+        if isinstance(pred, dict):
+            pred = pred.get("ensemble_blend", next(iter(pred.values())))
+        prediction = float(np.asarray(pred).ravel()[0])
 
         # Sort features by |SHAP value|
         abs_shap = np.abs(sv)

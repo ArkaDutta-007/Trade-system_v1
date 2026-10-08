@@ -262,6 +262,38 @@ def data_status(json_out: bool = typer.Option(False, "--json", help="machine-rea
     rprint(f"disk: data/ {d['data_gb']} GB · {d['free_gb']} GB free ({d['used_pct']}% used)")
 
 
+@data_app.command("fundamentals")
+def data_fundamentals(config: str = "configs/default.yaml", full: bool = typer.Option(False, help="refetch every company"),
+                      extra_top: int = typer.Option(1500, help="also cover the top-N names by current $volume (whole market)")):
+    """Fundamentals from SEC EDGAR XBRL (as first reported) ⊕ Massive history → data/bronze/edgar/financials.parquet."""
+    import polars as pl
+    from .config import get_config
+    from .ingestion.edgar_fundamentals import store
+    cfg = get_config(config)
+    tickers: set[str] = set()
+    gold = cfg.path("data_gold") / "alpha_panel.parquet"
+    if gold.exists():
+        tickers |= set(pl.scan_parquet(gold).select("ticker").unique().collect()["ticker"].to_list())
+    cfg_l = get_config(config).use_universe("liquid")
+    tickers |= set(cfg_l["universe"]["tickers"])
+    allp = cfg.path("data_bronze") / "massive" / "ohlcv_all.parquet"
+    if allp.exists() and extra_top:
+        lf = pl.scan_parquet(allp)
+        last = lf.select(pl.col("date").max()).collect().item()
+        top = (lf.filter(pl.col("date") > pl.lit(last) - pl.duration(days=95), ~pl.col("otc"), pl.col("close") >= 5)
+                 .group_by("ticker").agg(dv=(pl.col("close") * pl.col("volume")).median())
+                 .sort("dv", descending=True).head(extra_top).collect())
+        tickers |= set(top["ticker"].to_list())
+    tickers = {t for t in tickers if "~" not in t}
+    st = store(cfg)
+    res = st.update(sorted(tickers), full=full)
+    rprint(f"[green]edgar:[/green] {res}")
+    df = st.build(cfg.path("data_bronze") / "massive" / "financials.parquet")
+    src = df.group_by("source").len().to_dicts() if df.height else []
+    rprint(f"[green]fundamentals:[/green] {df.height:,} rows · {df['ticker'].n_unique() if df.height else 0:,} tickers · "
+           f"latest filing {df['filing_date'].max() if df.height else None} · by source {src}")
+
+
 from .alpha.cli import alpha_app  # noqa: E402  — `ts alpha …` (alpha engine v2)
 app.add_typer(alpha_app, name="alpha")
 

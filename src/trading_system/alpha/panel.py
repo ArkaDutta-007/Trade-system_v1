@@ -502,7 +502,8 @@ def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "
     px = sanitize_prices(prices) if prices is not None else load_prices(cfg, tickers, start=start, end=end, deep_path=deep_path)
     panel = price_features(px)
     panel = panel.join(_sector_map(cfg), on="ticker", how="left").with_columns(pl.col("sector").fill_null("unknown"))
-    fin_p, news_p, si_p, sv_p = B / "financials.parquet", B / "news.parquet", B / "short_interest.parquet", B / "short_volume.parquet"
+    from ..ingestion.edgar_fundamentals import fundamentals_path      # SEC EDGAR ⊕ Massive history (2026-10-08)
+    fin_p, news_p, si_p, sv_p = fundamentals_path(cfg), B / "news.parquet", B / "short_interest.parquet", B / "short_volume.parquet"
     fund = fundamental_features(pl.read_parquet(fin_p)) if fin_p.exists() else pl.DataFrame()
     panel = _join_fundamentals(panel, fund)
     panel = _join_earnings(panel, earnings_events(pl.read_parquet(fin_p)) if fin_p.exists() else pl.DataFrame())

@@ -94,6 +94,11 @@ class MassiveEntitlementError(MassiveError):
     parks the endpoint family for a week instead of burning calls on it."""
 
 
+class MassiveGoneError(MassiveEntitlementError):
+    """HTTP 410: the endpoint has been retired (e.g. /vX/reference/financials, sunset 2026-06-22 and
+    browned out from 2026-09-28). Parks the family for a year instead of a week."""
+
+
 class MassiveNotPublished(MassiveError):
     """A dated resource the plan *does* include but has not released yet (the free plan answers 403 for
     yesterday's grouped bars until ~04:00 UTC). Retried soon; never parks the endpoint family."""
@@ -354,6 +359,8 @@ class MassiveClient:
                 continue                             # _pick_key raises once all keys are dead
             if status == 403:
                 raise MassiveEntitlementError(f"403 (not in plan) from {url.split('?')[0]}: {resp.text[:200]}")
+            if status == 410:
+                raise MassiveGoneError(f"410 (endpoint retired) from {url.split('?')[0]}: {resp.text[:200]}")
             if status == 404:
                 return {"results": [], "status": "NOT_FOUND"}
             attempt += 1
@@ -1475,6 +1482,7 @@ def build_liquid_universe(store: MassiveStore, *, min_price: float = 5.0, min_do
 
 _EQUITY_TYPES = ("CS", "ADRC")
 BLOCK_TTL_S = 7 * _DAY            # how long a 403'd endpoint family is parked
+GONE_TTL_S = 365 * _DAY           # …and a 410'd (retired) one
 
 
 @dataclass
@@ -1564,15 +1572,18 @@ class Crawler:
             + timedelta(days=1, hours=self.PUBLISH_LAG_H)
 
     def blocked(self, family: str) -> bool:
+        p = self.blocked_dir / family
         try:
-            return time.time() - (self.blocked_dir / family).stat().st_mtime < BLOCK_TTL_S
+            ttl = GONE_TTL_S if " GONE " in p.read_text()[:80] else BLOCK_TTL_S
+            return time.time() - p.stat().st_mtime < ttl
         except FileNotFoundError:
             return False
 
-    def block(self, family: str, reason: str) -> None:
+    def block(self, family: str, reason: str, gone: bool = False) -> None:
         self.blocked_dir.mkdir(parents=True, exist_ok=True)
-        (self.blocked_dir / family).write_text(f"{datetime.now(timezone.utc).isoformat()} {reason}\n")
-        self.log(f"family '{family}' not in plan — parked for {BLOCK_TTL_S / _DAY:.0f} days")
+        (self.blocked_dir / family).write_text(f"{datetime.now(timezone.utc).isoformat()} {'GONE ' if gone else ''}{reason}\n")
+        ttl = GONE_TTL_S if gone else BLOCK_TTL_S
+        self.log(f"family '{family}' {'retired by Massive (410)' if gone else 'not in plan'} — parked for {ttl / _DAY:.0f} days")
 
     def blocked_families(self) -> list[str]:
         if not self.blocked_dir.exists():
@@ -1974,7 +1985,7 @@ class Crawler:
             except MassiveAuthError:
                 raise
             except MassiveEntitlementError as e:
-                self.block(task.family or task.name.split()[0], str(e)[:160])
+                self.block(task.family or task.name.split()[0], str(e)[:160], gone=isinstance(e, MassiveGoneError))
             except MassiveError as e:
                 self._note_failure(task, e)
             except Exception as e:                   # never let one bad payload stop the loop
