@@ -173,34 +173,36 @@ def test_gp_book_is_registered_and_separate():
 
 
 def test_gp_rebalance_moves_only_trade_rate_of_the_gap():
-    """From all-cash, one GP step deploys exactly trade_rate of the target."""
-    b = {"name": "ml_v2_gp", "cash": 10_000.0, "holdings": {}, "equity_log": [],
+    """An invested book moves exactly trade_rate of the way to a new target in one step."""
+    b = {"name": "ml_v2_gp", "cash": 0.0, "holdings": {"AAA": 1000.0}, "equity_log": [],
          "trades": [], "last_rebalance": None, "created": "2020-01-01"}
     px = {"AAA": 10.0, "BBB": 20.0}
     pf.rebalance_book_gp(b, {"AAA": 0.5, "BBB": 0.5}, px, "2020-01-02")
     eq = pf.equity(b, px)
-    invested = sum(q * px[t] for t, q in b["holdings"].items())
-    assert invested / eq == pytest.approx(pf.GP_TRADE_RATE, rel=1e-6)
-    assert b["cash"] / eq == pytest.approx(1 - pf.GP_TRADE_RATE, rel=1e-6)
+    assert b["holdings"]["BBB"] * px["BBB"] / eq == pytest.approx(pf.GP_TRADE_RATE * 0.5, rel=1e-3)
+    assert b["holdings"]["AAA"] * px["AAA"] / eq == pytest.approx(1 - pf.GP_TRADE_RATE * 0.5, rel=1e-3)
     assert b["trades"][-1]["turnover_frac"] == pytest.approx(pf.GP_TRADE_RATE, rel=1e-6)
 
 
-def test_gp_rebalance_converges_toward_target_and_charges_less_than_full():
-    """Repeated steps approach full deployment; turnover per step shrinks."""
+def test_gp_seeds_fully_then_trades_partially_toward_a_new_target():
+    """From cash the book goes straight to target (2026-10-08 fix: the 35%/month ramp left alpha_v2 34%
+    invested after two months); afterwards each step closes 35% of the gap and turnover decays."""
     b = {"name": "ml_v2_gp", "cash": 10_000.0, "holdings": {}, "equity_log": [],
          "trades": [], "last_rebalance": None, "created": "2020-01-01"}
-    px = {"AAA": 10.0, "BBB": 20.0}
-    tgt = {"AAA": 0.5, "BBB": 0.5}
-    turns = []
-    for i in range(8):
-        pf.rebalance_book_gp(b, tgt, px, f"2020-0{i+1}-02")
-        turns.append(b["trades"][-1]["turnover_frac"])
+    px = {"AAA": 10.0, "BBB": 20.0, "CCC": 5.0}
+    pf.rebalance_book_gp(b, {"AAA": 0.5, "BBB": 0.5}, px, "2020-01-02")
     eq = pf.equity(b, px)
-    invested = sum(q * px[t] for t, q in b["holdings"].items())
-    assert invested / eq > 0.95                          # ~97% after 8 steps
-    assert all(turns[i] > turns[i + 1] for i in range(len(turns) - 1))  # decaying
-    full_rebalance_cost = 10_000 * (pf.COST_BPS * 1.0 + pf.IMPACT_BPS) / 10_000
-    assert b["trades"][0]["cost"] < full_rebalance_cost  # first step cheaper than going all-in
+    assert sum(q * px[t] for t, q in b["holdings"].items()) / eq > 0.99      # fully deployed at seeding
+    turns = []
+    for i in range(6):                                                    # the model switches BBB → CCC
+        pf.rebalance_book_gp(b, {"AAA": 0.5, "CCC": 0.5}, px, f"2020-0{i+2}-02")
+        turns.append(b["trades"][-1]["turnover_frac"])
+    w_ccc = b["holdings"].get("CCC", 0) * px["CCC"] / pf.equity(b, px)
+    assert 0.40 < w_ccc <= 0.5 and turns[0] < 1.0 * 0.5 + 1e-9               # partial, not all at once
+    assert all(turns[i] > turns[i + 1] for i in range(len(turns) - 1))       # decaying
+    for i in range(6):                                                    # 0.5·0.65^n falls below 0.5% at n≈11
+        pf.rebalance_book_gp(b, {"AAA": 0.5, "CCC": 0.5}, px, f"2021-0{i+1}-02")
+    assert "BBB" not in b["holdings"]                                      # the leftover is sold, not kept as dust
 
 
 def test_gp_rebalance_exits_dropped_names():

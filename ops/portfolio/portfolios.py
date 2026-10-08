@@ -220,7 +220,11 @@ def rebalance_book(b: dict, targets: list[str], px: dict[str, float], d) -> None
                         "turnover_frac": round(turn_frac, 4), "cost": round(cost, 2)})
 
 
-def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float], d) -> None:
+DUST_W = 0.005            # a position the model no longer wants and below 0.5% of equity is sold outright
+
+
+def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float], d, rate: float | None = None,
+                      note: str = "") -> None:
     """Gârleanu-Pedersen partial trading: new_w = cur_w + rate * (target_w - cur_w).
 
     Costs are charged on the turnover actually traded, same model as the other
@@ -244,8 +248,14 @@ def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float],
     # into 100 % deployment and makes "partial trading" a no-op at seeding. The
     # simulator that scored Sharpe 0.995 (and reported mean deploy 0.81) uses
     # the un-normalised form and leaves the remainder in cash. Replicate THAT.
-    new = cur + GP_TRADE_RATE * (tgt - cur)
+    # Partial trading damps REBALANCING churn. It must not ration the initial deployment: before
+    # 2026-10-08 a new book moved 35%/month out of cash, so alpha_v2 was 34% invested after two
+    # rebalances and the forward test measured mostly cash. A book with no holdings goes to target.
+    if rate is None:
+        rate = 1.0 if not b["holdings"] else GP_TRADE_RATE
+    new = cur + rate * (tgt - cur)
     new = np.clip(new, 0.0, None)
+    new = np.where((tgt <= 0.0) & (new < DUST_W), 0.0, new)   # no fractional leftovers of dropped names
     turn_frac = float(np.abs(new - cur).sum())
     cost = eq * ((COST_BPS * turn_frac) + IMPACT_BPS * turn_frac ** 1.5) / 10_000.0
     eq_after = eq - cost
@@ -254,7 +264,7 @@ def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float],
     b["last_rebalance"] = str(d)
     b["trades"].append({"date": str(d), "targets": [t for t in names if target_w.get(t, 0) > 0],
                         "turnover_frac": round(turn_frac, 4), "cost": round(cost, 2),
-                        "policy": f"GP partial rate={GP_TRADE_RATE}"})
+                        "policy": f"GP partial rate={rate}" + (f" · {note}" if note else "")})
 
 
 def _rebalance(b: dict, name: str, p: dict[str, float], d) -> None:
@@ -263,6 +273,21 @@ def _rebalance(b: dict, name: str, p: dict[str, float], d) -> None:
         rebalance_book_gp(b, select_weighted(name), p, d)
     else:
         rebalance_book(b, select(name), p, d)
+
+
+def do_catch_up(px: pl.DataFrame, names: list[str]) -> None:
+    """One-off: trade the GP books fully to their current targets (repairs the cash-ramp bug, 2026-10-08)."""
+    d = latest_date(px)
+    p = prices_on(px, d)
+    for name in names:
+        b = load_book(name)
+        if not b["created"]:
+            continue
+        before = equity(b, p)
+        rebalance_book_gp(b, select_weighted(name), p, d, rate=1.0, note="catch-up: cash-ramp fix 2026-10-08")
+        save_book(b)
+        inv = 1 - b["cash"] / max(equity(b, p), 1e-9)
+        print(f"  {name}: caught up → {len(b['holdings'])} names, {inv:.0%} invested (equity {before:,.0f})")
 
 
 def do_init(px: pl.DataFrame) -> None:
@@ -376,10 +401,13 @@ def main() -> int:
     ap.add_argument("--rebalance", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--catch-up", nargs="*", metavar="BOOK", help="one-off: trade these GP books fully to target")
     a = ap.parse_args()
     if not any([a.init, a.mark, a.rebalance, a.report]):
         a.report = True
-    px = price_frame() if (a.init or a.mark or a.rebalance) else None
+    px = price_frame() if (a.init or a.mark or a.rebalance or a.catch_up) else None
+    if a.catch_up:
+        do_catch_up(px, a.catch_up)
     if a.init:
         print("initialising books:")
         do_init(px)
