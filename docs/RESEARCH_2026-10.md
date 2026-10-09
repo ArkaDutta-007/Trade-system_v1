@@ -36,6 +36,11 @@
    fundamental-vs-story news split does not replicate in our liquid names ($0.34 to test); and live
    evidence is now checked daily against rules fixed in advance — a tripwire for a broken model, since
    confirming an edge this size takes years of live data.
+8. **Data audit, local models, small RL (§7–§10):** the news history is complete and the features are
+   computed correctly, but data depth followed today's top 1,000, so names that later dropped out had
+   thin data in point-in-time tests — fixed (crawl of all 1,433 past members running). A 4B local
+   decision model (tev1) on our 8 GB GPU labels news as well as the cloud models, but no news score
+   predicts subsequent returns, and small RL policies don't beat the simple rules they would replace.
 
 ## 2. How everything was tested
 
@@ -281,5 +286,141 @@ research. Checkpoints: first 21-day tally ≈ 2026-10-16 (pipeline check), 2026-
 tally ≈ 2026-12-16, **2027-03-15 (first consistency verdict)**, 2027-09-15. As of 2026-10-09: GREEN —
 5-day live IC +0.014 vs +0.015 expected (12 matured dates); nothing at 21/63 days has matured yet.
 
+## 7. Is the news data properly ingested? (audit, 2026-10-09)
+
+| Check | Result |
+|---|---|
+| History per stock | complete — every article Massive has since 2017 for today's top 1,000 (no truncation: AAPL 22,513, NVDA 24,466 articles) |
+| Freshness | rolling 14-day refresh per stock + the whole-market daily feed (~500–570 articles a day, far under its 6,000 cap) |
+| Feature correctness | the panel's news counts and sentiment equal recounts from the raw articles (e.g. 2026-09-30: AAPL 169 articles / +0.30, NVDA 398 / +0.51), using only articles published before the date |
+| Provider coverage | Massive's sources changed: Zacks 65k articles (2023) → ~0 (2025); MarketWatch 8k → 0; Benzinga 18k → 4k. Article *counts* are not comparable across years; sentiment averages much less affected |
+| Sentiment | Massive's per-ticker LLM sentiment exists from 2024-07 only (92% of rows since then) |
+| **Point-in-time coverage** | **gap found and fixed** (below) |
+
+**The gap.** Data depth followed *today's* top 1,000. The 422 names that were in the point-in-time
+universe at some point since late 2024 but have since dropped out had: news sentiment on 38% of days
+(vs 72%), fundamentals 64% (vs 89%), earnings-surprise features 46% (vs 78%), short interest 1.7% (vs
+99.7%). Inside the PIT universe, *being in today's crawl* predicts the next month's return with IC +0.063
+(t 7.4) — so any feature that exists mostly for survivors leaks hindsight into a point-in-time test.
+
+**What it did to earlier results.** It did *not* flatter the model: the model scored the poorly covered
+names higher (mean z +0.25 vs −0.03), 17% of its top-20 picks came from them, and its IC inside the
+well-covered names is +0.056 vs +0.044 overall — the honest test, if anything, understated it. The news
+feature tests (§6.3) were mildly flattered (a bare "has news" indicator has IC +0.023, t 1.8); their
+negative conclusions stand.
+
+**Fix (commit 705bf7d).** `massive.pit_members()` = every name that was top-1000 on any day of the bar
+window (1,433 names). The crawler now gives all of them full depth (deep news, short interest/volume,
+corporate actions, events; ~3,400 calls, ~6 h at 10/min, running), and `ts data fundamentals` fetches
+their SEC filings (done: 4,517 tickers). **To do once the crawl finishes:** rebuild the PIT panel and
+re-run the clean test; re-test Massive's sentiment as an overlay (partial IC +0.020, t 1.8 beyond the
+model score today — borderline and possibly coverage-driven).
+
+## 8. Local "System-1" models on our 8 GB GPU
+
+Setup (no sudo, nothing in the system service changed): Ollama 0.40.2 in user space on port 11435
+(`~/opt/ollama-0.40.2`, models in `~/opt/ollama-models`) next to the system Ollama 0.30.11, serving
+Together AI's **tev1** decision models (Qwen3.5 fine-tunes, MIT licence) through `/v1/systemone`: send
+an article plus typed questions, get back choices with probabilities in one pass. Plus **FinBERT**
+(110M encoder, 2019 — no LLM look-ahead possible) and the existing qwen3.7-flash API as a reference.
+GPU: RTX 2070 SUPER, 7.6 GiB usable; tev1:4b (4.5 GB) and FinBERT fit together.
+
+| Model | Speed on our GPU | Cost | Notes |
+|---|---|---|---|
+| FinBERT | **707 articles/s** (all 88,723 in 2 min) | free | sentiment only |
+| tev1:0.8b | 4.2–4.9 articles/s (4 questions) | free | routing 25/28 |
+| tev1:4b | 1.5 articles/s (4 questions); 0.76/s at 3 questions per stock | free | routing 27/28 |
+| qwen3.7-flash (API) | 11,785 pairs in ~4 min, batched | $0.04 | reference |
+
+The decision template is ~2,100 tokens per request around a ~100-token article and requests run one
+at a time (parallel requests don't help), so tev1 suits *live* scoring (~500 new articles a day ≈ 6–11
+minutes) far better than re-scoring history (88.7k articles ≈ 16–32 hours).
+
+Results (tev1:4b on 2,500 of the 6,987 sample articles = 3,914 article–stock pairs; the other models on
+all of them; Massive's sentiment is the reference because it is generated at publication time):
+
+| Sentiment toward the tagged stock | Agrees with Massive (κ) | ρ with the day's move, earnings news (n = 3,166) | pos − neg day-0 move | ρ with days 2–21 |
+|---|--:|--:|--:|--:|
+| Massive (reference, cloud LLM) | — | +0.189 | +4.04% | +0.014 |
+| **tev1:4b (local)** | **70% (0.50)** | **+0.215** | +3.29% | +0.003 |
+| tev1:0.8b (local) | 63% (0.38) | — (random sample only) | — | — |
+| FinBERT (local) | 55% (0.24) | +0.157 | +2.22% | +0.015 |
+| qwen3.7-flash (API) | 45% (0.17) | +0.143 | +2.85% | +0.012 |
+
+- **The local 4B model reads news as well as the cloud models** — best agreement with Massive and the
+  tightest fit to the day's move on earnings news. It is also better at *which* company a fact belongs
+  to: most of its disagreements with qwen on beat/miss are articles that merely mention a stock (KVUE in
+  a J&J story, AAPL in a Goldman piece), where tev1 correctly answers "no results reported for this
+  company". The 0.8B is clearly weaker (κ 0.38; its materiality score is near useless).
+- **No score predicts what happens next.** Correlation with days 2–21 is ~0 for every model. As a
+  monthly feature, FinBERT sentiment (all 88.7k articles) has IC +0.013 (t 1.4) and +0.005 (t 0.8) after
+  the model score and Massive's sentiment.
+- **No post-earnings drift.** Beats vs misses: day 0 +3.8% (tev1) / +2.5% (qwen), then days 2–21 −0.9%
+  (t −1.0) / +0.2% (t 0.2), days 2–63 +1.7% (t 1.3) / +0.2%; guidance raised vs cut likewise
+  insignificant. Matches [Martineau 2022](https://cfr.ivo-welch.info/published/papers/martineau2021rest.pdf):
+  no drift in large stocks since 2006.
+- **Materiality** (tev1 impact score) tracks the size of the day's move (ρ +0.14; Massive's |sentiment|
+  +0.16) but not the next week's volatility (ρ ≈ 0.01) — no use for risk sizing.
+
+**Verdict:** a local model can replace the *labelling* (free, private, per-company precise) but adds no
+*information* the system lacks. Don't feed local scores into the forecaster. Worth keeping as (1) a
+backup if Massive drops its sentiment field, (2) structured per-holding facts for the brief, and (3) the
+agent router in §10. The full sample finishes in the background; `python3 ops/research/system1_2026_10.py
+analyze` refreshes the numbers.
+
+
+## 9. Small reinforcement-learning models
+
+Our book makes ~12 decisions a year on a weak signal, so the only RL worth testing is small: a few
+parameters, trained walk-forward, judged against the simple rule it would replace
+(`ops/research/rl_2026_10.py`; all constants fixed before the first run).
+
+**A. Learned exposure policy** — a linear policy or a 5-seed ensemble of 8-unit networks sets the
+book's gross exposure (35–100%) each day from market state at the prior close (SPY trend, volatility,
+drawdown, VIX, credit spread, yield curve, the book's own recent return/volatility). Exposure doesn't
+move future states except through costs, so this is a contextual bandit with a known reward; trained by
+deterministic policy gradient on the Sharpe of the exposed book (10 bp per unit of exposure change),
+refit every January on all prior years, out of sample 2009 → 2026:
+
+| Exposure rule (2009 → 2026) | CAGR | Sharpe | Max DD | 2022 bear | 2020 crash+rebound |
+|---|--:|--:|--:|--:|--:|
+| always invested | 17.2% | 0.92 | −38.8% | −24.1% | +4.9% |
+| **200-day trend rule (½ below)** | 14.3% | **0.96** | −34.5% | −24.1% | −0.6% |
+| learned linear policy (avg gross 0.81) | 11.9% | 0.94 | −26.3% | −15.7% | −4.0% |
+| learned 8-unit network ensemble | 12.3% | 0.87 | −31.1% | −9.5% | −5.2% |
+
+Neither beats the trend rule on Sharpe (−0.02 [−0.18, +0.11] and −0.09 [−0.26, +0.10]). They behave
+like a more cautious overlay — shallower drawdowns, less return — the same trade the optimiser in §6.2
+offers, at more complexity.
+
+**B. Online learning over horizon blends** — six fixed blends of the 5/21/63-day forecasts run as
+separate books; each month Hedge (exponential weights), discounted Hedge, follow-the-leader on 36-month
+Sharpe, or a contextual leader (same market-trend state) picks the mix from past months only. 2009 →
+2026: all within −0.04 to +0.01 Sharpe of the fixed production blend (CIs ±0.05–0.1 around zero). The
+blends are too similar (Sharpe 0.84–1.09) for any learner to exploit.
+
+**Where RL already is, and where it could still fit.** The partial-trading rule (35% of the gap per
+month) is the closed-form solution of Gârleanu & Pedersen's linear-quadratic dynamic trading problem —
+exactly what an RL execution agent would learn under those assumptions; and the calibrator's IC-weighted
+horizon blend is a simple online learner. Execution RL only pays with real fills and size (a 2025 review
+of 167 studies finds RL's clearest wins in market making, modest ones in portfolio allocation, and that
+implementation quality matters more than the algorithm — [Reinforcement Learning in Financial Decision
+Making](https://arxiv.org/html/2512.10913v1)). RL fine-tuning of a small LLM on return labels would
+bake in look-ahead and overfit at our sample size. **Verdict: no RL component is worth adding now.**
+
+## 10. Where small fast models could fit — map and recommendations
+
+| Pipeline stage | Small-model use | Evidence (this round) | Verdict |
+|---|---|---|---|
+| News sentiment (direction) | score each article and stock locally | see §8: local scores match the day's move about as well as Massive's; no score predicts the following month | keep Massive's in the model; a local tev1 score is a free backup if Massive drops its sentiment field (as it dropped financials) |
+| Earnings beat/miss, guidance | structured extraction from news | no post-earnings drift in our liquid names 2024–26, by any labeller — consistent with [Martineau 2022](https://cfr.ivo-welch.info/published/papers/martineau2021rest.pdf) (no drift in large stocks since 2006) and the [microcap-only revival](https://anderson-review.ucla.edu/is-post-earnings-announcement-drift-a-thing-again/) | report item for holdings, not alpha |
+| Materiality / novelty | flag big news | predicts the size of the day's move weakly; not the next week's volatility | no |
+| Agent routing (Silas on Telegram) | message → fixed tool, with probabilities | tev1:0.8b 25/28 correct in 0.12 s, tev1:4b 27/28; the prompt-injection message went to "other"; low-confidence cases can fall back to Qwen | **most promising** — reliability, privacy, zero cost; needs OpenClaw wiring and your OK (it brings back a local Ollama dependency) |
+| Fidelity screenshot reading | local vision model instead of the cloud API | not tested | worth testing for privacy — holdings screenshots currently go to a cloud API |
+| Ops alerts | triage noise | the channel-level de-duplication already fixed the July duplicate-alert problem | no |
+| Regime layer | count oil-shock / war / AI-capex headlines | not tested; FRED already supplies the state | low |
+| Filings (8-K / 10-K text) | event classification, change detection | "Lazy Prices" replications are weak; needs a new data pipeline | not now |
+
 *Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
-`weighting_2026_10.py`, `newstype_2026_10.py`. Raw results: `reports/alpha/lab_2026_10/*.json`.*
+`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`. Raw results:
+`reports/alpha/lab_2026_10/*.json`.*
