@@ -30,6 +30,12 @@
 6. **"Ability" gains we did deliver today:** the crawler no longer burns a CPU core and 15 GB of RAM
    (rebuild storm fixed), insider-trading data (3.4M trades, 2006 →) and SEC fundamentals are now in the
    system, and LLM calls are 8× faster.
+7. **Follow-up the same day (§6):** the legacy engine is retired (daily run ~36 → ~5 min, Saturday ~4 h →
+   ~10 min); no weighting rule adds return — a covariance-aware optimiser trades ~20% less volatility for
+   the same long-run return but lagged the 2024–26 AI rally, so it stays an option, not a change; the
+   fundamental-vs-story news split does not replicate in our liquid names ($0.34 to test); and live
+   evidence is now checked daily against rules fixed in advance — a tripwire for a broken model, since
+   confirming an edge this size takes years of live data.
 
 ## 2. How everything was tested
 
@@ -151,7 +157,7 @@ that admits more future winners from today's survivor list, so it isn't trusted.
 | SEC fundamentals (XBRL, as first reported) | added 2026-10-08 | replaces Massive's retired endpoint |
 | News sentiment (Massive LLM "insights") | exists only from mid-2024 | generated near publication → little LLM look-ahead ([Glasserman & Lin](https://arxiv.org/pdf/2309.17322)) |
 | News *volume* | 2k articles (2020) → 443k (2022) | a coverage break, not a market change — count features can learn it |
-| News *type* | not used | [fundamental news drifts for weeks, soft news reverses](https://arxiv.org/abs/2608.14014) — classifiable with qwen3.7-flash for ~$5 |
+| News *type* | **tested 2026-10-09, not adopted** (§6.3) | 88,700 articles tagged for $0.34; the paper's drift/reversal split adds nothing in our liquid universe |
 | Crawler efficiency | **fixed today** | was rebuilding all tables every ~3 min (1 CPU core, 15 GB); now 0.5 GB |
 | LLM calls | fixed 2026-10-08 | thinking off: 12 s → 1.5 s, 30× fewer tokens |
 
@@ -160,15 +166,120 @@ that admits more future winners from today's survivor list, so it isn't trusted.
 | # | Action | Why | Cost |
 |---|---|---|---|
 | 1 | **Keep the current model, book and overlays unchanged** | nothing beat it; PBO 0.51 says tuning would fit noise | — |
-| 2 | **Wait for live evidence before any further change** | backtest Sharpe barely predicts live Sharpe ([Quantopian, 888 algos: R² < 0.025](https://www.researchgate.net/publication/307553701_All_That_Glitters_Is_Not_Gold_Comparing_Backtest_and_Out-of-Sample_Performance_on_a_Large_Cohort_of_Trading_Algorithms)); first 21d forecasts mature Oct 15, 63d in mid-December | time |
+| 2 | **Wait for live evidence before any further change** — now automated with pre-registered rules (§6.4) | backtest Sharpe barely predicts live Sharpe ([Quantopian, 888 algos: R² < 0.025](https://www.researchgate.net/publication/307553701_All_That_Glitters_Is_Not_Gold_Comparing_Backtest_and_Out-of-Sample_Performance_on_a_Large_Cohort_of_Trading_Algorithms)); first 21d forecasts mature Oct 15, 63d in mid-December | time |
 | 3 | **Buy one month of Massive Developer (~$79) for whole-market history 2016 →** | turns the 22-month clean test into a 10-year one; makes debiased training possible | $79 once |
-| 4 | Retire the legacy engine from the daily pipeline | ~45–60 of the pipeline's minutes; its paper books trail (ml_raw −6%, ml_v2 −5%) | your call |
+| 4 | ~~Retire the legacy engine from the daily pipeline~~ **done 2026-10-09** (§6.1) | ~34 of the pipeline's 36 minutes and 4 h every Saturday; its books trailed SPY by 7–8% | — |
 | 5 | Use insider data as an *event filter or report item*, not as model features | as raw features it made the model worse (−1.5%/yr, CI excludes 0) despite predicting returns on its own (t ≈ 3) | — |
-| 6 | Pilot news-type classification (fundamental vs soft) on 2022 → | most promising new information source in the 2026 literature | ~$5–10 |
+| 6 | ~~Pilot news-type classification (fundamental vs soft)~~ **done 2026-10-09** (§6.3) | most promising new information source in the 2026 literature | $0.34 |
 | 7 | Long term: learn portfolio weights net of costs directly ([Jensen, Kelly, Malamud & Pedersen](https://www.aqr.com/Insights/Research/Working-Paper/Machine-Learning-and-the-Implementable-Efficient-Frontier)) | the frontier for implementable ML portfolios | research |
 
 **Don't:** short (long-short lost money), widen the book, tune parameters, add volatility timing, or adopt
 any change that hasn't passed the PIT test. Expect live results below backtest.
 
-*Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`.
-Raw results: `reports/alpha/lab_2026_10/*.json`.*
+
+## 6. Follow-up, 2026-10-09 — acting on §5
+
+### 6.1 Legacy engine retired
+
+Removed from the daily run: `ts daily`, `ts ledger --resolve`, `ts features -u liquid --deep`, the ADR
+date trim, BUY signals, future-predict and paper status, the ML-model backtest, `picks_v2` and the raw
+`ts picks` ranking. Removed from the Saturday job: the 14-model ensemble retrain (`research/deploy.py`,
+4–5 h). The daily run goes from ~36 to ~5 minutes; the weekly from ~4 h to ~10 min. What the legacy
+run still did for everyone else — rebuild the liquid-universe price file the books, flag board and regime
+layer read — is now `ts ingest -u liquid --no-news` (~20 s; the legacy news + LLM "apprehension" fetch
+fed only legacy features).
+
+Paper books: `spy_benchmark`, `momentum` and `alpha_v2` stay active. Momentum is now computed straight
+from prices instead of the retired gold features (identical ranking on 2026-10-08: same 357 eligible
+names, same top 10, zero difference in the momentum values). The four legacy-model books are frozen at
+their last mark (2026-10-08) and listed under the scoreboard: ml_raw −7.9%, ml_v2 −6.9%, ml_v2_gp −7.3%
+vs SPY over their own dates; blend (half momentum) +1.9%. The scoreboard's "vs SPY" now uses SPY over
+each book's own dates (alpha_v2 started two weeks after the others). The code is still in the repo.
+
+### 6.2 Can smarter weighting gain anything? (same picks, different weights)
+
+Production holds the top 20 at ½ equal + ½ inverse-vol, capped at 8%. Nine weighting rules were
+pre-registered (`ops/research/weighting_2026_10.py`) and run with the identical signal, picks, cap,
+vol brake and trend overlay — only the split of capital changes. CAGR / Sharpe / max drawdown:
+
+| Weighting | PIT 2024-11 → | LONG 2009 → | FULL 2004 → | Sharpe vs production, LONG · FULL (P>0) |
+|---|---|---|---|---|
+| **production: ½ equal + ½ inverse-vol** | 13.4% / 0.90 / −12.0% | 14.0% / 0.97 / −26.6% | 12.8% / 0.89 / −30.2% | — |
+| equal weight | 13.6% / 0.86 / −12.8% | 14.9% / 0.97 / −27.2% | 14.1% / 0.91 / −30.6% | +0.00 (0.54) · +0.03 (0.89) |
+| inverse-vol | 12.7% / 0.90 / −11.5% | 13.0% / 0.95 / −26.9% | 11.7% / 0.85 / −30.6% | −0.02 (0.22) · −0.03 (0.07) |
+| inverse-variance | 12.4% / 0.92 / −11.3% | 12.4% / 0.94 / −27.3% | 11.1% / 0.83 / −30.1% | −0.03 (0.25) · −0.05 (0.08) |
+| conviction tilt (top pick 2×) | 12.4% / 0.83 / −12.3% | 14.2% / 0.96 / −29.1% | 13.3% / 0.90 / −31.0% | −0.01 (0.33) · +0.01 (0.79) |
+| Grinold α/σ² (z/σ) | 13.2% / 0.88 / −12.2% | 14.2% / 0.95 / −29.9% | 13.3% / 0.89 / −31.6% | −0.01 (0.29) · +0.01 (0.68) |
+| equal risk contribution (Ledoit–Wolf Σ) | 12.8% / 0.91 / −11.2% | 13.2% / 0.97 / −25.5% | 12.5% / 0.91 / −29.4% | +0.00 (0.58) · +0.02 (0.86) |
+| hierarchical risk parity | 11.6% / 0.87 / −11.2% | 12.5% / 0.95 / −25.3% | 11.6% / 0.88 / −30.0% | −0.02 (0.37) · −0.01 (0.40) |
+| mean-variance optimiser, top-40, λ = 5 | 9.9% / 0.92 / −8.3% | 12.3% / 1.05 / −24.4% | 12.7% / 1.07 / −27.3% | +0.08 (0.84) · +0.19 (1.00) |
+
+- **No weighting rule adds return.** Equal weight is ~1%/yr ahead at the same Sharpe (more volatility),
+  inside the noise; the score-based tilts (conviction, Grinold) change nothing — at an IC of 0.03 the
+  score carries too little information to size on, the classic 1/N result
+  ([DeMiguel, Garlappi & Uppal 2009](https://academic.oup.com/rfs/article-abstract/22/5/1915/1592901)).
+- **A risk-model optimiser buys a smoother ride, not a bigger one.** Mean-variance with a shrunk
+  covariance ([Ledoit & Wolf 2004](https://doi.org/10.1016/S0047-259X%2803%2900096-4)) cuts volatility ~20% (14.8% → 11.8%) and
+  drawdowns 2–4 points at about the same long-run return; Sharpe +0.08 (2009 →) to +0.19 (2004 →). The
+  diagnostics agree in direction for every setting tried (candidate set 20–60, λ 2.5–10: Sharpe +0.01 to
+  +0.21 on the long windows). But in the 2024–26 AI-led market it would have cost 3.5–5.5%/yr by
+  diversifying away from the concentrated winners, and it misses the pre-registered bar on 2009 →
+  (P = 0.84 < 0.95). **Not adopted.** It is a legitimate *preference* — same return, less risk over
+  20 years — rather than an improvement; choose it only if a smoother ride matters more than keeping up
+  in momentum-led markets.
+- The best-looking diagnostic settings (top-60, or λ = 2.5) are not candidates: picking them after
+  seeing the results is the overfitting the grid study warned about (PBO 0.25–0.36 across them).
+
+### 6.3 News type: does fundamental news drift while story news reverses?
+
+Every Massive article since July 2024 (88,700 articles, 1,000-name point-in-time universe) was tagged
+by qwen3.7-flash with one of 14 event types plus quantified / first-report / rumour flags, following
+[Kargarzadeh et al. 2026, "Buy the Rumor, Sell the News"](https://arxiv.org/abs/2608.14014)
+(`ops/research/newstype_2026_10.py`; 3,539 calls, **$0.34**). Direction comes from Massive's sentiment,
+generated at publication time, so the LLM judges only the article *type* — little room for look-ahead.
+Groups were fixed in advance from the paper: HARD = earnings, guidance, dividends/buybacks, analyst
+actions (the paper: drifts); SOFT = launches, macro commentary, leadership (the paper: reverses).
+
+Market-adjusted returns in the news direction, 62,164 ticker-day events (t-stats Newey–West by day):
+
+| Group | events | reaction day | days 1–5 | days 2–21 (tradable) | persistence (day 0–20 ÷ day 0) |
+|---|--:|--:|--:|--:|--:|
+| all news | 62,164 | +0.59% (t 18) | +0.00% | +0.05% (t 0.7) | 1.07 |
+| HARD | 8,452 | +1.08% (t 13) | −0.09% | +0.36% (t 1.5) | 1.32 |
+| HARD, quantified + first report | 6,729 | +1.32% (t 13) | −0.16% | +0.34% (t 2.1) | — |
+| SOFT | 15,200 | +0.59% (t 9.5) | +0.02% | +0.02% (t 0.5) | 1.11 |
+| other corporate (M&A, deals, legal, financing) | 11,932 | +0.35% (t 6.5) | −0.02% | −0.35% (t −1.2) | −0.10 |
+| recaps, opinion, routine releases | 26,580 | +0.55% (t 14) | +0.03% | +0.15% (t 1.2) | 1.22 |
+
+As cross-sectional signals (net news direction by group over the trailing month, IC vs the next 21
+days, PIT window), nothing adds to the model: HARD IC +0.017 (t 1.1), partial IC after the model score
+and existing sentiment +0.012 (t 0.7); SOFT +0.019 (t 1.1; positive, not reversing); HARD − SOFT −0.004.
+
+- **The paper's headline does not replicate here.** Its pooled news move is 2.8× larger on the day than
+  20 days later (persistence ≈ 0.36); in our liquid names news moves *stick* (1.07). Soft news does
+  not reverse. Hard news keeps drifting a little — positive hard news +0.43% over the next month — the
+  direction the paper predicts, but at t 1.4–2.1 and too small to move a 20-name book.
+- Likely reasons: the 1,000 most liquid US names are where news is priced fastest (the paper's 3,000
+  include small caps); ~100× fewer articles; two years of data.
+- **Not adopted; no book test** (the pre-registered next step required a significant incremental IC).
+  The labels are kept (`data/silver/newstype/labels.parquet`); tagging new articles costs ~$0.01/day if
+  the question is ever reopened with a longer history.
+
+### 6.4 Live evidence — automated, with rules fixed in advance
+
+`ts alpha live` (daily digest section; Arka gets an ops alert email once per checkpoint and if the
+verdict turns RED or AMBER). Live IC per horizon with overlap-aware standard errors (consecutive daily
+21-day forecasts are ~one observation), compared with the research expectation (5d 0.015, 21d 0.030,
+63d 0.040). **RED**: live IC ≥ 2 SE below zero over ≥ 2 effective periods → something is broken.
+**AMBER**: ≥ 2 SE below the expectation over ≥ 3 effective periods → decay, re-research. **GREEN** otherwise.
+
+What it can and cannot decide. A single date's IC swings by ±0.11–0.15, so telling an IC of 0.03 from
+zero at 2σ needs ~70 independent months — **about six years of live data**; the paper book against SPY
+needs longer still. Live results therefore cannot *confirm* the edge this year; they can catch a broken
+model or data pipeline within weeks, and by March 2027 show whether live skill is grossly below the
+research. Checkpoints: first 21-day tally ≈ 2026-10-16 (pipeline check), 2026-11-16, first 63-day
+tally ≈ 2026-12-16, **2027-03-15 (first consistency verdict)**, 2027-09-15. As of 2026-10-09: GREEN —
+5-day live IC +0.014 vs +0.015 expected (12 matured dates); nothing at 21/63 days has matured yet.
+
+*Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
+`weighting_2026_10.py`, `newstype_2026_10.py`. Raw results: `reports/alpha/lab_2026_10/*.json`.*
