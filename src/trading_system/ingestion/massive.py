@@ -1496,6 +1496,29 @@ def build_liquid_universe(store: MassiveStore, *, min_price: float = 5.0, min_do
 # ─────────────────────────────────────────────────────────────────────────────
 
 _EQUITY_TYPES = ("CS", "ADRC")
+
+
+def pit_members(ohlcv_all: Path, tickers_ref: Path | None = None, top: int = 1000, min_price: float = 5.0) -> list[str]:
+    """Every name that was in the top-``top`` by trailing-63-session median dollar volume on ANY day of
+    the whole-market bar table — the point-in-time universe's full membership, past and present.
+
+    Data depth must follow this set, not today's top-N: a name that has since dropped out (usually after
+    falling) otherwise has no news/short/fundamental history, so in a point-in-time test "has data" quietly
+    means "survived to today" (measured 2026-10-09: membership in today's crawl predicted the next month's
+    return with IC +0.063, t 7.4). Same rule as ops/research/lab_2026_10.pit_panel."""
+    lf = pl.scan_parquet(ohlcv_all)
+    if "otc" in lf.collect_schema().names():
+        lf = lf.filter(~pl.col("otc").fill_null(False))
+    if tickers_ref is not None and tickers_ref.exists():
+        ref = pl.read_parquet(tickers_ref, columns=["ticker", "type"])
+        lf = lf.filter(pl.col("ticker").is_in(ref.filter(pl.col("type").is_in(list(_EQUITY_TYPES)))["ticker"].to_list()))
+    ranked = (lf.filter(pl.col("close") > 0).select("date", "ticker", "close", dv=pl.col("close") * pl.col("volume"))
+                .sort(["ticker", "date"])
+                .with_columns(med63=pl.col("dv").rolling_median(63, min_samples=40).over("ticker"))
+                .filter(pl.col("close") >= min_price, pl.col("med63").is_not_null())
+                .with_columns(rk=pl.col("med63").rank(descending=True, method="ordinal").over("date"))
+                .filter(pl.col("rk") <= top).select("ticker").unique().collect())
+    return sorted(ranked["ticker"].to_list())
 BLOCK_TTL_S = 7 * _DAY            # how long a 403'd endpoint family is parked
 GONE_TTL_S = 365 * _DAY           # …and a 410'd (retired) one
 
@@ -1563,6 +1586,8 @@ class Crawler:
         self.log = log or (lambda m: logger.info(m))
         self._market: list[str] = []
         self._market_at = 0.0
+        self._alumni: list[str] = []
+        self._alumni_at = 0.0
         self._dirty_ohlcv = False
         self._dirty_ref = False
         self._dirty_minute = False
@@ -1642,6 +1667,21 @@ class Crawler:
         mk = self.market_tickers()
         uni = set(self.universe)
         return [t for t in mk if t not in uni][: max(self.extended_top - len(uni), 0)]
+
+    def alumni_tickers(self) -> list[str]:
+        """Names that were in the top-``extended_top`` on some day of the bar window but are not today —
+        they get the same full-depth treatment as the extended set (see ``pit_members``). Daily refresh."""
+        if self._alumni and time.time() - self._alumni_at < _DAY:
+            return self._alumni
+        try:
+            members = pit_members(self.store.ohlcv_all_path, self.store.tickers_path, top=self.extended_top)
+            current = set(self.universe) | set(self.extended_tickers())
+            self._alumni = [t for t in members if t not in current]
+        except Exception as e:
+            logger.warning(f"crawler: point-in-time alumni skipped ({e})")
+            self._alumni = []
+        self._alumni_at = time.time()
+        return self._alumni
 
     def _write_extended_universe(self, ranked: list[str]) -> None:
         """Gitignored YAML of the top-N by liquidity — promote with `ts massive universe` when wanted."""
@@ -1842,8 +1882,9 @@ class Crawler:
         # tier 4 — universe intraday: 1-minute bars for the 2-year window
         yield from self._minute_tasks(4, self.universe)
 
-        # tier 5 — extended (top-N liquid) depth, same treatment as the universe (minus minute bars)
-        ext = self.extended_tickers()
+        # tier 5 — extended (top-N liquid) depth, same treatment as the universe (minus minute bars),
+        # plus every name that was top-N at any point in the bar window (point-in-time alumni)
+        ext = self.extended_tickers() + self.alumni_tickers()
         yield from self._depth_tasks(5, ext, details_ttl=T["details_universe"], fin_ttl=T["financials_universe"],
                                      news_recent_ttl=T["news_universe"], backfill=True, events=True, start=start)
 

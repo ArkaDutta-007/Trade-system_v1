@@ -902,3 +902,23 @@ def test_idle_crawler_does_not_rebuild_back_to_back(tmp_path):
     assert calls == {"ohlcv": 2, "ref": 1}               # prices on the 15-min timer, reference stays hourly
     cr.maybe_rebuild(force=True)
     assert calls["ref"] == 2                             # shutdown / --once still flushes everything
+
+
+def test_pit_members_include_names_that_dropped_out(tmp_path):
+    """Depth must follow point-in-time membership: a name that was top-N earlier and then faded stays in."""
+    from datetime import date, timedelta
+    import polars as pl
+    from trading_system.ingestion.massive import pit_members
+    days = [date(2025, 1, 1) + timedelta(days=i) for i in range(200)]
+    rows = []
+    for i, d in enumerate(days):
+        rows.append({"date": d, "ticker": "BIG", "close": 50.0, "volume": 1e6, "otc": False})        # $50M/day
+        rows.append({"date": d, "ticker": "BIG2", "close": 40.0, "volume": 1e6, "otc": False})       # $40M/day
+        rows.append({"date": d, "ticker": "FADER", "close": 40.0 if i < 100 else 6.0,                # $200M → $6k
+                     "volume": 5e6 if i < 100 else 1e3, "otc": False})
+        rows.append({"date": d, "ticker": "SMALL", "close": 20.0, "volume": 1e4, "otc": False})      # $0.2M
+        rows.append({"date": d, "ticker": "OTCX", "close": 30.0, "volume": 9e9, "otc": True})        # OTC: never
+    p = tmp_path / "ohlcv_all.parquet"
+    pl.DataFrame(rows).write_parquet(p)
+    assert pit_members(p, top=2) == ["BIG", "BIG2", "FADER"]   # FADER: top-2 early on, long gone today
+    assert pit_members(p, top=1) == ["BIG", "FADER"]           # FADER led the liquidity rank before fading

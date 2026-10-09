@@ -290,6 +290,10 @@ def data_fundamentals(config: str = "configs/default.yaml", full: bool = typer.O
                  .group_by("ticker").agg(dv=(pl.col("close") * pl.col("volume")).median())
                  .sort("dv", descending=True).head(extra_top).collect())
         tickers |= set(top["ticker"].to_list())
+        # every name that was top-1000 at any point in the bar window, so point-in-time tests see the
+        # fundamentals of names that later dropped out (not only of today's survivors)
+        from .ingestion.massive import pit_members
+        tickers |= set(pit_members(allp, cfg.path("data_bronze") / "massive" / "tickers.parquet"))
     tickers = {t for t in tickers if "~" not in t}
     st = store(cfg)
     res = st.update(sorted(tickers), full=full)
