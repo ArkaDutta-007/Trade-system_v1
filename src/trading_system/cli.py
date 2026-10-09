@@ -294,6 +294,38 @@ def data_fundamentals(config: str = "configs/default.yaml", full: bool = typer.O
            f"latest filing {df['filing_date'].max() if df.height else None} · by source {src}")
 
 
+@data_app.command("insiders")
+def data_insiders(config: str = "configs/default.yaml", download: bool = typer.Option(True, help="fetch new quarters first")):
+    """SEC Form 4 insider trades (2006 →) → data/bronze/sec/insider_trades.parquet (routine vs opportunistic)."""
+    import json as _json
+    import time as _time
+    import requests
+    from .config import get_config
+    from .ingestion.edgar_fundamentals import store
+    from .ingestion.sec_insider import build_trades, trades_path
+    cfg = get_config(config)
+    raw = cfg.path("data_raw") / "sec_insider"
+    raw.mkdir(parents=True, exist_ok=True)
+    st = store(cfg)
+    if download:
+        page = requests.get("https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets",
+                            headers=st.ua, timeout=60).text
+        import re
+        for u in sorted(set(re.findall(r'/files/[^"]*form345\.zip', page))):
+            f = raw / u.rsplit("/", 1)[-1]
+            recent = f.name[:4] >= str(__import__("datetime").date.today().year - 1)
+            if f.exists() and f.stat().st_size > 0 and not recent:
+                continue
+            r = requests.get("https://www.sec.gov" + u, headers=st.ua, timeout=300)
+            if r.ok:
+                f.write_bytes(r.content)
+            _time.sleep(0.5)
+    cmap = {cik: t for t, cik in st.cik_map().items()}
+    df = build_trades(raw, trades_path(cfg), cmap)
+    rprint(f"[green]insiders:[/green] {df.height:,} open-market trades · {df['ticker'].n_unique():,} tickers · "
+           f"{df['filing_date'].min()} → {df['filing_date'].max()} · opportunistic {1 - df['routine'].mean():.0%}")
+
+
 from .alpha.cli import alpha_app  # noqa: E402  — `ts alpha …` (alpha engine v2)
 app.add_typer(alpha_app, name="alpha")
 

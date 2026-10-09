@@ -55,6 +55,10 @@ class TrainSpec:
     # −11%. It had learned to exploit the selection bias harder. See reports/alpha/pit_test.log.
     objective: str = "reg"                 # reg (squared error on the gaussian-rank label) | rank
     features: tuple[str, ...] = tuple(MODEL_FEATURES)   # cross-sectional only; see panel.DATE_LEVEL_FEATURES
+    # research options (2026-10-09) — defaults reproduce production exactly
+    label: str = "y"                       # y | ys (sector-neutral) | yr (beta-residual) — see panel.add_labels
+    train_top: int = 0                     # >0: train only on rows that were the top-N by trailing $volume THAT DAY
+    engine: str = "xgb"                    # xgb | lgbm | ridge
 
     def stride_for(self, h: int) -> int:
         return int(self.stride.get(h, max(1, h // 4)))
@@ -84,12 +88,16 @@ def prepare(panel: pl.DataFrame, features: Iterable[str] = MODEL_FEATURES) -> tu
     out = out.with_columns([((pl.col(f).rank(method="average").over("date") - 0.5) / pl.col(f).count().over("date"))
                             .cast(pl.Float32).alias(f + RANK_SUFFIX) for f in xs]
                            + [pl.col(f).cast(pl.Float32).alias(f + RANK_SUFFIX) for f in dl])   # raw, same suffix
+    if "log_dv_21" in out.columns and "liq_rank" not in out.columns:
+        # point-in-time liquidity rank among ≥$5 names that day (1 = most traded) — for debiased training/eval
+        dv = pl.when(pl.col("close") >= 5).then(pl.col("log_dv_21")) if "close" in out.columns else pl.col("log_dv_21")
+        out = out.with_columns(liq_rank=dv.rank(method="ordinal", descending=True).over("date").cast(pl.Int32))
     return out, [f + RANK_SUFFIX for f in feats]
 
 
-def _xy(frame: pl.DataFrame, cols: list[str], h: int | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+def _xy(frame: pl.DataFrame, cols: list[str], h: int | None = None, label: str = "y") -> tuple[np.ndarray, np.ndarray | None]:
     X = frame.select(cols).to_numpy().astype(np.float32, copy=False)
-    y = frame[f"y_{h}"].to_numpy().astype(np.float32) if h is not None else None
+    y = frame[f"{label}_{h}"].to_numpy().astype(np.float32) if h is not None else None
     return X, y
 
 
@@ -120,6 +128,10 @@ class AlphaGBM:
     def fit(self, X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None, qid: np.ndarray | None = None) -> "AlphaGBM":
         """``qid`` (the date index, rows sorted by it) is required for the ranking objective, where XGBoost
         weights whole groups — so per-row time-decay weights are dropped there."""
+        if self.spec.engine == "lgbm":
+            return self._fit_lgbm(X, y, w)
+        if self.spec.engine == "ridge":
+            return self._fit_ridge(X, y, w)
         import xgboost as xgb
         self.boosters = []
         if self.spec.objective == "rank":
@@ -142,7 +154,32 @@ class AlphaGBM:
         self.n_rows = int(X.shape[0])
         return self
 
+    def _fit_lgbm(self, X, y, w):
+        import lightgbm as lgb
+        s = self.spec
+        self.boosters = []
+        for seed in s.seeds:
+            params = {"objective": "regression", "learning_rate": s.learning_rate, "num_leaves": 2 ** s.max_depth - 1,
+                      "max_depth": s.max_depth, "min_data_in_leaf": int(s.min_child_weight), "lambda_l2": s.reg_lambda,
+                      "feature_fraction": s.colsample_bytree, "bagging_fraction": s.subsample, "bagging_freq": 1,
+                      "seed": seed, "verbose": -1, "num_threads": 12, "max_bin": 127}
+            self.boosters.append(lgb.train(params, lgb.Dataset(X, label=y, weight=w, free_raw_data=True), num_boost_round=s.n_rounds))
+        self.n_rows = int(X.shape[0])
+        return self
+
+    def _fit_ridge(self, X, y, w):
+        """Linear benchmark on the rank features (missing → 0.5, the cross-sectional median)."""
+        from sklearn.linear_model import Ridge
+        Xf = np.where(np.isfinite(X), X, 0.5)
+        self.boosters = [Ridge(alpha=1000.0).fit(Xf, y, sample_weight=w)]
+        self.n_rows = int(X.shape[0])
+        return self
+
     def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.spec.engine == "lgbm":
+            return np.mean([b.predict(X) for b in self.boosters], axis=0).astype(np.float32)
+        if self.spec.engine == "ridge":
+            return self.boosters[0].predict(np.where(np.isfinite(X), X, 0.5)).astype(np.float32)
         import xgboost as xgb
         if not self.boosters:
             raise RuntimeError("model not fitted")
@@ -199,8 +236,10 @@ def training_rows(frame: pl.DataFrame, h: int, cut_idx: int, spec: TrainSpec) ->
     thinned to every ``stride``-th date so overlapping labels don't masquerade as independent samples."""
     last = cut_idx - h - spec.embargo_days
     stride = spec.stride_for(h)
-    rows = frame.filter((pl.col("didx") <= last) & pl.col(f"y_{h}").is_not_null()
+    rows = frame.filter((pl.col("didx") <= last) & pl.col(f"{spec.label}_{h}").is_not_null()
                         & ((pl.col("didx") % stride) == (last % stride)))
+    if spec.train_top and "liq_rank" in rows.columns:
+        rows = rows.filter(pl.col("liq_rank") <= spec.train_top)
     if rows.height > spec.max_train_rows:
         rows = rows.sample(n=spec.max_train_rows, seed=cut_idx)
     return rows.sort("didx")                         # grouped by date: required by the ranking objective
@@ -246,7 +285,7 @@ def causal_scores(panel: pl.DataFrame, spec: TrainSpec | None = None, refit_ever
             tr = training_rows(frame, h, cut, spec)
             if tr.height < 5000:
                 continue
-            X, y = _xy(tr, rcols, h)
+            X, y = _xy(tr, rcols, h, spec.label)
             m = AlphaGBM(spec, h, rcols, device=device).fit(X, y, sample_weights(tr, cut, spec), qid=tr["didx"].to_numpy())
             device = m.device
             cols[f"s_{h}"] = pl.Series(m.predict(Xs))
@@ -286,7 +325,7 @@ def fit_production(panel: pl.DataFrame, spec: TrainSpec | None = None, out_dir: 
     device = resolve_device(spec.device)
     for h in spec.horizons:
         tr = training_rows(frame, h, cut, spec)
-        X, y = _xy(tr, rcols, h)
+        X, y = _xy(tr, rcols, h, spec.label)
         t0 = time.time()
         m = AlphaGBM(spec, h, rcols, device=device).fit(X, y, sample_weights(tr, cut, spec), qid=tr["didx"].to_numpy())
         device = m.device

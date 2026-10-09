@@ -885,3 +885,20 @@ def test_retired_endpoint_410_parks_the_family_for_a_year(tmp_path):
     assert cr.blocked("financials")                                                    # still parked after a month
     with pytest.raises(M.MassiveGoneError):
         client._request("https://api.massive.com/vX/reference/financials", None)
+
+
+def test_idle_crawler_does_not_rebuild_back_to_back(tmp_path):
+    cr, st, client = _crawler(tmp_path, FakeSession())
+    calls = {"ohlcv": 0, "ref": 0}
+    st.build_ohlcv_all = lambda: calls.__setitem__("ohlcv", calls["ohlcv"] + 1)
+    st.build_reference = lambda u: calls.__setitem__("ref", calls["ref"] + 1) or {}
+    for _ in range(5):                                   # five "idle with a dirty table" moments in a row
+        cr._dirty_ohlcv = cr._dirty_ref = True
+        cr.maybe_rebuild(force=False)
+    assert calls == {"ohlcv": 1, "ref": 1}               # timers hold; previously every idle tick rebuilt
+    cr._last_build -= cr.rebuild_every_s + 1
+    cr._dirty_ohlcv = cr._dirty_ref = True
+    cr.maybe_rebuild()
+    assert calls == {"ohlcv": 2, "ref": 1}               # prices on the 15-min timer, reference stays hourly
+    cr.maybe_rebuild(force=True)
+    assert calls["ref"] == 2                             # shutdown / --once still flushes everything

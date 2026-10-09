@@ -65,6 +65,13 @@ FEATURE_COLS = PRICE_FEATURES + FUND_FEATURES + EARN_FEATURES + NEWS_FEATURES + 
 DATE_LEVEL_FEATURES = [c for c in MARKET_FEATURES if c != "sector_rel_63"] + MACRO_FEATURES
 MODEL_FEATURES = [c for c in FEATURE_COLS if c not in DATE_LEVEL_FEATURES]
 BASE_COLS = ["date", "ticker", "close", "adj_close", "volume", "sector"]
+# Research candidates (2026-10-09), computed and kept in the panel but NOT model inputs until an experiment
+# adopts them: residual momentum (Blitz, Huij & Martens 2011), industry momentum (Moskowitz & Grinblatt 1999),
+# same-calendar-month seasonality (Heston & Sadka 2008).
+PRICE_CANDIDATES = ["res_mom_12_1", "ind_mom_126", "seas_21_1_5"]
+from ..ingestion.sec_insider import INSIDER_FEATURES  # noqa: E402  (SEC Form 4, 2006 →)
+CANDIDATE_FEATURES = PRICE_CANDIDATES + INSIDER_FEATURES
+ALT_LABELS = ("ys", "yr")    # sector-neutral and beta-residual versions of y (see add_labels)
 CONTEXT_COLS = ["mkt_trend_200"]          # kept for the book's regime overlay, NOT a model feature
 
 
@@ -456,7 +463,35 @@ def market_features(panel: pl.DataFrame) -> pl.DataFrame:
                             idx=(1 + pl.col("m").fill_null(0.0)).cum_prod())
               .with_columns(mkt_trend_200=(pl.col("idx") / pl.col("idx").rolling_mean(200, min_samples=100) - 1))
               .drop("m", "idx"))
-    return out.join(mkt, on=D, how="left")
+    out = out.join(mkt, on=D, how="left")
+    return candidate_features(out)
+
+
+def candidate_features(panel: pl.DataFrame) -> pl.DataFrame:
+    """CANDIDATE_FEATURES — all strictly backward-looking (data to the row's date only).
+
+    * ``res_mom_12_1``: months t−12…t−1 sum of daily residuals r − β·r_mkt (β from the previous day's
+      63d estimate), scaled by the residual volatility — momentum with the market bet removed.
+    * ``ind_mom_126``: the stock's sector average 6-month return (industry momentum).
+    * ``seas_21_1_5``: average return over the same 21-session window one to five years earlier
+      (the window [t−252k, t−252k+21], k = 1…5) — the calendar-month seasonality effect.
+    """
+    T, D = "ticker", "date"
+    if not {"r1", "mkt_r1", "beta_63", "ret_126", "adj_close"} <= set(panel.columns):
+        return panel.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in PRICE_CANDIDATES])
+    out = panel.sort([T, D])
+    resid = pl.col("r1") - pl.col("beta_63").shift(1).over(T) * pl.col("mkt_r1")
+    out = out.with_columns(_resid=resid)
+    out = out.with_columns(
+        res_mom_12_1=(pl.col("_resid").rolling_sum(231, min_samples=150).over(T).shift(21).over(T)
+                      / (pl.col("_resid").rolling_std(252, min_samples=150).over(T) * math.sqrt(231) + 1e-9)),
+        ind_mom_126=pl.col("ret_126").mean().over([D, "sector"]),
+    )
+    ac = pl.col("adj_close")
+    seas = [(ac.shift(252 * k - 21).over(T) / ac.shift(252 * k).over(T) - 1) for k in range(1, 6)]
+    out = out.with_columns(seas_21_1_5=pl.when(pl.sum_horizontal([s.is_not_null().cast(pl.Int32) for s in seas]) >= 2)
+                                         .then(pl.mean_horizontal(seas)))
+    return out.drop("_resid")
 
 
 def add_labels(panel: pl.DataFrame, horizons: Iterable[int] = HORIZONS) -> pl.DataFrame:
@@ -479,7 +514,21 @@ def add_labels(panel: pl.DataFrame, horizons: Iterable[int] = HORIZONS) -> pl.Da
     for h in horizons:
         u = out[f"_u_{h}"].to_numpy()
         out = out.with_columns(pl.Series(f"y_{h}", _norm_ppf(u), dtype=pl.Float32).fill_nan(None))
-    return out.drop([f"_u_{h}" for h in horizons])
+    out = out.drop([f"_u_{h}" for h in horizons])
+    # research labels: ys = rank within (date, sector) — no sector bets; yr = rank of the return net of β × the
+    # equal-weight market's return over the same window — no beta bet
+    for h in horizons:
+        f = pl.col(f"fwd_{h}")
+        if "sector" in out.columns:
+            g = [D, "sector"]
+            out = out.with_columns(((f.rank(method="average").over(g) - 0.5) / f.count().over(g)).alias("_us"))
+            out = out.with_columns(pl.Series(f"ys_{h}", _norm_ppf(out["_us"].to_numpy()), dtype=pl.Float32).fill_nan(None))
+        if "beta_63" in out.columns:
+            r = f - pl.col("beta_63").clip(-1.0, 4.0).fill_null(1.0) * f.mean().over(D)
+            out = out.with_columns(_rr=r).with_columns(
+                ((pl.col("_rr").rank(method="average").over(D) - 0.5) / pl.col("_rr").count().over(D)).alias("_ur"))
+            out = out.with_columns(pl.Series(f"yr_{h}", _norm_ppf(out["_ur"].to_numpy()), dtype=pl.Float32).fill_nan(None))
+    return out.drop([c for c in ("_us", "_rr", "_ur") if c in out.columns])
 
 
 def _norm_ppf(u: np.ndarray) -> np.ndarray:
@@ -512,6 +561,9 @@ def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "
     si = pl.read_parquet(si_p) if si_p.exists() else None
     sv = pl.read_parquet(sv_p, columns=["ticker", "date", "short_volume_ratio"]) if sv_p.exists() else None
     panel = _join_short(panel, si, sv)
+    from ..ingestion.sec_insider import insider_features, trades_path
+    ip = trades_path(cfg)
+    panel = insider_features(panel, pl.read_parquet(ip) if ip.exists() else pl.DataFrame())
     panel = market_features(panel)
     try:
         from .regime import macro_features_for_panel
@@ -522,8 +574,9 @@ def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "
     # tradable-ish rows only (a $1M/day floor keeps the training cross-section honest but broad)
     panel = panel.filter(pl.col("log_dv_21").is_null() | (pl.col("log_dv_21") >= math.log1p(min_dollar_vol)))
     feats = [c for c in FEATURE_COLS if c in panel.columns]
-    panel = panel.with_columns([pl.col(c).cast(pl.Float32) for c in feats])
-    keep = BASE_COLS + feats + CONTEXT_COLS + [f"fwd_{h}" for h in horizons] + [f"y_{h}" for h in horizons]
+    panel = panel.with_columns([pl.col(c).cast(pl.Float32) for c in feats + [c for c in CANDIDATE_FEATURES if c in panel.columns]])
+    keep = (BASE_COLS + feats + CONTEXT_COLS + CANDIDATE_FEATURES + [f"fwd_{h}" for h in horizons]
+            + [f"{lab}_{h}" for lab in ("y",) + ALT_LABELS for h in horizons])
     panel = panel.select([c for c in keep if c in panel.columns]).sort(["date", "ticker"])
     logger.info(f"panel: {panel.height:,} rows · {panel['ticker'].n_unique()} tickers · "
                 f"{len(feats)} features · {panel['date'].min()} → {panel['date'].max()} · {_t.time() - t0:.1f}s")

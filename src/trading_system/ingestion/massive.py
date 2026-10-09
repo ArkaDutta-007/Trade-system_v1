@@ -1235,11 +1235,26 @@ class MassiveStore:
             doc = self.client.cache_read(f"financials/{p.name[:-8]}", None)
             if doc and doc["results"]:
                 fin.append(flatten_financials(doc["results"]))
+        shard_root = self.raw_dir / ".shards"
         for p in sorted(news_dir.rglob("*.json.gz")) if news_dir.exists() else []:
             rel = p.relative_to(self.raw_dir).as_posix()[:-8]
+            # parsed-once cache: re-flattening ~3,400 gz JSON files on every rebuild cost a CPU core
+            # around the clock (2026-10-09); a shard is reused until its source file changes
+            shard = shard_root / f"{rel}.parquet"
+            try:
+                if shard.exists() and shard.stat().st_mtime >= p.stat().st_mtime:
+                    news.append(pl.read_parquet(shard)); continue
+            except Exception:
+                pass
             doc = self.client.cache_read(rel, None)
             if doc and doc["results"]:
-                news.append(flatten_news(doc["results"]))
+                df = flatten_news(doc["results"])
+                news.append(df)
+                try:
+                    shard.parent.mkdir(parents=True, exist_ok=True)
+                    df.write_parquet(shard)
+                except Exception:
+                    pass
         if det:
             df = pl.concat(det, how="diagonal_relaxed").unique(subset=["ticker"], keep="last")
             df.write_parquet(self.details_path, compression="zstd"); out["details"] = df.height
@@ -1552,6 +1567,7 @@ class Crawler:
         self._dirty_ref = False
         self._dirty_minute = False
         self._last_build = 0.0
+        self._last_ref = 0.0
         self.stop = False
         self.tier_calls: dict[str, int] = {}
         self.started = time.time()
@@ -1906,7 +1922,12 @@ class Crawler:
         self._skip_until[task.name] = time.time() + back
         logger.warning(f"crawler: {task.name} failed ({n}×): {str(err)[:160]} — retry in {back / 3600:.0f}h")
 
+    REF_REBUILD_S = 3600.0          # reference tables (news ≈ 1.6M rows) at most hourly; the 05:15 pipeline builds its own
+
     def maybe_rebuild(self, force: bool = False) -> None:
+        """Rebuild dirty bronze tables. ``force`` (shutdown / --once) ignores the timers; an idle crawler
+        does NOT force — before 2026-10-09 it did, and a trickle of one stale item every few minutes kept
+        it rebuilding everything back to back (8M price rows + 1.6M news rows every ~3 minutes)."""
         if not (force or time.time() - self._last_build >= self.rebuild_every_s):
             return
         if self._dirty_ohlcv or force:
@@ -1917,11 +1938,12 @@ class Crawler:
                 pass
             except Exception as e:
                 logger.warning(f"crawler: ohlcv build failed: {e}")
-        if self._dirty_ref or force:
+        if (self._dirty_ref and time.time() - self._last_ref >= self.REF_REBUILD_S) or force:
             try:
                 n = self.store.build_reference(self.universe)
                 self.log(f"reference tables rebuilt: {n}")
                 self._dirty_ref = False
+                self._last_ref = time.time()
             except Exception as e:
                 logger.warning(f"crawler: reference build failed: {e}")
         if self._dirty_minute or force:
@@ -1970,7 +1992,7 @@ class Crawler:
                 break
             task = self.next_task()
             if task is None or (once and task.tier > self.ONCE_MAX_TIER):
-                self.maybe_rebuild(force=self._dirty_ohlcv or self._dirty_ref)
+                self.maybe_rebuild(force=bool(once) and (self._dirty_ohlcv or self._dirty_ref))
                 self.write_state(None, idle=True)
                 if once:
                     break
