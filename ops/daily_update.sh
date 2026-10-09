@@ -109,8 +109,8 @@ heavy_step "trade-ops self-test (pytest)" 600 $CODE/run_tests.sh
 # Massive (ex-Polygon) EOD feed: one grouped call brings yesterday's bar for the
 # WHOLE market, plus recent splits/dividends and tagged news. Bounded to
 # data.massive.update_max_calls (40 ≈ 8 min at the free 5 req/min). With no
-# MASSIVE_API_KEY it prints a note and exits 0; `ts daily`/`ts ingest` then
-# fall back to yfinance on their own (data.source: auto).
+# MASSIVE_API_KEY it prints a note and exits 0; `ts ingest` then falls back
+# to yfinance on its own (data.source: auto).
 heavy_step "ts massive update (EOD bars + corp actions + news, 5 req/min)" 2400 ts massive update -u liquid
 # Alpha engine v2 (2026-09-21): point-in-time panel over the 1000-name Massive
 # universe → tally the forecasts that matured → recalibrate on the tally →
@@ -122,19 +122,14 @@ heavy_step "ts data fundamentals (SEC EDGAR 10-Q/10-K, as first reported)" 1200 
 heavy_step "ts alpha panel (1000-name point-in-time feature panel)" 900 ts alpha panel
 heavy_step "ts alpha tally (score matured forecasts against prices)" 600 ts alpha tally
 heavy_step "ts alpha forecast (record today's forecasts, recalibrate)" 900 ts alpha forecast --days 3
-heavy_step "ts daily (ingest→quality→features→predict→paper-trade→future-update)" 5400 ts daily
-heavy_step "ts ledger --resolve (score matured predictions)" 900 ts ledger --resolve
-# ts daily rebuilds gold features on the CORE universe (69 cols), but the
-# committed models_store forecasters were trained on LIQUID features with the
-# deep nonlinear tier (86 cols incl. lppls/lyapunov/rqa/entropy/chaos01) —
-# ts picks / the Invest Planner break on the mismatch. Rebuild liquid+deep
-# last so the gold matrix matches the models for picks and for the dashboard.
-heavy_step "ts ingest -u liquid" 1800 ts ingest -u liquid
-heavy_step "ts features -u liquid --deep (rebuild gold to match models_store)" 7200 ts features -u liquid --deep
-# Japanese ADRs (MKKGY/SHECY/TOELY) post their bar hours before US names, so
-# the matrix can end on a date with 3 of 362 tickers; every pick step scores
-# date.max() and dies ("no complete feature rows"). Trim that sparse tail.
-heavy_step "Trim sparse trailing dates (ADR timezone guard)" 300 python3 $CODE/bin/trim-sparse-dates
+# Legacy engine RETIRED 2026-10-09 (`ts daily`, `ts ledger --resolve`, `ts features -u liquid --deep`,
+# the sparse-date trim, BUY signals, future-predict/paper status, the ML-model backtest, picks_v2 and
+# the raw `ts picks` ranking): ~34 of the run's 36 minutes, feeding only books that trailed SPY by 7-8%
+# and diagnostic sections the alpha engine superseded on 2026-09-21. The code stays in the repo; restore
+# the steps from git (commit before "Retire the legacy pipeline") if ever needed. What remains of it is
+# the liquid-universe price file, which the paper books, the flag board and the regime layer read —
+# rebuilt from the Massive tables in ~20 s, without the legacy news + LLM apprehension fetch.
+heavy_step "ts ingest -u liquid --no-news (prices for books, flags, regime)" 900 ts ingest -u liquid --no-news
 
 # Derive ALL five flags from live data before the board is rendered, so the
 # brief never ships a hand-typed override that went stale months ago (F and C
@@ -142,44 +137,31 @@ heavy_step "Trim sparse trailing dates (ADR timezone guard)" 300 python3 $CODE/b
 # tracked configs/flag_overrides.yaml is never touched.
 heavy_step "Auto-derive flags (O/F/I/S/C)" 600 python3 $CODE/flags/auto_flags.py
 flags_step 4 45
-digest_step "BUY signals today (ts signals --stance BUY --top 10)" 600 ts signals --stance BUY --top 10
-digest_step "Future-predict sessions — MTM P&L + accuracy (ts future-status)" 600 ts future-status
-digest_step "Paper portfolio (ts paper-status)" 600 ts paper-status
-# ML model P&L: backtest of the deployed model's OOS predictions (top-20
-# equal-weight, after costs) + trailing-63d decay check. Predictions are
-# refreshed by the Saturday retrain (~/trade-ops/weekly_retrain.sh).
-digest_step "ML model backtest (deployed ensemble, after costs)" 400 python3 $CODE/research/daily_ml_backtest.py
 # Survivorship bias, measured not assumed (lab research 2026-09-15): equal
 # weight of TODAY's universe vs RSP, a real survivorship-free index product.
-# Every backtest CAGR above is inflated by roughly this much.
 digest_step "Survivorship bias check (ts bias-check) — context for every backtest number" 300 ts bias-check -u liquid
 
 # THE picks for the brief (since 2026-09-21): the alpha engine v2 book —
 # 1000-name point-in-time panel, 5/21/63d rank forecasters blended by realised
-# IC from the tallied forecast ledger, gated, sector-capped, inverse-vol
-# weighted, 18% vol target, GP partial trading against the live alpha_v2 paper
-# book. --compact = phone-width card. The brief agent is told to use ONLY this.
+# IC from the tallied forecast ledger, gated, sector-capped, ½ equal +
+# ½ inverse-vol weighted, 25% vol brake, 200-day trend overlay, GP partial
+# trading against the live alpha_v2 paper book. --compact = phone-width card. The brief
+# agent is told to use ONLY this.
 digest_step "🎯 TOP PICKS — use THIS section for the brief" 600 ts alpha picks --top 20 --compact --prev $OPS/portfolio/books/alpha_v2.json
 digest_step "Alpha book — full table (targets, calibrated E[r], 80% bands, drivers)" 600 ts alpha picks --top 20 --prev $OPS/portfolio/books/alpha_v2.json
 digest_step "Data status — every dataset, sessions behind, crawler budget" 300 ts data status
 digest_step "Alpha engine — realised forecast skill (ledger tally)" 300 ts alpha status
+# Pre-registered live-evidence checkpoints (21d forecasts mature 2026-10-15, 63d mid-December):
+# live IC vs the research expectation, paper book vs SPY/RSP, and the verdict the rules give. Emails
+# Arka (ops alert channel) once per checkpoint reached and when the verdict turns RED/AMBER.
+digest_step "Live evidence — model health vs pre-registered rules" 300 ts alpha live --alert-cmd "$HOME/ops/bin/alert"
 # Macro/fragility background: oil, vol, credit, rates, AI concentration → closest
 # historical episodes → how the signal and the book behaved in those backgrounds.
 # The forecast step above already blended this into the calibration.
 digest_step "Regime & fragility — where are we, when was it like this" 300 ts alpha regime --compact
 
-# Previous pick engine, kept as a diagnostic/second opinion only (superseded
-# 2026-09-21: 54-name candidate set, IC 0.011, 20% single-name weights).
-digest_step "Legacy picks v2 (diagnostic — superseded by the alpha book)" 900 python3 $CODE/portfolio/picks_v2.py --top 10
-
-# Raw model ranking, UNFILTERED. Kept as a diagnostic only: it ranks on raw
-# forecast score, which measurably prefers volatile illiquid names
-# (corr(score,vol)=+0.22, corr(score,$vol)=-0.19) and routinely surfaces $1
-# stocks trading $90k/day. Never use it for the brief.
-digest_step "Raw model ranking (DIAGNOSTIC — unfiltered, do NOT use for picks)" 900 ts picks --horizon 252 --top 10 -u liquid
-
-# Competing $10k paper books (spy / ml_raw / ml_v2 / momentum / blend / ml_v2_gp / alpha_v2).
-# Rebalance is monthly and self-guarding, so calling it daily is safe.
+# Competing $10k paper books (spy_benchmark / momentum / alpha_v2; the four legacy-model books are
+# retired and shown frozen). Rebalance is monthly and self-guarding, so calling it daily is safe.
 heavy_step "Dummy portfolios rebalance+mark" 1200 python3 $CODE/portfolio/portfolios.py --rebalance --mark
 digest_step "Dummy portfolios — long-run scoreboard" 300 python3 $CODE/portfolio/portfolios.py --report
 

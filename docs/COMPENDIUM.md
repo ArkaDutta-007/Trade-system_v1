@@ -816,7 +816,8 @@ as a diagnostic.
 * **Live**: `ts alpha panel → tally → forecast --days 3` in the daily pipeline
   (~2 min), `ts alpha picks` for the brief, and the `alpha_v2` paper book in
   `ops/portfolio/portfolios.py` (GP partial trading, monthly) so a live
-  track record accrues next to ml_v2_gp.
+  track record accrues next to SPY and the momentum book (the legacy-model
+  books were retired 2026-10-09).
 
 **Results (2004-01 → 2026-09, 22.7 years, after costs, `reports/alpha/backtest.md`).**
 Signal: 63d rank-IC 0.073 (ICIR 0.75, t = 56, positive in 23 of 24 years;
@@ -911,6 +912,20 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
   (Massive Developer/Advanced flat files). Future model changes must pass `pit_universe_test.py` too.
 * **`ts data status`** (`datastatus.py`): every store's rows/tickers/span, sessions behind the
   last close and an ok/stale verdict, crawler liveness/parked families/calls-per-day, disk.
+* **Live evidence (`evidence.py`, `ts alpha live`, 2026-10-09).** Daily digest section with rules fixed
+  before the first 21-day forecast matured: live rank-IC per horizon with overlap-aware standard errors
+  (a month of daily 21-day forecasts ≈ one observation) vs the research expectation (5d 0.015, 21d 0.030,
+  63d 0.040); RED if live IC ≥ 2 SE below zero over ≥ 2 effective periods (broken), AMBER if ≥ 2 SE below
+  the expectation over ≥ 3 (decay), else GREEN; paper book vs SPY/RSP for information. `--alert-cmd`
+  emails Arka once per checkpoint (first 21d tally ≈ 10-16, 11-16, first 63d tally ≈ 12-16, 2027-03-15,
+  2027-09-15) and on a RED/AMBER turn. Live data catches breakage in weeks; confirming an IC of 0.03
+  takes ~6 years, so it is a tripwire, not a verdict on the edge.
+* **Legacy engine retired (2026-10-09).** The daily run no longer runs `ts daily`, the liquid gold
+  features, BUY signals, future-predict/paper status, the ML-model backtest, `picks_v2` or raw `ts picks`
+  (~34 of 36 minutes); the Saturday job no longer retrains the 14-model ensemble (4–5 h). The paper books
+  are `spy_benchmark`, `momentum` (computed from prices) and `alpha_v2`; ml_raw/ml_v2/blend/ml_v2_gp are
+  frozen at their 2026-10-08 mark. The code remains for reference (§11, §17). Research follow-up
+  (weighting study, news-type test): docs/RESEARCH_2026-10.md §6.
 
 Tests: `tests/unit/test_alpha.py` (hand-checked features, backward-looking
 guarantee, PIT joins, purge/embargo, planted-signal recovery through the
@@ -984,7 +999,8 @@ ts tab [name]        # portfolio tabs: money-level P&L + alpha vs SPY counterfac
 ts ledger --resolve  # score matured predictions: hit rate, coverage, IC
 ts bounds TICKER     # calibrated low/median/high per horizon
 ts complexity TICKER # nonlinear fingerprint
-ts daily             # full pipeline + paper rebalance + report
+ts daily             # LEGACY full pipeline (retired from the daily run 2026-10-09)
+ts alpha live        # live evidence vs the pre-registered rules (the daily model-health check)
 ts dashboard         # Streamlit desk (5 grouped sections)
 ```
 

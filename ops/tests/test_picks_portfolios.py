@@ -155,7 +155,7 @@ def test_all_books_have_distinct_selection_rules():
 
 
 def test_persisted_books_are_valid_json_with_required_keys():
-    for name in pf.BOOKS:
+    for name in pf.BOOKS + list(pf.RETIRED):
         p = pf.book_path(name)
         if not p.exists():
             pytest.skip("books not initialised")
@@ -165,11 +165,55 @@ def test_persisted_books_are_valid_json_with_required_keys():
         assert b["cash"] >= -1e-9, f"{name} has negative cash"
 
 
-# ── ml_v2_gp: Gârleanu-Pedersen partial-trading book (added 2026-09-16) ─────
-def test_gp_book_is_registered_and_separate():
-    """Research winner runs as a SIXTH book; the original five are untouched."""
-    assert "ml_v2_gp" in pf.BOOKS
-    assert pf.BOOKS[:5] == ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend"]
+# ── book set after the legacy retirement (2026-10-09) ───────────────────────
+def test_legacy_books_are_retired_not_deleted():
+    """The four legacy-model books leave the active set but keep their history (shown frozen)."""
+    assert pf.BOOKS == ["spy_benchmark", "momentum", "alpha_v2"]
+    assert set(pf.RETIRED) == {"ml_raw", "ml_v2", "blend", "ml_v2_gp"}
+    assert not set(pf.RETIRED) & set(pf.BOOKS)
+    for name in pf.RETIRED:
+        with pytest.raises(ValueError):
+            pf.select(name) if name != "ml_v2_gp" else pf.select_weighted(name)
+
+
+def test_momentum_rank_uses_the_legacy_feature_definitions():
+    """120-row momentum on adj_close, 20-row mean of close×volume ≥ $20M, close ≥ $5 — from prices."""
+    import datetime as dt
+    days = [dt.date(2025, 1, 1) + dt.timedelta(days=i) for i in range(130)]
+    rows = []
+    for t, growth, vol, close0 in (("UP", 1.004, 1e6, 50.0), ("FLAT", 1.0, 1e6, 50.0),
+                                   ("THIN", 1.01, 1e3, 50.0), ("PENNY", 1.01, 1e9, 1.0)):
+        for i, d in enumerate(days):
+            c = close0 * growth ** i
+            rows.append({"date": d, "ticker": t, "close": c, "adj_close": c, "volume": vol})
+    r = pf.momentum_rank(pl.DataFrame(rows))
+    assert r["ticker"].to_list() == ["UP", "FLAT"]                  # THIN fails $volume, PENNY fails price
+    assert r["mom"][0] == pytest.approx(1.004 ** 120 - 1, rel=1e-9)
+
+
+def _book(name, created, log, holdings=None):
+    return {"name": name, "created": created, "cash": 0.0, "holdings": holdings or {}, "trades": [],
+            "last_rebalance": created, "equity_log": [{"date": d, "equity": e} for d, e in log]}
+
+
+def test_retired_books_are_frozen_and_reported_separately(tmp_path, monkeypatch):
+    monkeypatch.setattr(pf, "BOOKS_DIR", tmp_path)
+    pf.save_book(_book("spy_benchmark", "2026-09-04", [("2026-09-04", 10000), ("2026-09-18", 10100), ("2026-10-08", 10200)],
+                       {"SPY": 10000 / 100}))
+    a = _book("alpha_v2", "2026-09-18", [("2026-09-18", 10000), ("2026-10-08", 10000)])
+    a["cash"] = 10000.0
+    pf.save_book(a)
+    frozen = _book("ml_v2", "2026-09-04", [("2026-09-04", 10000), ("2026-10-08", 9300)], {"AAA": 93.0})
+    pf.save_book(frozen)
+    px = pl.DataFrame({"date": [__import__("datetime").date(2026, 10, 9)] * 2, "ticker": ["SPY", "AAA"],
+                       "adj_close": [103.0, 500.0]})
+    pf.do_mark(px)
+    assert pf.load_book("ml_v2") == json.loads(json.dumps(frozen))          # untouched by the daily mark
+    assert pf.load_book("spy_benchmark")["equity_log"][-1] == {"date": "2026-10-09", "equity": 10300.0}
+    rep = pf.do_report()
+    assert "Retired with the legacy model" in rep and "ml_v2" in rep.split("Retired")[1]
+    line = next(x for x in rep.splitlines() if x.startswith("alpha_v2"))
+    assert "-2.0%" in line   # vs SPY over ITS OWN dates (09-18 → 10-09: SPY +2.0%); since 09-04 SPY made +3.0%
 
 
 def test_gp_rebalance_moves_only_trade_rate_of_the_gap():
@@ -213,18 +257,3 @@ def test_gp_rebalance_exits_dropped_names():
     for i in range(12):
         pf.rebalance_book_gp(b, {"NEW": 1.0}, px, f"2020-{i+1:02d}-02")
     assert b["holdings"].get("OLD", 0.0) * px["OLD"] / pf.equity(b, px) < 0.01
-
-
-def test_gp_cap_renormalise_respects_ten_percent():
-    w = {f"T{i}": (0.5 if i == 0 else 0.5 / 19) for i in range(20)}
-    # replicate select_weighted's cap loop on a synthetic weight dict
-    for _ in range(50):
-        over = {t: v for t, v in w.items() if v > pf.GP_MAX_W}
-        if not over:
-            break
-        ex = sum(v - pf.GP_MAX_W for v in over.values())
-        for t in over: w[t] = pf.GP_MAX_W
-        free = {t: v for t, v in w.items() if t not in over}; fs = sum(free.values())
-        for t in free: w[t] += ex * free[t] / fs
-    assert max(w.values()) <= pf.GP_MAX_W + 1e-9
-    assert sum(w.values()) == pytest.approx(1.0)

@@ -26,13 +26,15 @@ Always run via the wrapper (handles cd + venv + timeout + logging):
 
 What Arka says → what you run:
 - "run the daily pipeline"        → `~/ops/bin/run-with-alert trade-daily-update ~/Desktop/Trade-system_v1/ops/daily_update.sh`
-  (full pipeline + digest, ~1–2 h; or `openclaw cron run trade-daily-update`)
-- "top picks"                     → `ts-run picks --horizon 252 --top 10 -u liquid`
-- "buy signals"                   → `ts-run signals --stance BUY --top 10`
-- "analyze NVDA"                  → `ts-run analyze NVDA`  (JSON+MD report)
+  (full pipeline + digest, ~5 min since the legacy engine was retired 2026-10-09;
+  or `openclaw cron run trade-daily-update`)
+- "top picks" / "buy signals"     → the alpha book (see "picks" below). The legacy commands
+  `ts picks`, `ts signals`, `ts analyze` run the RETIRED 14-model ensemble (not retrained
+  since 2026-10-09) — do not use them for answers.
 - "flag board"                    → `ts-run flags --config ~/trade-ops/flags/local_config.yaml --refresh`
                                     (plain `ts-run flags --refresh` reads the STALE tracked overrides)
-- "paper portfolio / how are we doing" → `ts-run paper-status` and `ts-run future-status`
+- "paper portfolio / how are we doing" → the paper books (see "how are the paper books" below);
+  `paper-status` / `future-status` are the retired legacy engine's books — frozen.
 - "today's digest/brief"          → read `~/trade-ops/briefs/latest.md`, summarize
   The 07:45 brief is DELIVERED to the Telegram group -5412027506 by the cron
   runner itself (delivery: announce → telegram → to=telegram:-5412027506).
@@ -42,19 +44,24 @@ What Arka says → what you run:
   Sends to Arka + Om. Automatic cadence is WEEKLY (cron `trade-brief-email`,
   Mondays 08:00 ET, re-enabled 2026-09-17). Telegram remains the DAILY channel.
   Override recipients for a one-off with BRIEF_RECIPIENTS="a@b,c@d".
-- "how is the model doing / model backtest" → `~/Desktop/Trade-system_v1/venv/bin/python3 ~/Desktop/Trade-system_v1/ops/research/daily_ml_backtest.py`
-  (also a section in the daily digest; watch the "last 63d" decay flag)
+- "how is the model doing / is it working live" → `~/ops/bin/ts-run alpha live`
+  The live-evidence check with the rules fixed on 2026-10-09: live IC per horizon vs the
+  research expectation (overlap-aware standard errors), the paper book vs SPY/RSP, and a
+  verdict — RED (live IC ≥2 SE below zero: something is broken), AMBER (≥2 SE below the
+  expectation: decay), GREEN otherwise. Say plainly that live data can catch a broken
+  model within months but needs ~6 years to CONFIRM an edge this size. Checkpoints:
+  first 21d tally ≈ 2026-10-16, 2026-11-16, first 63d tally ≈ 2026-12-16, 2027-03-15
+  (first real decision), 2027-09-15; Arka gets an ops alert email at each.
 - "picks" / "good picks" / "the book" → **the alpha engine v2 book** (since 2026-09-21):
   `~/ops/bin/ts-run alpha picks --top 20 --compact --prev ~/trade-ops/portfolio/books/alpha_v2.json`
   (drop `--compact` for the full table with calibrated expected returns, 80%
   bands and the model drivers per name; `--budget 10000` prints share counts).
   It is a 1000-name point-in-time panel → 5/21/63-day rank forecasters blended
   by their realised IC from the forecast ledger → gated (≥$5, ≥$20M/day, vol
-  ≤110%), ≤5 per sector, inverse-vol weighted, 8% cap, 18% vol target, traded
-  35% of the way toward target per month against the `alpha_v2` paper book.
-  Explanations: docs/COMPENDIUM.md §13a. Older engines are diagnostics only:
-  `picks_v2.py` (the 2026-09 gated version) and raw `ts picks` (prefers
-  volatile illiquid names — never use it for the brief).
+  ≤110%), ≤5 per sector, ½ equal + ½ inverse-vol weighted, 8% cap, 25% vol brake,
+  half gross below the 200-day trend, traded 35% of the way toward target per month
+  against the `alpha_v2` paper book. Explanations: docs/COMPENDIUM.md §13a. The older
+  engines (`picks_v2.py`, raw `ts picks`) were retired 2026-10-09 — never use them.
 - "is the model any good / forecast skill / how accurate" → `~/ops/bin/ts-run alpha status`
   Prints the realised rank-IC / hit rate / decile spread / band coverage of
   every forecast the engine has made (live rows since 2026-09-21, backtest rows
@@ -88,13 +95,13 @@ What Arka says → what you run:
   "Read this before believing any of it" section before quoting numbers.
 - "how are the paper books / which strategy is winning" →
   `… ~/Desktop/Trade-system_v1/ops/portfolio/portfolios.py --report`
-  Seven competing $10k books. Five seeded 2026-09-08 (spy_benchmark, ml_raw,
-  ml_v2, momentum, blend, monthly full rebalance), **ml_v2_gp** seeded
-  2026-09-16 (research winner xgb63|gp35: 63d model, top-20, 10% cap,
-  Garleanu-Pedersen partial trading at 0.35) and **alpha_v2** seeded
-  2026-09-21 (the alpha engine book, same GP execution — the two differ only
-  in the signal). Ignore the ranking until ~60 sessions.
-- "backtest the pick rules" → `… ~/Desktop/Trade-system_v1/ops/portfolio/backtest_v2.py --top 10`
+  Three ACTIVE $10k books: spy_benchmark, momentum (top-10 by 120-day momentum,
+  monthly) and **alpha_v2** (the alpha engine book, GP partial trading at 0.35).
+  "vs SPY" is SPY over the same dates as each book. The four legacy-model books
+  (ml_raw, ml_v2, blend, ml_v2_gp) were retired 2026-10-09 and are listed frozen
+  at their last mark below the table. Ignore the ranking until ~60 sessions.
+- "backtest the book rules / weighting / news ideas" → the October 2026 research harness, not the retired
+  `backtest_v2.py`: docs/RESEARCH_2026-10.md lists the scripts (ops/research/*_2026_10.py) and results.
 - "flags" / "why is the composite X" → `… ~/Desktop/Trade-system_v1/ops/flags/auto_flags.py` prints
   all five with their scores; the board itself is
   `ts flags --config ~/trade-ops/flags/local_config.yaml --refresh`.

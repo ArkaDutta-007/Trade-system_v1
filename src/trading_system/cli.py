@@ -48,11 +48,17 @@ def ingest(
     universe: str = UNIVERSE_OPT,
     workers: int = typer.Option(8, help="concurrent fetch workers (TS_INGEST_WORKERS)"),
     source: str = typer.Option("", help="yfinance | massive | auto (default: data.source in config)"),
+    news: bool = typer.Option(True, "--news/--no-news",
+                              help="also fetch per-ticker news + LLM apprehension scores (silver/events, "
+                                   "silver/apprehension_scores) — inputs of the legacy engine only, retired "
+                                   "2026-10-09; the alpha engine reads Massive news from the crawler"),
 ):
     """Ingest the configured universe to bronze parquet (threaded, with progress)."""
     cfg = get_config(config).use_universe(universe)
     out = ingest_universe(cfg, workers=workers, source=source or None)
     rprint(f"[green]Wrote {out}[/green]")
+    if not news:
+        return
 
     # Fetch news and append to silver/events.parquet
     silver = cfg.path("data_silver")

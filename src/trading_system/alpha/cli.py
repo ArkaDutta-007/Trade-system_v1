@@ -352,6 +352,50 @@ def alpha_regime(config: str = CONFIG_OPT, k: int = typer.Option(10, help="neare
             rprint("[bold]calibration in use[/bold] (blend of trailing window and analog-weighted fit): " + " · ".join(parts))
 
 
+@alpha_app.command("live")
+def alpha_live(config: str = CONFIG_OPT,
+               books: str = typer.Option("", help="paper-book directory (default: $TS_OPS/portfolio/books, "
+                                                  "else ~/trade-ops/portfolio/books)"),
+               alert_cmd: str = typer.Option("", "--alert-cmd", help="run `<cmd> <subject> <body>` once per checkpoint "
+                                                                     "reached and when the verdict turns RED/AMBER")):
+    """Live evidence vs the pre-registered rules: live IC by horizon (overlap-aware), paper book vs SPY/RSP,
+    checkpoints. Live data can catch a broken model quickly; it cannot confirm a 0.03 IC for years."""
+    import os
+    import shlex
+    import subprocess
+    from . import evidence as E
+    from . import ledger as L
+    cfg = _cfg(config)
+    led = L.load(L.ledger_path(cfg))
+    bdir = Path(books) if books else Path(os.environ.get("TS_OPS", str(Path.home() / "trade-ops"))) / "portfolio" / "books"
+    px = None
+    allp = cfg.path("data_bronze") / "massive" / "ohlcv_all.parquet"
+    if allp.exists():
+        px = (pl.scan_parquet(allp).filter(pl.col("ticker").is_in(["SPY", "RSP"])).select("date", "ticker", "adj_close")
+                .collect().with_columns(pl.col("date").cast(pl.Date)))
+    today = date.today()
+    rep = E.report(led, today, bdir if bdir.exists() else None, px)
+    sp = E.state_path(cfg)
+    st = json.loads(sp.read_text()) if sp.exists() else {}
+    done = set(st.get("done", []))
+    print(E.render(rep, today, done))
+    if not alert_cmd:
+        return
+    due = E.due_checkpoints(rep, today, done)
+    prev = st.get("last_verdict") or "GREEN"
+    turned = rep["verdict"] in ("RED", "AMBER") and rep["verdict"] != prev
+    if due or turned:
+        subject = f"Alpha engine live evidence: {rep['verdict']}" + (f" (checkpoint {due[0][0]})" if due else "")
+        body = "\n".join(f"Checkpoint {k}: {what}" for k, what in due) + "\n\n" + E.render(rep, today, done | {k for k, _ in due})
+        r = subprocess.run([*shlex.split(alert_cmd), subject, body], capture_output=True, text=True, timeout=180)
+        print(f"\n[alert {'sent' if r.returncode == 0 else 'FAILED'}: {subject} (rc={r.returncode})]")
+        if r.returncode != 0:
+            return                                    # state unchanged → retried on the next run
+        done |= {k for k, _ in due}
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(json.dumps({"done": sorted(done), "last_verdict": rep["verdict"], "updated": str(today)}, indent=1))
+
+
 @alpha_app.command("status")
 def alpha_status(config: str = CONFIG_OPT):
     """Ledger, models, calibration and the rolling realised IC at a glance."""

@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Weekly full model retrain + deploy (Saturdays via openclaw cron, alert-wrapped).
+# Weekly model refresh (Saturdays via openclaw cron, alert-wrapped).
 #
-# Runs ~/trade-ops/research/deploy.py: trains the repo's full 14-model ensemble
-# on the research-validated config (purged walk-forward + temporal validation,
-# winner by OOS IC t-stat from ~/trade-ops/research/out/summary.json), then
-#   - saves it to reports/models/ (gitignored registry). The decision layer
-#     auto-picks the newest ensemble → ts signals/analyze/future-predict all
-#     use the fresh model from the next run onward.
-#   - refreshes data/gold/predictions.parquet (feeds the daily ML backtest
-#     block in the morning digest).
-# Heavy (1-3 h) — which is why it's weekly and on a Saturday, not in the
-# 05:15 weekday window.
+# Alpha engine v2 only, since 2026-10-09: SEC insider trades → refit the production
+# forecasters on every matured label → extend the causal walk-forward backtest. ~10 min.
+#
+# The legacy 14-model ensemble retrain (research/deploy.py, 4-5 h on CPU) was retired
+# with the legacy pipeline on 2026-10-09: it fed only the ml_raw/ml_v2/ml_v2_gp paper
+# books and the "ML model backtest" digest block, all retired the same day. The script
+# stays in the repo (ops/research/deploy.py) if it is ever needed again.
 set -uo pipefail
 # Machine-independent: code lives in <repo>/ops, live state in $TS_OPS
 # (~/trade-ops on the RIT box). Same precedence as ops/paths.py.
@@ -24,26 +21,20 @@ cd "$REPO" || exit 1
 source venv/bin/activate
 
 echo "=== weekly retrain start $(date -Is) ===" >> "$LOG"
-# Alpha engine v2 FIRST (~6 min on the GPU): it drives the picks, so a slow
-# legacy step must never starve it. Refits the production forecasters on every
-# matured label and extends the causal walk-forward with the new dates only.
+FAIL=0
+step() {  # step <timeout-secs> <cmd...> — best effort, but any failure makes the job exit non-zero
+  local tmo="$1"; shift
+  echo "--- $* ($(date -Is)) ---" >> "$LOG"
+  timeout "$tmo" "$@" >> "$LOG" 2>&1 || { echo "$* FAILED rc=$?" >> "$LOG"; FAIL=1; }
+}
 # SEC insider trades (quarterly data sets; only the latest quarters are refetched). Research
 # candidate features today — kept fresh so the next clean test can use them. ~1 min.
-timeout 1800 ts data insiders >> "$LOG" 2>&1 || echo "ts data insiders FAILED rc=$?" >> "$LOG"
-echo "--- ts alpha train + backtest --extend ($(date -Is)) ---" >> "$LOG"
-timeout 3600 ts alpha train >> "$LOG" 2>&1 || echo "ts alpha train FAILED rc=$?" >> "$LOG"
-timeout 3600 ts alpha backtest --extend >> "$LOG" 2>&1 || echo "ts alpha backtest FAILED rc=$?" >> "$LOG"
-# Legacy 14-model ensemble (feeds only the ml_raw/ml_v2/ml_v2_gp paper books and
-# the "ML model backtest" digest section). 26 purged folds + refit took 3h51m on
-# 2026-09-19 and was killed at the 4h cap on 09-17 and 09-26 → 5h cap.
-echo "--- legacy deploy.py ($(date -Is)) ---" >> "$LOG"
-timeout 18000 python3 $CODE/research/deploy.py >> "$LOG" 2>&1
-RC=$?
-echo "=== weekly retrain done rc=$RC $(date -Is) ===" >> "$LOG"
-
-# quick post-deploy sanity: newest registry entry + a one-line backtest health
-tail -3 "$LOG"
-ls -t "$REPO/reports/models" | head -3
-timeout 300 python3 $CODE/research/daily_ml_backtest.py | head -4
+step 1800 ts data insiders
+# Refit the production forecasters on every matured label (~6 min on the GPU), then extend the
+# causal walk-forward with the new dates only.
+step 3600 ts alpha train
+step 3600 ts alpha backtest --extend
+echo "=== weekly retrain done fail=$FAIL $(date -Is) ===" >> "$LOG"
+tail -4 "$LOG"
 find $OPS/logs -name 'retrain-*.log' -mtime +60 -delete 2>/dev/null
-exit $RC
+exit $FAIL

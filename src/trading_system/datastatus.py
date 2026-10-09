@@ -31,7 +31,7 @@ class Store:
 STORES = [
     Store("prices · whole market (Massive, 2y)", "data/bronze/massive/ohlcv_all.parquet", "date", "alpha panel tail, books", 1),
     Store("prices · deep 1970→", "data/bronze/massive/ohlcv_deep.parquet", "date", "alpha panel history", 7),
-    Store("prices · legacy liquid universe", "data/bronze/ohlcv_daily.parquet", "date", "legacy engine, books", 1),
+    Store("prices · liquid universe (369)", "data/bronze/ohlcv_daily.parquet", "date", "books, flags, regime", 1),
     Store("bars · 1-minute (universe, 2y)", "data/bronze/massive/bars_minute", "ts", "research", 3, None, per_file_ticker=True),
     Store("fundamentals (SEC EDGAR ⊕ Massive, 2008→)", "data/bronze/edgar/financials.parquet", "filing_date",
           "value/quality/earnings features", 30),
@@ -46,7 +46,6 @@ STORES = [
     Store("regime · FRED oil/vol/credit/rates", "data/silver/regime", "date", "regime layer", 3, None, series_dir=True),
     Store("alpha panel", "data/gold/alpha_panel.parquet", "date", "alpha forecaster", 1),
     Store("alpha forecast ledger", "data/ledger/alpha_forecasts.parquet", "date", "tally, calibration", 1),
-    Store("legacy gold features", "data/gold/features.parquet", "date", "legacy engine", 1),
 ]
 
 

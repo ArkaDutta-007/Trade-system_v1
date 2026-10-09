@@ -7,32 +7,28 @@ let 6–12 months of live out-of-sample results settle the argument. This is the
 honest complement to backtests (which are survivorship-biased and in-sample-ish
 no matter how carefully they're purged).
 
-Books
+Books (active)
   spy_benchmark  100% SPY. The bar everything must clear.
-  ml_raw         top-10 of the current `ts picks` (raw model score).
-                 Deliberately kept as the control so the v2 gates are
-                 measured, not assumed.
-  ml_v2          top-10 of picks_v2 (quality gate + risk-adjusted + diversified)
   momentum       top-10 by 120d momentum among liquid names — the rule-based
-                 sleeve that beat the ML model risk-adjusted in backtests
-                 (Sharpe 1.21 vs 1.03)
-  blend          50% ml_v2 + 50% momentum, the diversified-across-methods book
-  ml_v2_gp       THE RESEARCH WINNER, live (added 2026-09-16). Replicates
-                 `xgb63|gp35` from reports/research/REPORT.md: the 63-day
-                 forecaster (not 252d), top-20 with a 10% cap, run through
-                 picks_v2's gates/shrink/risk-adjust/theme caps, and executed
-                 with Gârleanu-Pedersen PARTIAL trading — each month the book
-                 moves only 35% of the way from its current weights toward the
-                 target. On 21.7 causal years that execution change alone took
-                 Sharpe 0.862 → 0.995 and cut turnover 57%. Uses the repo's
-                 research.execution.GarleanuPedersenPolicy with signal_decay=0,
-                 which is exactly the form the simulator scored.
+                 control (needs no model; computed straight from the price
+                 store since 2026-10-09).
   alpha_v2       THE ALPHA ENGINE v2 book (added 2026-09-21): `ts alpha picks`
                  targets — 1000-name panel, 5/21/63d rank forecasters blended
                  by trailing realised IC from the forecast ledger, gated,
-                 sector-capped, inverse-vol weighted, 18% vol target — traded
-                 with the same GP partial rate (0.35) as ml_v2_gp, so the two
-                 books differ only in the signal.
+                 sector-capped, ½ equal + ½ inverse-vol weighted, 25% vol brake,
+                 200-day trend overlay — traded with Gârleanu-Pedersen partial
+                 trading (35% of the gap per monthly rebalance).
+
+Books (retired 2026-10-09 with the legacy pipeline — frozen at their last mark,
+history kept, shown in the report's "Retired" block)
+  ml_raw         top-10 of the legacy `ts picks` (raw model score)
+  ml_v2          top-10 of picks_v2 (gated legacy model)
+  blend          50% ml_v2 + 50% momentum
+  ml_v2_gp       legacy 63-day forecaster, top-20, GP partial trading
+  All four were driven by the legacy 14-model ensemble, which the alpha engine
+  superseded on 2026-09-21. At retirement (last mark 2026-10-08, ~5 weeks) the
+  three pure-model books trailed SPY by 6.9-7.9% over their own spans; blend
+  (half momentum) was 1.9% ahead.
 
 Design decisions that matter
   * MONTHLY rebalance (not daily). The 2026-07 research showed 3x costs halve
@@ -73,15 +69,14 @@ START_CASH = 10_000.0
 N_HOLD = 10
 COST_BPS = 4.0
 IMPACT_BPS = 10.0
-BOOKS = ["spy_benchmark", "ml_raw", "ml_v2", "momentum", "blend", "ml_v2_gp", "alpha_v2"]
+BOOKS = ["spy_benchmark", "momentum", "alpha_v2"]
+# Legacy-model books, retired with the legacy pipeline: never marked or traded again; their JSON
+# (holdings, equity log, trades) stays on disk unchanged and the report shows their final numbers.
+RETIRED = {"ml_raw": "2026-10-09", "ml_v2": "2026-10-09", "blend": "2026-10-09", "ml_v2_gp": "2026-10-09"}
 ALPHA_TOP = 20            # alpha_v2 book width (its own cap/vol target live in trading_system.alpha.portfolio)
-
-# ml_v2_gp — the research winner's configuration (reports/research/REPORT.md,
-# variant xgb63|gp35). Kept as a SEPARATE book so the five that have been
-# tracking since 2026-09-08 stay an unbroken forward test.
-GP_HORIZON = 63           # days: the horizon whose ICIR (3.40) beat 252d's (3.03)
-GP_TOP = 20               # research book width; top-10 scored 0.866 vs 0.995
-GP_MAX_W = 0.10           # research single-name cap
+MOM_LOOKBACK = 120        # sessions — the legacy gold feature mom_120d
+MOM_MIN_ADV = 20e6        # 20-session average dollar volume
+MOM_MIN_PRICE = 5.0
 GP_TRADE_RATE = 0.35      # move 35% of the way toward target each rebalance
 # (no signal-decay shrink: the simulator that produced the 0.995 result did not apply one)
 
@@ -112,60 +107,35 @@ def latest_date(px: pl.DataFrame):
 
 
 # ── selection rules ─────────────────────────────────────────────────────────
+def momentum_rank(px: pl.DataFrame) -> pl.DataFrame:
+    """Last date's liquid names ranked by 120-session momentum. Same definitions as the legacy gold
+    features it replaces (mom_120d = adj_close / adj_close 120 rows earlier − 1; avg_dollar_volume_20 =
+    20-row mean of close × volume), computed from the price store so no feature pipeline is needed."""
+    f = (px.sort(["ticker", "date"])
+           .with_columns(mom=pl.col("adj_close") / pl.col("adj_close").shift(MOM_LOOKBACK).over("ticker") - 1,
+                         adv20=(pl.col("close") * pl.col("volume")).rolling_mean(20).over("ticker")))
+    last = f["date"].max()
+    return (f.filter(pl.col("date") == last, pl.col("adv20") >= MOM_MIN_ADV, pl.col("close") >= MOM_MIN_PRICE)
+             .drop_nulls(["mom"]).sort("mom", descending=True))
+
+
 def select(book: str, n: int = N_HOLD) -> list[str]:
     if book == "spy_benchmark":
         return ["SPY"]
     if book == "momentum":
-        f = pl.read_parquet(REPO / "data/gold/features.parquet")
-        last = f["date"].max()
-        d = (f.filter(pl.col("date") == last)
-              .filter((pl.col("avg_dollar_volume_20") >= 20e6)
-                      & (pl.col("close") >= 5.0))
-              .drop_nulls(["mom_120d"])
-              .sort("mom_120d", descending=True))
-        return d.head(n)["ticker"].to_list()
-    if book == "ml_raw":
-        from picks_v2 import raw_picks, latest_features
-        feats, _ = latest_features()
-        df = raw_picks().join(feats, on="ticker", how="left").drop_nulls(["close"])
-        return df.sort("score", descending=True).head(n)["ticker"].to_list()
-    if book == "ml_v2":
-        from picks_v2 import build
-        return [p["ticker"] for p in build(n)["picks"]]
-    if book == "blend":
-        half = max(1, n // 2)
-        a = select("ml_v2", half)
-        b = [t for t in select("momentum", n) if t not in a][:n - len(a)]
-        return a + b
-    raise ValueError(book)
+        px = pl.read_parquet(REPO / "data/bronze/ohlcv_daily.parquet",
+                             columns=["date", "ticker", "close", "adj_close", "volume"])
+        return momentum_rank(px).head(n)["ticker"].to_list()
+    raise ValueError(f"{book}: not an active equal-weight book")
 
 
 def select_weighted(book: str) -> dict[str, float]:
     """Target WEIGHTS (not just names) — needed for partial trading."""
-    if book == "alpha_v2":
-        from trading_system.alpha.live import targets_as_dict
-        from trading_system.config import get_config
-        return targets_as_dict(get_config(str(REPO / "configs/default.yaml")), ALPHA_TOP)
-    if book != "ml_v2_gp":
-        raise ValueError(book)
-    from picks_v2 import build
-    plan = build(GP_TOP, GP_HORIZON)
-    w = {p["ticker"]: float(p.get("weight") or 0.0) for p in plan["picks"]}
-    tot = sum(w.values()) or 1.0
-    w = {t: v / tot for t, v in w.items()}
-    # research cap is 10%; picks_v2's default is 20% — clip and renormalise
-    for _ in range(50):
-        over = {t: v for t, v in w.items() if v > GP_MAX_W}
-        if not over:
-            break
-        excess = sum(v - GP_MAX_W for v in over.values())
-        for t in over:
-            w[t] = GP_MAX_W
-        free = {t: v for t, v in w.items() if t not in over}
-        fs = sum(free.values()) or 1.0
-        for t in free:
-            w[t] += excess * free[t] / fs
-    return w
+    if book != "alpha_v2":
+        raise ValueError(f"{book}: not an active weighted book")
+    from trading_system.alpha.live import targets_as_dict
+    from trading_system.config import get_config
+    return targets_as_dict(get_config(str(REPO / "configs/default.yaml")), ALPHA_TOP)
 
 
 # ── book state ──────────────────────────────────────────────────────────────
@@ -269,7 +239,7 @@ def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float],
 
 def _rebalance(b: dict, name: str, p: dict[str, float], d) -> None:
     """Dispatch: the GP book trades toward weights; the others equal-weight names."""
-    if name in ("ml_v2_gp", "alpha_v2"):
+    if name == "alpha_v2":
         rebalance_book_gp(b, select_weighted(name), p, d)
     else:
         rebalance_book(b, select(name), p, d)
@@ -357,6 +327,13 @@ def metrics(log: list[dict]) -> dict:
             "vol": vol, "sharpe": sharpe, "maxdd": dd, "days": days}
 
 
+def spy_over(spy_log: list[dict], log: list[dict]) -> float | None:
+    """SPY's return over exactly the dates a book has been live (books started on different days)."""
+    sp = {r["date"]: r["equity"] for r in spy_log}
+    a, z = log[0]["date"], log[-1]["date"]
+    return sp[z] / sp[a] - 1 if a in sp and z in sp else None
+
+
 def do_report() -> str:
     rows, seeded = [], []
     for name in BOOKS:
@@ -376,21 +353,35 @@ def do_report() -> str:
         for name, b in seeded:
             L.append(f"  {name:<15} {', '.join(list(b['holdings'])[:8])}")
         return "\n".join(L)
-    bench = next((m for n, _, m in rows if n == "spy_benchmark"), None)
+    spy_log = load_book("spy_benchmark")["equity_log"]
     L = [f"Dummy portfolios · ${START_CASH:,.0f} each · monthly rebalance · "
          f"since {rows[0][1]['created']} ({rows[0][2]['days']} sessions)",
          "",
          f"{'Book':<15}{'Equity':>10}{'Total':>9}{'vs SPY':>9}{'Sharpe':>8}"
          f"{'MaxDD':>8}  Holdings"]
     for name, b, m in sorted(rows, key=lambda r: -r[2]["total_ret"]):
-        rel = (m["total_ret"] - bench["total_ret"]) * 100 if bench else 0.0
+        sp = spy_over(spy_log, b["equity_log"])
+        rel = f"{(m['total_ret'] - sp) * 100:>+8.1f}%" if sp is not None else f"{'n/a':>9}"
         hold = ",".join(list(b["holdings"])[:5])
         L.append(f"{name:<15}{m['equity']:>10,.0f}{m['total_ret']*100:>8.1f}%"
-                 f"{rel:>+8.1f}%{m['sharpe']:>8.2f}{m['maxdd']*100:>7.1f}%  {hold}")
+                 f"{rel}{m['sharpe']:>8.2f}{m['maxdd']*100:>7.1f}%  {hold}")
+    L.append("(vs SPY = SPY over the same dates as the book; alpha_v2 started 2026-09-18)")
     if rows[0][2]["days"] < 20:
         L.append("")
         L.append("⚠ Too early to judge — these need months, not days. "
                  "Ignore rankings until ~60+ sessions.")
+    retired = []
+    for name, when in RETIRED.items():
+        b = load_book(name)
+        m = metrics(b["equity_log"]) if b["created"] else {}
+        if not m:
+            continue
+        sp = spy_over(spy_log, b["equity_log"])
+        rel = f"{(m['total_ret'] - sp) * 100:>+8.1f}%" if sp is not None else f"{'n/a':>9}"
+        retired.append(f"  {name:<13}{m['equity']:>10,.0f}{m['total_ret']*100:>8.1f}%{rel}"
+                       f"  {b['created']} → {b['equity_log'][-1]['date']} (retired {when})")
+    if retired:
+        L += ["", "Retired with the legacy model — frozen at their last mark, not traded:"] + retired
     return "\n".join(L)
 
 
