@@ -27,6 +27,9 @@ echo "=== weekly retrain start $(date -Is) ===" >> "$LOG"
 # Alpha engine v2 FIRST (~6 min on the GPU): it drives the picks, so a slow
 # legacy step must never starve it. Refits the production forecasters on every
 # matured label and extends the causal walk-forward with the new dates only.
+# SEC insider trades (quarterly data sets; only the latest quarters are refetched). Research
+# candidate features today — kept fresh so the next clean test can use them. ~1 min.
+timeout 1800 ts data insiders >> "$LOG" 2>&1 || echo "ts data insiders FAILED rc=$?" >> "$LOG"
 echo "--- ts alpha train + backtest --extend ($(date -Is)) ---" >> "$LOG"
 timeout 3600 ts alpha train >> "$LOG" 2>&1 || echo "ts alpha train FAILED rc=$?" >> "$LOG"
 timeout 3600 ts alpha backtest --extend >> "$LOG" 2>&1 || echo "ts alpha backtest FAILED rc=$?" >> "$LOG"
