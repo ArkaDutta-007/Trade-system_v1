@@ -5,7 +5,12 @@
 
 ## 1. Bottom line
 
-1. **The model has a small, real edge — about +3.5–4% a year of alpha over SPY (beta-adjusted), in both
+> **Correction (2026-10-09, 22:00 — read §12 first).** Once the point-in-time data gap (§7) was filled,
+> the clean test changed from 13.4%/yr to **−1.3%/yr** (SPY +16.4%). The earlier clean-test result was
+> an accident of missing data on stocks that later dropped out of the universe; the model's book has
+> **no demonstrated edge** on honest data. Item 1 below is superseded.
+
+1. ~~**The model has a small, real edge**~~ *(superseded by §12)* **The model has a small, real edge — about +3.5–4% a year of alpha over SPY (beta-adjusted), in both
    the 18-year debiased history and the clean 22-month point-in-time test.** Its risk-adjusted return
    (Sharpe ≈ 0.9–1.0) is modestly above SPY's. Against an equal-weight basket of the *same* liquid stocks it
    trails on raw return (14.0% vs 16.4% a year, 2009 →) and wins on risk (Sharpe 0.97 vs 0.88, worst drop
@@ -465,6 +470,47 @@ needs your sudo password); the code switches to the system Ollama automatically.
 switches from 8-K releases when the playbook gets new events (the June playbook's horizon ended
 2026-09-30); a shadow paper book that vetoes "avoid" picks (live A/B of the screen); the Telegram router
 (§10) and screening of untrusted text before the agent reads it.
+
+## 12. Correction: with complete point-in-time data the clean test fails (2026-10-09, 22:00)
+
+After the crawler had filled the data of the 422 names that were in the point-in-time universe but have
+since dropped out (§7), the clean test (Nov 2024 → Oct 2026, whole-market point-in-time top-1000) was
+re-run. Same code and protocol; only the data of those names changed (short interest 1.7% → ~97% of
+their days; news history complete; fundamentals from SEC EDGAR instead of Massive).
+
+| Clean test, production book (top-20, overlays, partial trading) | CAGR | Sharpe | Max DD | IC21 / IC63 |
+|---|--:|--:|--:|--:|
+| published (old panel, old models) | 13.4% | 0.90 | −12.0% | 0.047 / 0.051 |
+| old panel, today's models | 11.5% | 0.79 | −10.7% | 0.049 / 0.052 |
+| **complete data, today's models** | **−1.3%** | **−0.01** | −18.5% | 0.039 / 0.038 |
+| … dropped-out names' old fundamentals restored | 0.2% | 0.09 | −18.8% | 0.039 / 0.040 |
+| … dropped-out names' old (missing) short + news restored | 10.2% | 0.71 | −11.7% | 0.048 / 0.049 |
+| … model trained without short features | 0.5% | 0.10 | −17.0% | 0.029 / 0.029 |
+| … without short and news features | 1.0% | 0.14 | −13.8% | 0.031 / 0.036 |
+| complete data, book limited to the 300 most liquid names that day | 8.3% | 0.65 | −14.2% | — |
+| *SPY / RSP (equal-weight S&P 500)* | *16.4% / 8.8%* | *0.99 / 0.64* | | |
+
+**What happened.** The model likes beaten-down names (cheap, falling, heavily shorted). It learned that
+from a training panel of *today's survivors* (1998 →), in which beaten-down names that did not recover
+are absent — so "beaten down" looks like a buying opportunity. In the clean test the names that later
+failed had missing short and news data, and the trees' routing of missing values happened to push their
+scores down. With the data filled in, those names score high (mean z +0.23 → +0.66), make up 43% of the
+picks instead of 15%, and lose. The IC barely moves (0.047 → 0.039: the bulk of the ranking is still
+mildly right) but the top of the ranking — where the book lives — is dominated by future failures.
+Ruled out as the cause: wrong SEC company mapping (321 of 391 names mapped, names agree), the EDGAR
+fundamentals themselves (restoring the old ones changes nothing), and the book's gates.
+
+**Consequences.**
+- The production book has **no demonstrated edge on honest data**. Every absolute clean-test number
+  in §3–§6 was measured on the gappy panel and is too high; relative comparisons there (model variants,
+  weightings, overlays) were all made under the same artifact and should be re-checked before reuse.
+- The root cause is the training universe, not the code: a model trained only on survivors learns
+  survivor relationships. The fix is training on point-in-time universes that include the failures —
+  whole-market history, which Massive's free tier has for 2 years only. **The ~$79 one-month Developer
+  plan (10 years of whole-market bars) moves from "useful" to "required"** for any honest model.
+- A point-in-time *large-cap* restriction (the 300 most liquid names that day) avoids much of the damage
+  (8.3%/yr) — but it was chosen after seeing this result, and it is still below SPY.
+- Live, the alpha_v2 book is exposed to the same mechanism (today's names, complete data).
 
 *Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
 `weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`. Raw results:

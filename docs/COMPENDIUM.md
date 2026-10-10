@@ -890,6 +890,11 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
     CAGR 16.5% → 29.1%, Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr at beta 0.72 → 0.90,
     excess +11.0%/yr CI [+6.3%, +15.8%], 12/15 years better → **adopted** as the production
     objective. MaxDD rose −28% → −39%.
+* **Correction (2026-10-09, read first): with complete point-in-time data the clean test fails.** After the
+  crawler filled the data of names that later dropped out of the universe, the 2024-11 → 2026-10 clean test
+  went from 13.4%/yr to −1.3%/yr (SPY +16.4%): the model, trained on today's survivors, over-buys
+  beaten-down names, and the gaps had been hiding it. No demonstrated edge; the fix is point-in-time
+  training data with the failures (RESEARCH_2026-10 §12). The picks card carries this caveat.
 * **Selection-bias audit (2026-09-27) — read before quoting any backtest number above.** The panel
   universe is TODAY's top-1000 by liquidity, so a stock that was small in 2023 is only in it if it later
   grew; the model learns "illiquid names in this list go up" (its top features are liquidity/size). Clean

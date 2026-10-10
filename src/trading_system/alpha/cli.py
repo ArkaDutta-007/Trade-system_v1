@@ -15,6 +15,10 @@ alpha_app = typer.Typer(add_completion=False, help="Alpha engine v2: fast cross-
                         "tallied forecast ledger, continuous recalibration and a causal backtest.")
 
 CONFIG_OPT = typer.Option("configs/default.yaml", help="config file")
+# Shown under the picks card (copied into the Telegram brief) until a point-in-time-trained model passes the
+# honest test — docs/RESEARCH_2026-10.md §12.
+HONEST_NOTE = ("⚠ honest test incl. failed stocks: −1.3%/yr vs SPY +16.4% (Nov 24 → Oct 26) — no proven edge; "
+               "expected returns backtest-calibrated, likely overstated")
 
 
 def _cfg(config: str):
@@ -223,6 +227,7 @@ def alpha_picks(config: str = CONFIG_OPT, top: int = typer.Option(20), compact: 
             rprint(f"{i}. *{r['ticker']}*  ${r['price']:.0f} · {r['weight']:.1%} · {r['sector'].replace('_', ' ')}{er} · {act}")
         reg = "risk-on" if meta["regime_on"] else f"risk-OFF (market {meta['mkt_trend_200']:+.1%} vs 200d avg → half gross)"
         rprint(f"_horizon weights {wdesc} · {'calibrated' if meta['calibrated'] else 'uncalibrated'} · {reg}_")
+        rprint(f"_{HONEST_NOTE}_")
     else:
         t = Table(title=f"Alpha book · as of {last} · horizon weights {wdesc} · from {meta['source']}")
         for c in ("#", "ticker", "price", "wt", "target", "Δ", "E[r] 21d", "80% band 21d", "E[r] 63d", "vol", "$vol/d", "sector", "drivers"):
