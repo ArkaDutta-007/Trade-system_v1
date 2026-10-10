@@ -44,6 +44,12 @@ What Arka says → what you run:
   Sends to Arka + Om. Automatic cadence is WEEKLY (cron `trade-brief-email`,
   Mondays 08:00 ET, re-enabled 2026-09-17). Telegram remains the DAILY channel.
   Override recipients for a one-off with BRIEF_RECIPIENTS="a@b,c@d".
+- "any red flags on X / what does tev1 think / is the Hormuz or CRWV switch on" → `~/ops/bin/ts-run alpha judge --names X`
+  (no `--names` = today's picks + holdings). tev1:4b is a LOCAL decision model on the GPU: it answers the
+  playbook switches (configs/tev1_switches.yaml), thesis-break monitors (Taiwan, oil supply, chip export
+  controls) and a pre-buy screen (takeover pending, distress, binary event, guidance cut → ok/caution/avoid),
+  as probabilities with the headline that drove them. It only PROPOSES — never set flag_overrides.yaml or
+  trade on it; quote it as a second opinion and say its pick screen is unproven (being scored live).
 - "how is the model doing / is it working live" → `~/ops/bin/ts-run alpha live`
   The live-evidence check with the rules fixed on 2026-10-09: live IC per horizon vs the
   research expectation (overlap-aware standard errors), the paper book vs SPY/RSP, and a

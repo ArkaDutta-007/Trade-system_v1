@@ -396,6 +396,56 @@ def alpha_live(config: str = CONFIG_OPT,
     sp.write_text(json.dumps({"done": sorted(done), "last_verdict": rep["verdict"], "updated": str(today)}, indent=1))
 
 
+@alpha_app.command("judge")
+def alpha_judge(config: str = CONFIG_OPT, top: int = typer.Option(20, help="today's picks to screen"),
+                names: str = typer.Option("", help="comma-separated tickers to screen instead of picks + holdings"),
+                days: int = typer.Option(30, help="news window for the pick/holding screen"),
+                ledger: bool = typer.Option(True, "--ledger/--no-ledger", help="log every answer for live scoring"),
+                books: str = typer.Option("", help="paper-book directory (default $TS_OPS/portfolio/books)")):
+    """tev1:4b (local decision model) on the news: playbook switches, thesis-break monitors, and a
+    pre-buy / holding screen of today's picks and holdings. Informational only; answers are logged."""
+    import os
+    from datetime import datetime, timezone
+    from . import judge as J
+    cfg = _cfg(config)
+    url = J.endpoint()
+    if not url:
+        print("tev1 unavailable — no Ollama ≥ 0.35 with tev1:4b on :11434 or :11435 "
+              "(user service: `systemctl --user status ollama-tev1`; system upgrade: ~/ops/bin/upgrade-ollama). Skipped.")
+        return
+    roles: dict[str, list[str]] = {}
+    if names:
+        for t in names.split(","):
+            roles.setdefault(t.strip().upper(), []).append("asked")
+    else:
+        try:
+            from .live import latest_targets
+            out, _ = latest_targets(cfg, top_k=top)
+            for t in out.filter(pl.col("target_weight") > 0)["ticker"].to_list():
+                roles.setdefault(t, []).append("pick")
+        except Exception as e:  # noqa: BLE001
+            print(f"(picks unavailable: {e})")
+        bdir = Path(books) if books else Path(os.environ.get("TS_OPS", str(Path.home() / "trade-ops"))) / "portfolio" / "books"
+        bp = bdir / "alpha_v2.json"
+        if bp.exists():
+            for t in json.loads(bp.read_text()).get("holdings", {}):
+                roles.setdefault(t, []).append("alpha_v2")
+        try:
+            from ..playbook import load_portfolio
+            for t in load_portfolio(cfg).held_symbols():
+                roles.setdefault(t, []).append("portfolio")
+        except Exception:  # noqa: BLE001 — the private holdings file is optional on this machine
+            pass
+    conf = J.load_conf(cfg)
+    now = datetime.now(timezone.utc)
+    sw = J.run_switches(cfg, url, conf, now)
+    mon = J.run_monitors(cfg, url, conf, now)
+    scr = J.run_screen(cfg, url, sorted(roles), now, days=days, roles={t: "+".join(r) for t, r in roles.items()})
+    if ledger:
+        J.log_ledger(cfg, sw + mon + scr, date.today())
+    print(J.render(date.today(), url, sw, mon, scr, conf))
+
+
 @alpha_app.command("status")
 def alpha_status(config: str = CONFIG_OPT):
     """Ledger, models, calibration and the rolling realised IC at a glance."""

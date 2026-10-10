@@ -920,6 +920,15 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
   emails Arka once per checkpoint (first 21d tally ≈ 10-16, 11-16, first 63d tally ≈ 12-16, 2027-03-15,
   2027-09-15) and on a RED/AMBER turn. Live data catches breakage in weeks; confirming an IC of 0.03
   takes ~6 years, so it is a tripwire, not a verdict on the edge.
+* **tev1 judgments (`judge.py`, `ts alpha judge`, 2026-10-09).** A local 4B decision model (Together AI's
+  tev1, Ollama ≥ 0.35 on the GPU; user service `ollama-tev1` on :11435 until the system Ollama is upgraded)
+  answers typed questions about the news each morning: the playbook's event switches and thesis-break
+  monitors (`configs/tev1_switches.yaml`, keyword pre-filter + tev1) and a pre-buy / holding screen of the
+  picks and holdings (takeover pending, distress, binary event, guidance cut → ok / caution / avoid).
+  Informational only — proposals, never a config or book change — and logged to
+  `data/ledger/tev1_judgments.parquet` for live scoring. Replay: FOMC decisions 18/18; caught the
+  2026-03-02 Hormuz closure and the 2026-09-17 CRWV equity raise that the manual switches missed; pick
+  screen promising but halved when company names are hidden (RESEARCH_2026-10 §11).
 * **Legacy engine retired (2026-10-09).** The daily run no longer runs `ts daily`, the liquid gold
   features, BUY signals, future-predict/paper status, the ML-model backtest, `picks_v2` or raw `ts picks`
   (~34 of 36 minutes); the Saturday job no longer retrains the 14-model ensemble (4–5 h). The paper books

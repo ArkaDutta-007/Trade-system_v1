@@ -365,8 +365,8 @@ all of them; Massive's sentiment is the reference because it is generated at pub
 **Verdict:** a local model can replace the *labelling* (free, private, per-company precise) but adds no
 *information* the system lacks. Don't feed local scores into the forecaster. Worth keeping as (1) a
 backup if Massive drops its sentiment field, (2) structured per-holding facts for the brief, and (3) the
-agent router in §10. The full sample finishes in the background; `python3 ops/research/system1_2026_10.py
-analyze` refreshes the numbers.
+agent router in §10. The sample run was stopped at 3,481 of 6,987 articles to free the GPU for §11; it is
+resumable (`python3 ops/research/system1_2026_10.py tev1`, then `analyze`).
 
 
 ## 9. Small reinforcement-learning models
@@ -421,6 +421,51 @@ bake in look-ahead and overfit at our sample size. **Verdict: no RL component is
 | Regime layer | count oil-shock / war / AI-capex headlines | not tested; FRED already supplies the state | low |
 | Filings (8-K / 10-K text) | event classification, change detection | "Lazy Prices" replications are weak; needs a new data pipeline | not now |
 
+## 11. tev1:4b as a decision-maker next to the algorithms (2026-10-09, evening)
+
+The quant models rank stocks; several other decisions in the system are qualitative and were made by hand
+or not at all. Each pilot gave tev1:4b (local, on the 8 GB GPU) the relevant text and a typed question,
+and checked the answer against something objective (`ops/research/tev1_decisions_2026_10.py`).
+
+| Decision | Checked against | Result |
+|---|---|---|
+| **FOMC decision** (cut / hold / hike) from that day's headlines | FRED DFEDTARU | **18 / 18** since 2024-07, incl. the Sep-2026 hike; tone calls plausible (Dec-2024 "hawkish cut") |
+| **Playbook earnings switches** from the company's own release (SEC 8-K item 2.02) | the release text | facts right: META revenue +28% (+27% constant currency) → "≥25%" yes 0.99, bear case no 0.08; CRM/NOW beat + raise. "vs expectations" switches (UBER weak guide, MU gap-up) need the price reaction too — the release says what was raised, not whether it beat consensus |
+| same switches from news articles | the release / the move | unreliable — the per-ticker news is mostly opinion pieces (META judged from previews) |
+| **Hormuz switch** (oil-supply monitor over daily macro headlines) | the headlines | fired 2026-03-02 "Iran war shuts the Strait of Hormuz" (p 0.99), again 03-19/03-25 and 07-23 (tanker attacks). **The playbook's `hormuz_closed` (forces O=RED) stayed false by hand** |
+| **CRWV equity-raise kill switch** over CRWV news since June | the headlines | fired once: 2026-09-17, "at-the-market offering of up to 35 million shares" + $3B converts (p 0.93; stock −5.3% vs SPY). **The rule said SELL same day; the switch stayed false by hand** |
+| chip-export-control monitor | the headlines | top days are real: 2025-01-13 (AI diffusion rule), 2025-11-09 (Blackwell exports blocked); fires on 2.6% of days |
+| Taiwan-escalation monitor | — | fired on 1 of 806 days (p 0.57) — quiet, as the period was |
+| **Prompt-injection screen** for untrusted headlines | 15 planted attacks + 400 real headlines | **15 / 15 caught, 0 / 400 false alarms** |
+| **Pre-buy screen** of the clean test's 420 picks (last 30 days of the stock's news) | next 21 days' return | see below |
+
+Pre-buy screen ("ok / caution / avoid to open a position now", plus takeover / distress / binary-event /
+guidance-cut flags), clean test Nov 2024 → Sep 2026:
+
+| | ok | caution | avoid | book with "avoid" vetoed |
+|---|--:|--:|--:|---|
+| company named | +3.6% (175) | +2.1% (56) | −0.3% (39) | 13.4% → 16.0%/yr, Sharpe 0.90 → 1.07 (P 0.88) |
+| **company hidden** (look-ahead check) | +3.1% (172) | +2.8% (58) | +1.2% (40) | 13.4% → 14.6%/yr, Sharpe 0.90 → 0.99 (P 0.71) |
+
+Hiding the company's name halves the effect — a 2025-26 model partly *remembers* these companies
+([Glasserman & Lin](https://arxiv.org/pdf/2309.17322)). What survives masking is the fact-based flag:
+picks with a guidance cut in the prior 30 days returned −2.7% vs +3.4%. So: promising, unproven, and only
+live use can settle it, because live the model cannot know the outcome.
+
+**Integration (informational).** `ts alpha judge` runs every morning in the digest ("🧠 tev1 judgments",
+~25 s): playbook switches and thesis-break monitors from `configs/tev1_switches.yaml` (editable; keyword
+pre-filter for recall, tev1 for precision), and the pre-buy / holding screen of today's picks, the alpha_v2
+book and the real portfolio if present. It never changes a book or a config — switches are *proposals* —
+and logs every answer to `data/ledger/tev1_judgments.parquet` for live scoring. The Telegram brief lists
+any FIRING switch/monitor and any "avoid" on a held name. Served by the user service `ollama-tev1`
+(Ollama 0.40.2, :11435, survives reboots) until the system Ollama is upgraded (`~/ops/bin/upgrade-ollama`,
+needs your sudo password); the code switches to the system Ollama automatically.
+
+**Not yet built, worth considering:** Fed-day decision/tone feeding the F flag automatically; earnings
+switches from 8-K releases when the playbook gets new events (the June playbook's horizon ended
+2026-09-30); a shadow paper book that vetoes "avoid" picks (live A/B of the screen); the Telegram router
+(§10) and screening of untrusted text before the agent reads it.
+
 *Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
-`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`. Raw results:
+`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`. Raw results:
 `reports/alpha/lab_2026_10/*.json`.*

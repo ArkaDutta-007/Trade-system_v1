@@ -1,0 +1,42 @@
+# tev1 watchers — the local 4B decision model (Together AI's tev1, served by Ollama ≥ 0.35) reads the news
+# and answers these typed questions every morning (`ts alpha judge`, daily digest).
+#
+# tev1 only PROPOSES. The playbook's switches in configs/flag_overrides.yaml (`events:`) and its flag
+# overrides are still set by a person; nothing here changes a book or a config. Every answer is logged to
+# data/ledger/tev1_judgments.parquet so it can be scored against what happened.
+#
+# Research behind this (docs/RESEARCH_2026-10.md §11): replayed over 2024-07 → 2026-10 the oil monitor
+# fired on the 2026-03-02 Hormuz closure (p 0.99) and the CRWV switch on the 2026-09-17 at-the-market
+# offering (p 0.93) — both switches had stayed false by hand.
+
+alert_p: 0.80        # reported as FIRING at or above this probability
+watch_p: 0.50        # reported as worth a look at or above this
+
+# Playbook event switches (keys match configs/flag_overrides.yaml `events:`).
+#   source: macro          → the day's market-wide headlines, pre-filtered by `keywords`
+#   source: {ticker: XYZ}  → that company's articles
+switches:
+  hormuz_closed:
+    source: macro
+    keywords: "hormuz|strait|tanker|oil|crude|brent|iran|opec|saudi"
+    question: "Has the Strait of Hormuz been closed to shipping, or has traffic through it been halted?"
+    playbook: "forces O=RED regardless of price"
+  crwv_equity_raise:
+    source: {ticker: CRWV}
+    question: "Does CoreWeave announce a new stock offering — selling new shares to raise equity, including an at-the-market program?"
+    playbook: "CRWV announces an equity raise → SELL same day"
+
+# Thesis-break monitors over the day's market-wide headlines (keyword pre-filter, then tev1 decides).
+monitors:
+  taiwan_escalation:
+    keywords: "taiwan|strait|blockade|pla\\b|china.{0,40}(military|navy|drill)"
+    question: "Do these headlines report a new military escalation involving Taiwan (blockade, strikes, invasion threat)?"
+    playbook: "hold_winner thesis break (TSM, NVDA, AMD …): Taiwan escalation"
+  oil_supply_shock:
+    keywords: "hormuz|tanker|oil|crude|brent|opec|refiner|pipeline|sanction"
+    question: "Do these headlines report a disruption of oil supply (Strait of Hormuz closure, attacks on oil facilities or tankers, sanctions cutting exports)?"
+    playbook: "O flag"
+  chip_export_controls:
+    keywords: "export|chip|semiconductor|nvidia|blackwell|entity list|commerce department|bis\\b"
+    question: "Do these headlines report new US restrictions on exports of AI chips or chip equipment to China?"
+    playbook: "S flag / semi freeze"
