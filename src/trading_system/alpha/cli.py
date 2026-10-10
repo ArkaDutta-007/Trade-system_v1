@@ -415,8 +415,8 @@ def alpha_judge(config: str = CONFIG_OPT, top: int = typer.Option(20, help="toda
     cfg = _cfg(config)
     url = J.endpoint()
     if not url:
-        print("tev1 unavailable — no Ollama ≥ 0.35 with tev1:4b on :11434 or :11435 "
-              "(user service: `systemctl --user status ollama-tev1`; system upgrade: ~/ops/bin/upgrade-ollama). Skipped.")
+        print("tev1 unavailable — no Ollama ≥ 0.35 with tev1:4b on :11434 "
+              "(check `systemctl status ollama` and `ollama list`). Skipped.")
         return
     roles: dict[str, list[str]] = {}
     if names:

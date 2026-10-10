@@ -926,7 +926,7 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
   2027-09-15) and on a RED/AMBER turn. Live data catches breakage in weeks; confirming an IC of 0.03
   takes ~6 years, so it is a tripwire, not a verdict on the edge.
 * **tev1 judgments (`judge.py`, `ts alpha judge`, 2026-10-09).** A local 4B decision model (Together AI's
-  tev1, Ollama ≥ 0.35 on the GPU; user service `ollama-tev1` on :11435 until the system Ollama is upgraded)
+  tev1, served by the system Ollama 0.40.2 on the GPU, :11434)
   answers typed questions about the news each morning: the playbook's event switches and thesis-break
   monitors (`configs/tev1_switches.yaml`, keyword pre-filter + tev1) and a pre-buy / holding screen of the
   picks and holdings (takeover pending, distress, binary event, guidance cut → ok / caution / avoid).

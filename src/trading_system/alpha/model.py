@@ -59,6 +59,10 @@ class TrainSpec:
     label: str = "y"                       # y | ys (sector-neutral) | yr (beta-residual) — see panel.add_labels
     train_top: int = 0                     # >0: train only on rows that were the top-N by trailing $volume THAT DAY
     engine: str = "xgb"                    # xgb | lgbm | ridge
+    # (feature, +1 | -1) pairs: XGBoost monotone constraints — the model's response to that feature may only
+    # rise (+1) or fall (-1). Research option (2026-10-10): signs from published anomalies, to stop a model
+    # trained on today's survivors from learning survivor-only relationships. Empty = production.
+    monotone: tuple = ()
 
     def stride_for(self, h: int) -> int:
         return int(self.stride.get(h, max(1, h // 4)))
@@ -120,6 +124,10 @@ class AlphaGBM:
              "subsample": s.subsample, "colsample_bytree": s.colsample_bytree,
              "min_child_weight": s.min_child_weight, "lambda": s.reg_lambda, "tree_method": "hist",
              "device": self.device, "seed": seed, "max_bin": 128, "verbosity": 0}
+        if s.monotone:
+            sign = dict(s.monotone)
+            p["monotone_constraints"] = "(" + ",".join(
+                str(int(sign.get(f, sign.get(f.removesuffix(RANK_SUFFIX), 0)))) for f in self.feature_names) + ")"
         if self.device == "cpu":
             import os
             p["nthread"] = max(2, (os.cpu_count() or 4) - 2)

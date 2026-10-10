@@ -149,8 +149,8 @@ digest_step "Survivorship bias check (ts bias-check) — context for every backt
 # agent is told to use ONLY this.
 digest_step "🎯 TOP PICKS — use THIS section for the brief" 600 ts alpha picks --top 20 --compact --prev $OPS/portfolio/books/alpha_v2.json
 digest_step "Alpha book — full table (targets, calibrated E[r], 80% bands, drivers)" 600 ts alpha picks --top 20 --prev $OPS/portfolio/books/alpha_v2.json
-# tev1:4b, a local decision model (Ollama ≥ 0.35 on the GPU — user service `ollama-tev1` until the system
-# Ollama is upgraded): playbook switches, thesis-break monitors, and a pre-buy / holding screen of today's
+# tev1:4b, a local decision model (system Ollama 0.40.2 on the GPU, upgraded 2026-10-10 for /v1/systemone):
+# playbook switches, thesis-break monitors, and a pre-buy / holding screen of today's
 # picks and holdings. Informational, logged to data/ledger/tev1_judgments.parquet; skips cleanly if tev1 is down.
 digest_step "🧠 tev1 judgments — switches, monitors, pick/holding screen (local 4B model, informational)" 600 ts alpha judge
 digest_step "Data status — every dataset, sessions behind, crawler budget" 300 ts data status

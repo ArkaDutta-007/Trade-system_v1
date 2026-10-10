@@ -27,7 +27,7 @@ import requests
 import yaml
 
 MODEL = "tev1:4b"
-CANDIDATES = ("http://127.0.0.1:11434", "http://127.0.0.1:11435")   # system Ollama first, then the user service
+CANDIDATES = ("http://127.0.0.1:11434", "http://127.0.0.1:11435")   # the system Ollama (0.40.2 since 2026-10-10), then an optional second server
 FLAGS = ("takeover_pending", "distress", "binary_event", "guidance_cut")
 SCREEN = {
     "takeover_pending": {"type": "noul", "instructions": "Has the company agreed to be acquired, or is a takeover offer for it pending?"},

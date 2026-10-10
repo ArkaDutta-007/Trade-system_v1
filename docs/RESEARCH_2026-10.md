@@ -462,9 +462,8 @@ live use can settle it, because live the model cannot know the outcome.
 pre-filter for recall, tev1 for precision), and the pre-buy / holding screen of today's picks, the alpha_v2
 book and the real portfolio if present. It never changes a book or a config — switches are *proposals* —
 and logs every answer to `data/ledger/tev1_judgments.parquet` for live scoring. The Telegram brief lists
-any FIRING switch/monitor and any "avoid" on a held name. Served by the user service `ollama-tev1`
-(Ollama 0.40.2, :11435, survives reboots) until the system Ollama is upgraded (`~/ops/bin/upgrade-ollama`,
-needs your sudo password); the code switches to the system Ollama automatically.
+any FIRING switch/monitor and any "avoid" on a held name. Served by the system Ollama, upgraded to
+0.40.2 on 2026-10-10 (`~/ops/bin/upgrade-ollama`); the temporary user-space copy on :11435 was removed.
 
 **Not yet built, worth considering:** Fed-day decision/tone feeding the F flag automatically; earnings
 switches from 8-K releases when the playbook gets new events (the June playbook's horizon ended
@@ -512,6 +511,37 @@ fundamentals themselves (restoring the old ones changes nothing), and the book's
   (8.3%/yr) — but it was chosen after seeing this result, and it is still below SPY.
 - Live, the alpha_v2 book is exposed to the same mechanism (today's names, complete data).
 
+## 13. Free fixes, no data budget (2026-10-10)
+
+Whole-market history costs money (Massive Developer ~$79; MarketParquet's archive $79 one-time; Norgate
+$35/month with a 21-day trial). Free routes: **RIT's Saunders College lists CRSP through WRDS** — the
+academic survivorship-free standard (every US stock since 1925, delisting returns included); ask RIT Libraries
+(Jennifer Freer, jlfwml@rit.edu) and check that WRDS's academic licence covers this use. Meanwhile three
+fixes that cost nothing, settings fixed before the run (`ops/research/pit_fix_2026_10.py`), honest panel:
+
+| Clean test, Nov 2024 → Oct 2026 | production universe | 300 most liquid that day |
+|---|---|---|
+| production model | −1.2% / Sharpe −0.01 | 8.4% / 0.66 |
+| monotone constraints from published anomaly signs | −1.1% / −0.00 | 7.3% / 0.60 |
+| **point-in-time training where it exists** (Nov 2024 →, failures included) | **6.8% / 0.48** (+8.0%/yr vs production [+1.6, +16.4]) | **10.6% / 0.75** |
+| both | 5.4% / 0.40 | 7.0% / 0.53 |
+| 12-1 momentum, no model | 1.3% / 0.16 | 4.6% / 0.37 |
+| low volatility, no model | 2.4% / 0.49 (max DD −5.4%) | 2.0% / 0.31 |
+| *SPY / QQQ / RSP* | *16.7% / 24.3% / 9.1%* | |
+
+- **The fix that works is the training data, not the model.** Letting the model learn from the
+  point-in-time universe — including the names that later failed — where we have it (our own free
+  whole-market bars, Sep 2024 →) recovers +8%/yr against production, significantly, and the gain grows
+  through the window as that data accumulates. The crawler adds whole-market bars every day, so this
+  training set grows for free.
+- Forcing literature signs on the model doesn't help: the damage is in which names look "cheap and
+  beaten down", not in a few features' signs.
+- **Nothing here beats the index in this window.** 2024-26 was an AI mega-cap market (QQQ +24%/yr); the
+  best honest variant (point-in-time training, large caps) made 10.6% vs SPY 16.7% and RSP 9.1%.
+- Recommendation: switch the production training to point-in-time rows where they exist and restrict the
+  book to the 300 most liquid names that day — tested here after the failure was seen, so it must earn its
+  keep live (shadow first) before anyone relies on it.
+
 *Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
-`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`. Raw results:
+`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`, `pit_fix_2026_10.py`. Raw results:
 `reports/alpha/lab_2026_10/*.json`.*
