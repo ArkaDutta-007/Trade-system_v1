@@ -542,6 +542,58 @@ fixes that cost nothing, settings fixed before the run (`ops/research/pit_fix_20
   book to the 300 most liquid names that day — tested here after the failure was seen, so it must earn its
   keep live (shadow first) before anyone relies on it.
 
+## 14. Vibe-Trading (HKUDS) vs our system (2026-10-15)
+
+[Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (v0.1.16, MIT) is an LLM agent workspace: natural-
+language prompts → generated strategy code → backtests, plus an "alpha zoo" of published factors (Qlib-158,
+Kakushadze-101, GTJA-191, academic, SEC fundamentals). It has no fixed strategy or track record, so the
+comparison uses its two measurable parts. Installed in its own venv at `~/Desktop/Vibe-Trading` (Python
+3.11, pinned lock file), agent driven by the free local `gpt-oss:20b` through Ollama — no API spend.
+
+**Alpha zoo on our honest data** (`ops/research/vibe_export_2026_10.py` → `vibe_compare_2026_10.py`, run in
+Vibe's venv with Vibe's own registry and IC function). The 458 price-only factors computed on the same
+adjusted bars as our model, masked to the point-in-time top-1000 of each day (failures included), 21-day
+forward returns; 438 computed (20 need a sector tag the US data lacks). Selection fixed in advance: Vibe's
+own "alive"/"reversed" rules on year 1, equal-weight composite tested on year 2.
+
+| 21-day rank IC | year 1 (Nov 2024 – Oct 2025) | year 2 (Nov 2025 – Oct 2026) |
+|---|--:|--:|
+| our current model | +0.054 | +0.015 |
+| our point-in-time-trained model (§13) | +0.072 | +0.009 |
+| Vibe zoo composite (4 alive + 1 reversed on year 1) | +0.069 (in-sample) | **−0.015** |
+| Vibe's 438 factors | 4 alive, 1 reversed, 427 dead | median +0.002, 90th pct +0.015, best +0.041 |
+
+| Year-2 book, identical rules (top-20, gates, overlays, partial trading) | our universe | 300 most liquid that day |
+|---|--:|--:|
+| our current model | −3.6% | −2.2% |
+| our point-in-time-trained model | −5.7% | −1.4% |
+| Vibe zoo composite | −3.2% | +5.9% (Sharpe 0.55) |
+| *SPY / QQQ / RSP* | *+14.9% / +17.5% / +15.6%* | |
+
+- Our models' full-window IC (0.035–0.042) sits at the top of the zoo's range (best single factor 0.041 —
+  chosen in hindsight), but **every signal decays in year 2 and no book beats holding the index**.
+- The zoo selected on year 1 reverses out of sample — the multiple-testing trap Vibe's own bench warns
+  about (it reports deflated Sharpe for that reason). Only 13 of 438 factors have |t| > 2 over the full
+  window — no more than chance alone would produce.
+- The zoo's one positive cell (large caps, +5.9%) is a single year from 5 factors — not evidence.
+- Vibe's default `sp500` universe is today's member list, i.e. the same survivor bias §12 found in ours;
+  its bench flags it (`survivorship_bias` in the universe metadata).
+
+**The agent itself, on free local models: does not work on this machine.** Asked to design and backtest
+a 20-stock US strategy for year 2, `gpt-oss:20b` invented tool names (`assistant.run`) until Vibe's
+no-progress guard stopped it after 8 rounds; `qwen3-coder:30b` invented others (`create_evidence`,
+`collect_market_data`) and gave up. Vibe's README says the same: small models "answer from memory" instead
+of using tools; it recommends large hosted models (DeepSeek-V4-Pro, Claude, GPT-5.5). Paid APIs are out of
+budget; its `claude-cli` provider can drive it through an existing Claude Code login without an API key
+(it uses that plan's limits) — not tried without asking. Even working, the agent writes and backtests
+strategies; it doesn't supply a validated edge, and its default universe has the survivor bias above.
+
+**Verdict.** Vibe-Trading is a research front end, not a better signal: on identical honest data its
+factor library does no better than our model, its year-1 winners reverse in year 2, and no book of
+either beat SPY / QQQ / RSP in 2025-26. Worth borrowing: its factor zoo as a feature source to test with
+our point-in-time protocol, and its deflated-Sharpe reporting. Setup kept at `~/Desktop/Vibe-Trading`
+(`.venv`, `agent/.env` → local Ollama, git-ignored).
+
 *Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
-`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`, `pit_fix_2026_10.py`. Raw results:
+`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`, `pit_fix_2026_10.py`, `vibe_export_2026_10.py`, `vibe_compare_2026_10.py`. Raw results:
 `reports/alpha/lab_2026_10/*.json`.*
