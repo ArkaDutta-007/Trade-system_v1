@@ -579,21 +579,43 @@ own "alive"/"reversed" rules on year 1, equal-weight composite tested on year 2.
 - Vibe's default `sp500` universe is today's member list, i.e. the same survivor bias §12 found in ours;
   its bench flags it (`survivorship_bias` in the universe metadata).
 
-**The agent itself, on free local models: does not work on this machine.** Asked to design and backtest
-a 20-stock US strategy for year 2, `gpt-oss:20b` invented tool names (`assistant.run`) until Vibe's
-no-progress guard stopped it after 8 rounds; `qwen3-coder:30b` invented others (`create_evidence`,
-`collect_market_data`) and gave up. Vibe's README says the same: small models "answer from memory" instead
-of using tools; it recommends large hosted models (DeepSeek-V4-Pro, Claude, GPT-5.5). Paid APIs are out of
-budget; its `claude-cli` provider can drive it through an existing Claude Code login without an API key
-(it uses that plan's limits) — not tried without asking. Even working, the agent writes and backtests
-strategies; it doesn't supply a validated edge, and its default universe has the survivor bias above.
+**The agent itself.** On free local models it does not work here (`gpt-oss:20b` and `qwen3-coder:30b` both
+invent tool names; Vibe's README warns about small models). On **Qwen (qwen3.7-flash via DashScope, ~$0.13 for
+the run)** it works, and was given exactly our protocol: our point-in-time data only (`local:` symbols, every
+name ever in the universe, failures included), the daily eligible list (~980 names), design on year 1 only,
+then a frozen rule tested on year 2 — top 20, equal weight, monthly, 10 bp per side, no hand-picked tickers.
+It tried 30/40/60/90-day lookbacks on year 1 and froze **60-day volatility-adjusted momentum** (60-day return ÷
+60-day annualised volatility). Its own year-2 script: +0.2%, Sharpe 0.12, max DD −19% (SPY +13.8%).
+
+Every strategy then run through the same two backtests (`ops/research/vibe_apples_2026_10.py`), year 2:
+
+| Year 2 (Nov 2025 – Oct 2026) | agent's spec: top-20 equal weight, monthly, 10 bp | our production book rules |
+|---|--:|--:|
+| **Vibe agent's rule (qwen3.7-flash)** | **−0.0%** · Sharpe 0.19 · max DD −30.8% | **−2.6%** · −0.29 · −7.1% |
+| our current model | −33.2% · −0.78 · −40.9% | −3.6% · −0.13 · −11.9% |
+| our point-in-time-trained model | −19.8% · −0.26 · −36.7% | −5.7% · −0.25 · −14.0% |
+| 20 random names (mean of 20 draws, ±1 sd) | +9.2% ± 10.6% | — |
+| equal weight of the whole eligible list | +11.8% | — |
+| *SPY* | *+14.1%* | *+14.9%* |
+
+- **Like for like, Vibe's agent beat our models in year 2** — slightly under our book rules, by a lot under
+  its plain spec. That is a statement about our models more than about Vibe: **our raw top-20 is worse than
+  random by 2–4 standard deviations** — the top of our ranking is where the survivor bias of §12 lives
+  (beaten-down names that kept falling). Our book's risk adjustments are what keep it near flat.
+- Nobody beat the market: every strategy trails random picks and SPY in year 2. A one-year sample, one
+  rule, picked from four lookbacks on year 1 — no evidence of an edge either way.
+- **Safety note:** with no venv on PATH the agent's own shell tool ran `pip install yfinance` and
+  `pip install pyarrow` into the system Python 3.10 user site (~/.local; ~25 packages incl. numpy 2.2.6).
+  Our pipeline is unaffected (it runs in the repo venv). Launch it with `~/Desktop/Vibe-Trading/vibe.sh`,
+  which keeps its python/pip inside its own venv and makes pip refuse installs outside a venv.
 
 **Verdict.** Vibe-Trading is a research front end, not a better signal: on identical honest data its
-factor library does no better than our model, its year-1 winners reverse in year 2, and no book of
-either beat SPY / QQQ / RSP in 2025-26. Worth borrowing: its factor zoo as a feature source to test with
+factor library does no better than our model, its year-1 winners reverse in year 2; its Qwen-driven agent
+produced a plain momentum rule that beat our models in year 2 mainly because ours are actively wrong at the
+top of the ranking; and nothing — theirs or ours — beat SPY or random picks in 2025-26. Worth borrowing: its factor zoo as a feature source to test with
 our point-in-time protocol, and its deflated-Sharpe reporting. Setup kept at `~/Desktop/Vibe-Trading`
 (`.venv`, `agent/.env` → local Ollama, git-ignored).
 
 *Scripts: `ops/research/lab_2026_10.py`, `construction_2026_10.py`, `overlay_2026_10.py`, `grid_2026_10.py`,
-`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`, `pit_fix_2026_10.py`, `vibe_export_2026_10.py`, `vibe_compare_2026_10.py`. Raw results:
+`weighting_2026_10.py`, `newstype_2026_10.py`, `system1_2026_10.py`, `rl_2026_10.py`, `tev1_decisions_2026_10.py`, `pit_fix_2026_10.py`, `vibe_export_2026_10.py`, `vibe_compare_2026_10.py`, `vibe_apples_2026_10.py`. Raw results:
 `reports/alpha/lab_2026_10/*.json`.*
