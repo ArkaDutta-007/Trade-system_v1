@@ -513,6 +513,10 @@ fundamentals themselves (restoring the old ones changes nothing), and the book's
 
 ## 13. Free fixes, no data budget (2026-10-10)
 
+> **Correction (2026-11-04, read [RESEARCH_2026-11](RESEARCH_2026-11.md) §2).** The +6.8%/yr for point-in-time
+> training below was mostly rebalance-timing luck: across seven start days its median is −0.8%. Point-in-time
+> rows plus training on that day's top 500 is what held up (median +8.7%), and the top-300 gain stands.
+
 Whole-market history costs money (Massive Developer ~$79; MarketParquet's archive $79 one-time; Norgate
 $35/month with a 21-day trial). Free routes: **RIT's Saunders College lists CRSP through WRDS** — the
 academic survivorship-free standard (every US stock since 1925, delisting returns included); ask RIT Libraries

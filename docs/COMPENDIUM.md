@@ -890,6 +890,10 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
     CAGR 16.5% → 29.1%, Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr at beta 0.72 → 0.90,
     excess +11.0%/yr CI [+6.3%, +15.8%], 12/15 years better → **adopted** as the production
     objective. MaxDD rose −28% → −39%.
+* **Second research pass (2026-11-04, `docs/RESEARCH_2026-11.md`).** Compute is not the constraint. Top-20 books
+  stayed below SPY. Best new idea: cap-weighted top-300 minus the worst 30% by model score beat its control on all
+  four rebalance days tested (+3.0 to +6.7%/yr), nearly all in year 1. Quote book results as medians across start
+  days (`panel_2026_11.py phase`): point-in-time training alone was timing luck, point-in-time + top-500 was not.
 * **Correction (2026-10-09, read first): with complete point-in-time data the clean test fails.** After the
   crawler filled the data of names that later dropped out of the universe, the 2024-11 → 2026-10 clean test
   went from 13.4%/yr to −1.3%/yr (SPY +16.4%): the model, trained on today's survivors, over-buys

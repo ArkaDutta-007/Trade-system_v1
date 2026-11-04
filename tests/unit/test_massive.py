@@ -417,6 +417,20 @@ def test_build_ohlcv_all_applies_actions_from_cache(tmp_path):
     assert st.build_ohlcv_all().height == 3
 
 
+def test_build_keeps_days_that_left_the_plan_window(tmp_path):
+    s = FakeSession()
+    st, client, _ = _store(tmp_path, s)
+    old = st.history_start() - timedelta(days=400)      # out of reach of the API, kept only in our cache
+    client.cache_write(f"grouped/{old.isoformat()}", {"results": [grouped_row("X", 100.0)], "fetched_at": 0})
+    client.cache_write(f"grouped/{st.today.isoformat()}", {"results": [grouped_row("X", 25.0)], "fetched_at": 0})
+    lo, hi = M.month_windows(old, old)[0]
+    client.cache_write(f"splits/{lo.isoformat()}_{hi.isoformat()}",
+                       {"results": [{"ticker": "X", "execution_date": (old + timedelta(days=1)).isoformat(), "split_from": 1, "split_to": 4}], "fetched_at": 0})
+    df = st.build_ohlcv_all().sort("date")
+    assert df["date"].to_list() == [old, st.today]
+    assert df["close"].to_list() == pytest.approx([25.0, 25.0])         # the old window's split still applies
+
+
 def test_update_respects_budget_and_reports(tmp_path, monkeypatch):
     s = FakeSession()
     s.add("https://api.massive.com/v2/aggs/grouped", FakeResp(200, {"results": [grouped_row("AAPL", 10)]}))
@@ -487,7 +501,9 @@ def test_build_liquid_universe_ranks_by_dollar_volume(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _crawler(tmp_path, session=None, today=None):
-    today = today or (datetime.now(timezone.utc).date() - timedelta(days=3))   # all days publish-ready
+    if today is None:                                                     # all days publish-ready, and a weekday
+        today = datetime.now(timezone.utc).date() - timedelta(days=3)
+        today -= timedelta(days=max(0, today.weekday() - 4))
     st, client, clock = _store(tmp_path, session or FakeSession(), today=today)
     return M.Crawler(st, ["AAPL", "MSFT"], log=lambda m: None, deep_prices=False), st, client
 

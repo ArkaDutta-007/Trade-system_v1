@@ -16,6 +16,7 @@ portfolio and watchlist.json
 data/raw/*
 data/bronze/*
 data/silver/*
+data/external/
 data/gold/*
 !data/raw/.gitkeep
 !data/bronze/.gitkeep

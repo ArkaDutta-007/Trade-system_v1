@@ -1165,7 +1165,10 @@ class MassiveStore:
 
     # ---- build ---------------------------------------------------------------------
     def build_raw_bars(self) -> pl.DataFrame:
-        """Fold every cached grouped day into ``bars_raw.parquet`` (incremental: only new days parsed)."""
+        """Fold every cached grouped day into ``bars_raw.parquet`` (incremental: only new days parsed).
+
+        Nothing is rolled off: the plan only reaches back two years, so a day that leaves that window can
+        never be fetched again and the cached days are the only whole-market history we will ever have."""
         have = pl.read_parquet(self.raw_bars_path) if self.raw_bars_path.exists() else pl.DataFrame(schema=_BAR_SCHEMA)
         done = set(have["date"].unique().to_list()) if have.height else set()
         new_frames = []
@@ -1177,21 +1180,17 @@ class MassiveStore:
                 new_frames.append(grouped_to_frame(d, doc["results"]))
         if new_frames:
             have = pl.concat([have] + new_frames, how="vertical_relaxed")
-        cutoff = self.history_start() - timedelta(days=31)
-        have = have.filter(pl.col("date") >= cutoff).unique(subset=["date", "ticker"], keep="last").sort(["ticker", "date"])
+        have = have.unique(subset=["date", "ticker"], keep="last").sort(["ticker", "date"])
         have.write_parquet(self.raw_bars_path, compression="zstd")
         return have
 
     def build_corporate_actions(self) -> tuple[pl.DataFrame, pl.DataFrame]:
-        """Monthly whole-market windows (2y) ∪ per-ticker full histories (universe/extended)."""
+        """Every cached monthly whole-market window ∪ per-ticker full histories (universe/extended)."""
         sp, dv = [], []
-        for lo, hi in month_windows(self.history_start() - timedelta(days=31), self.today):
-            s = self.client.cache_read(f"splits/{lo.isoformat()}_{hi.isoformat()}", None)
-            d = self.client.cache_read(f"dividends/{lo.isoformat()}_{hi.isoformat()}", None)
-            if s:
-                sp.append(splits_frame(s["results"]))
-            if d:
-                dv.append(dividends_frame(d["results"]))
+        for _, doc in self._docs_in("splits"):
+            sp.append(splits_frame(doc["results"]))
+        for _, doc in self._docs_in("dividends"):
+            dv.append(dividends_frame(doc["results"]))
         for _, doc in self._docs_in("splits_ticker"):
             sp.append(splits_frame(doc["results"]))
         for _, doc in self._docs_in("dividends_ticker"):
