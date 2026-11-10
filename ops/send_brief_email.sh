@@ -24,6 +24,12 @@ RECIPIENTS="${BRIEF_RECIPIENTS:-arkadutta.cg@gmail.com,omsaha01@gmail.com}"
 
 BODY="$OPS/briefs/brief-$TODAY.md"
 SUBJECT="📈 Weekly trade brief — $TODAY"
+# The brief agent sometimes delivers to Telegram but skips writing its file
+# (2026-11-09's email went out as the raw digest). Recover the delivered text.
+SAVE_BRIEF="${SAVE_BRIEF:-$HOME/ops/bin/save-brief}"
+if [[ ! -s "$BODY" && -x "$SAVE_BRIEF" ]]; then
+  echo "$(date -Is) $("$SAVE_BRIEF" "$TODAY" 2>&1 | head -1)" >> "$LOG"
+fi
 if [[ ! -s "$BODY" ]]; then
   BODY="$OPS/briefs/latest.md"
   SUBJECT="📈 Weekly trade DIGEST (agent brief missing) — $TODAY"

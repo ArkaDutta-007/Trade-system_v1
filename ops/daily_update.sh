@@ -110,7 +110,10 @@ heavy_step "trade-ops self-test (pytest)" 600 $CODE/run_tests.sh
 # WHOLE market, plus recent splits/dividends and tagged news. Bounded to
 # data.massive.update_max_calls (40 ≈ 8 min at the free 5 req/min). With no
 # MASSIVE_API_KEY it prints a note and exits 0; `ts ingest` then falls back
-# to yfinance on its own (data.source: auto).
+# to yfinance on its own (data.source: auto). While massive-crawler.service is
+# running it skips (the crawler already fetched these and owns the rebuild), so
+# in practice this is the fallback for a dead crawler. Until 2026-11-10 it never
+# saw the key at all (it checked before reading .env).
 heavy_step "ts massive update (EOD bars + corp actions + news, 5 req/min)" 2400 ts massive update -u liquid
 # Alpha engine v2 (2026-09-21): point-in-time panel over the 1000-name Massive
 # universe → tally the forecasts that matured → recalibrate on the tally →

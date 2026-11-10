@@ -340,6 +340,22 @@ from .alpha.cli import alpha_app  # noqa: E402  — `ts alpha …` (alpha engine
 app.add_typer(alpha_app, name="alpha")
 
 
+def _crawler_alive(M, store, fresh_s: float = 900.0) -> int | None:
+    """PID of a running crawler whose state file was written in the last ``fresh_s`` seconds, else None."""
+    import os
+    from datetime import datetime, timezone
+    st = M.crawler_state(store) or {}
+    try:
+        pid = int(st.get("pid") or 0)
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(st["ts"])).total_seconds()
+        if pid and age <= fresh_s:
+            os.kill(pid, 0)
+            return pid
+    except (KeyError, ValueError, TypeError, ProcessLookupError, PermissionError):
+        pass
+    return None
+
+
 def _massive_store(config: str, universe: str):
     from .ingestion.massive import MassiveStore
     cfg = get_config(config).use_universe(universe)
@@ -350,7 +366,9 @@ def _massive_store(config: str, universe: str):
 def massive_status(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
                    quiet: bool = typer.Option(False, help="exit code only: 0 = configured")):
     """Show key presence, cached grouped days, bronze tables and today's call budget."""
+    from .config import _load_dotenv, find_project_root
     from .ingestion.massive import is_configured
+    _load_dotenv(find_project_root())
     if quiet:
         raise typer.Exit(code=0 if is_configured() else 1)
     cfg, store = _massive_store(config, universe)
@@ -451,13 +469,26 @@ def massive_backfill(
 @massive_app.command("update")
 def massive_update(config: str = "configs/default.yaml", universe: str = UNIVERSE_OPT,
                    max_calls: int = typer.Option(-1, help="call budget (default data.massive.update_max_calls)"),
-                   strict: bool = typer.Option(False, help="exit non-zero when the key is missing")):
-    """Daily incremental: new grouped days + recent corp actions + market news → rebuild tables."""
+                   strict: bool = typer.Option(False, help="exit non-zero when the key is missing"),
+                   force: bool = typer.Option(False, help="run even while the crawler service is running")):
+    """Daily incremental: new grouped days + recent corp actions + market news → rebuild tables.
+
+    A fallback for when the crawler is down: while ``massive-crawler`` runs it fetches all of this itself
+    and rebuilds the same parquet files, so a second writer is refused unless ``--force``."""
+    from .config import _load_dotenv, find_project_root
     from .ingestion import massive as M
+    # .env must be read BEFORE the key check: until 2026-11-10 this checked first, so the daily step
+    # printed "not set — skipping" every day since it was added while the key sat in .env.
+    _load_dotenv(find_project_root())
     if not M.is_configured():
         rprint("[yellow]MASSIVE_API_KEY not set — skipping (add it to .env; see `ts massive status`)[/yellow]")
         raise typer.Exit(code=1 if strict else 0)
     cfg = get_config(config).use_universe(universe)
+    live = _crawler_alive(M, M.MassiveStore.from_config(cfg))
+    if live and not force:
+        rprint(f"[dim]crawler running (pid {live}) — it keeps these tables current; skipping so two writers never "
+               f"rebuild the same files (--force to override)[/dim]")
+        return
     try:
         res = M.update(cfg, cfg["universe"]["tickers"], max_calls=None if max_calls < 0 else max_calls,
                        progress=lambda s: rprint(f"[dim]{s}[/dim]"))
