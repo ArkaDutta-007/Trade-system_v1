@@ -62,8 +62,13 @@ def month_book(pw, comp, offset: int = 0):
     first = [d for i, d in enumerate(days) if i == 0 or d.month != days[i - 1].month]
     first = [days[min(days.index(d) + offset, len(days) - 1)] for d in first]
     prev = {d: p for p, d in zip(cal[:-1], cal[1:])}
-    uni = (pw.with_columns(lr=pl.col("log_dv_21").rank(descending=True).over("date")).filter(pl.col("lr") <= 300, pl.col("close") >= 5)
-             .with_columns(mc=pl.col("log_mcap").fill_null(pl.col("log_dv_21") + (pl.col("log_mcap") - pl.col("log_dv_21")).median().over("date")))
+    # weights: per-share-class caps (2026-11-13). Before, the filing-based company cap was used: Waters at 1,000×
+    # its size from 2026-07 (a units error in its filings) and Alphabet counted twice.
+    from trading_system.alpha.challenger import with_log_cap
+    cap = pl.when(pl.col("log_cap").is_finite()).then(pl.col("log_cap"))
+    uni = (with_log_cap(LAB.cfg, pw.select("date", "ticker", "close", "log_dv_21", "log_mcap"))
+             .with_columns(lr=pl.col("log_dv_21").rank(descending=True).over("date")).filter(pl.col("lr") <= 300, pl.col("close") >= 5)
+             .with_columns(mc=pl.coalesce(cap, pl.col("log_dv_21") + (cap - pl.col("log_dv_21")).median().over("date")))
              .select("date", "ticker", "mc"))
     j = uni.join(comp, on=["date", "ticker"], how="left").with_columns(comp=pl.col("comp").fill_null(pl.col("comp").median().over("date")))
     by = {d: g for (d,), g in j.group_by(["date"])}

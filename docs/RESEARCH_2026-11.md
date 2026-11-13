@@ -8,6 +8,11 @@ books only; nothing in this report changes production. Code: `ops/research/*_202
 
 ## 1. Bottom line
 
+> **Update 2026-11-13 (read §10–§12).** A units error in SEC share counts had put Waters at 40% of the
+> "index" from July 2026 and counted Alphabet twice. With correct weights, index-minus beats its control by
+> **+3.5 to +4.0%/yr** (not +5.7%), all of it in year 1: over the last 12 months it trails by 0.5–0.8%. It now
+> runs as a paper book against its control. The numbers in item 2 and in §3's index-minus table are superseded.
+
 1. **More compute is not what is holding us back.** All 13 model comparisons ran on the existing RTX 2070 in
    27 minutes. A five-seed neural network ensemble did not beat XGBoost in the book, and blending four engines
    made the book worse. The limits are two honest years of data and a weak signal.
@@ -268,3 +273,109 @@ python ops/research/tilts_2026_11.py posthoc   # ML + literature blend
 ```
 
 `data/external/` (Ken French, Open Source AP, S&P lists) is git-ignored, so download it again on another machine.
+
+## 10. Designs from trading-firm competitions (2026-11-13)
+
+*Arka's request: look at the algorithms, competitions and games of Jane Street, SIG, Citadel, Optiver, HRT and
+others for open-source solutions and better designs.* Code: `ops/research/comp_2026_11.py`.
+
+### What the firms publish, and what transfers
+
+| source | what won or what it teaches | fits our problem? |
+|---|---|---|
+| Jane Street, Real-Time Market Data Forecasting (Kaggle 2024) | Small GRU/MLP networks with auxiliary targets; **refitting every day was the biggest single gain** (about +0.008 of score, roughly 10× the gain from ensembling), per an [unofficial summary](https://vankyle00.github.io/trading-models/docs/concepts/02-jane-street-key-concepts.html) and [Volkova's open solution](https://github.com/evgeniavolkova/kagglejanestreet) | Tested below. Their target is minutes ahead; ours is 1–3 months |
+| Jane Street, Market Prediction (2021) | A supervised autoencoder trained jointly with an MLP, purged time-series validation, sample weights ([Numerai forum replication](https://forum.numer.ai/t/autoencoder-and-multitask-mlp-on-new-dataset-from-kaggle-jane-street/4338)) | We already purge and embargo. Networks did not beat XGBoost here (§3) |
+| G-Research, Crypto Forecasting | All top three used LightGBM; winners said feature work mattered far more than the model ([G-Research wrap-up](https://www.gresearch.com/news/wrapping-up-the-g-research-crypto-forecasting-competition/)) | Yes. It is how the data bug in §11 was found |
+| Numerai tournament | Neutralise predictions against known feature exposures to cut risk ([example scripts](https://github.com/numerai/example-scripts), [forum](https://forum.numer.ai/t/model-diagnostics-feature-exposure/899), [numerblox](https://pypi.org/project/numerblox/0.5.4/)) | Tested below |
+| Hull Tactical, Market Prediction (Kaggle 2025–26) | Daily S&P 500 exposure between 0 and 2. The [4th-place entry](https://www.kaggle.com/c/hull-tactical-market-prediction/writeups/4th-place-technical-model-no-learning-short-te) is titled "Technical Model, No Learning: Short Term Reversal" ([leaderboard](https://www.kaggle.com/competitions/hull-tactical-market-prediction/leaderboard?tab=private)); I could not read its text | Matches our result that learned exposure policies do not beat a simple rule |
+| JPX Tokyo Stock Exchange Prediction | Rank 2,000 stocks daily; winners' code is public ([J-Quants repo](https://github.com/J-Quants/JPXTokyoStockExchangePrediction)) but I found no write-up of their methods | Same task shape as ours; nothing verified to copy |
+| Optiver: Trading at the Close, Ready Trader Go | Closing-auction prediction at 10-second steps ([ESANN paper on the entries](https://www.esann.org/sites/default/files/proceedings/2024/ES2024-159.pdf)); a market-making bot contest ([rules](https://readytradergo.optiver.com/how-to-play/)). I could not verify the winning write-up | No: order-book data and sub-second execution |
+| IMC Prosperity, Jane Street ETC | Market making, ETF-versus-basket and ADR-versus-stock arbitrage; open code ([Prosperity 3 write-up](https://kinshu0.github.io/jekyll/update/2025/07/06/prosperity-3.html), [ETC team](https://github.com/kvyuan/JaneSteetETC)) | No: these need exchange access and speed a retail account lacks |
+| HRT AI Labs | Reinforcement learning that trades toward a long-term target using short-term forecasts. Standard RL was fragile and overfit noise ([HRT, 2026](https://www.hudsonrivertrading.com/hrtbeat/intern-spotlight-hrt-ai-labs-project-2026/)) | Same shape as our partial-trading rule, and the same lesson as our RL test |
+| SIG, Jane Street's Figgie | Poker and trading games to teach betting size and decisions under uncertainty ([SIG](https://sig.com/quantitative-trading/game-theory/), [Risk.net](https://www.risk.net/investing/quant-investing/7955140/role-of-the-dice-how-susquehanna-puts-game-theory-to-work), [figgie-auto](https://github.com/0xDub/figgie-auto)) | The principle: size by proven edge. Ours is unproven, so sizes stay small and diversified |
+| Citadel | Datathons run with Correlation One ([Citadel](https://www.citadel.com/careers/programs-and-events/datathons)); no public solutions found | Nothing to take |
+| Newfound Research (not a trading firm) | Rebalance-timing luck: hold N sub-books rebalanced on different days ([overview](https://www.thinknewfound.com/rebalance-timing-luck), [smart-beta study](https://blog.thinknewfound.com/2019/11/the-dumb-timing-luck-of-smart-beta/)) | Yes. Adopted in the challenger |
+
+Open-source frameworks (Qlib, NautilusTrader, hftbacktest, skfolio) were not brought in. Our backtester is not
+the bottleneck, and running other people's competition code on our data was not needed: each idea took a few
+lines in our own code.
+
+### Tests on the honest panel
+
+Base = point-in-time rows + top-500 training, refit every 63 sessions. Index-minus = top-300 cap-weighted minus
+the worst 30%, as four tranches (start days 0/5/10/15). Rule set before the run: a variant replaces the base only
+if its IC is no lower in either year and its index-minus excess is higher.
+
+| variant | 21d IC yr 1 / yr 2 | 63d IC yr 1 / yr 2 | index-minus vs control (95% CI) | excess yr 1 / yr 2 | top-20 in top-300 |
+|---|---|---|---|---|---|
+| **Base** | +.105 / +.018 | +.120 / −.012 | **+4.0% (+0.8, +7.8)** | +9.9% / −0.5% | +11.5%, Sharpe .82 |
+| Refit every 21 sessions | +.089 / +.017 | +.104 / −.005 | +3.3% (+0.4, +6.5) | +7.5% / 0.0% | +9.8%, .67 |
+| Refit every 5 sessions | +.096 / +.012 | +.104 / −.013 | +3.4% (+0.5, +6.8) | +8.8% / −0.7% | +11.3%, .76 |
+| 2-year sample-weight half-life | +.098 / +.024 | +.096 / −.008 | +4.0% (+0.3, +7.9) | +8.9% / +0.1% | +9.3%, .65 |
+| Neutralised 50% | +.070 / +.019 | +.089 / +.005 | +2.1% (−0.6, +4.9) | +6.2% / −1.2% | +12.1%, .90 |
+| Neutralised 100% | +.022 / +.020 | +.047 / +.024 | +1.1% (−1.1, +3.1) | +3.6% / −0.9% | +11.1%, .93 |
+| Control / SPY | | | control +14.6%/yr, SPY +13.9% | | |
+
+- **Frequent refits did not help.** Jane Street's biggest gain does not transfer: our labels take 21–63 sessions
+  to mature, so a weekly refit learns almost nothing new.
+- **Neutralisation shows where the edge came from.** With beta, volatility, size, momentum, short-term return and
+  sector removed, the 21-day IC is +.02 in both years. So about four-fifths of year 1's IC was exposure to
+  small, volatile, recently fallen stocks, which paid in year 1 and not in year 2. The stock-specific part is
+  small and steady. Neutralised top-20 books had the best Sharpe (.90–.93) and the smallest drawdown (−8.9%).
+- **No variant passed the rule,** so the base stays. The neutralised score is worth watching live.
+- **Tranches are adopted.** Across start days the same book ranged from +17.1% to +21.7%/yr (index-minus) and
+  from +8.8% to +14.5% (top-20). Four tranches hold the average.
+
+## 11. A data bug found on the way: share counts 1,000× off (2026-11-13)
+
+The challenger's first run listed Waters at 40% of the index. The cause was in SEC share counts:
+
+- **5.2% of filings (9,199 of 176,283, in 2,143 companies) report shares on the wrong scale.** Most give the count
+  in thousands (NVDA 2011: 588,684). A few overshoot: Waters' 2026 10-Qs report 8.2e10 shares against 6.0e7.
+- **Effect:** market cap and four price ratios (earnings, book, sales and cash flow to price) were off by 1,000×
+  for those filings. In the production panel that is 0.8% of rows in 145 of 1,014 names, including MCD and BRK-B
+  on the latest date.
+- **Fix (`panel.repair_share_units`):** three yardsticks vote on the power of 1,000: net income ÷ EPS, Massive's
+  independent share count, and the company's own filing history. Counts more than 100× away from an independent
+  share-class count fell from 43 to 5 of 3,499. Implausible market caps in the panel fell from 29,317 rows to 1,026.
+- **Index weights** now use shares per listed class (`challenger.with_log_cap`), which also stops Alphabet being
+  counted twice and gives foreign filers such as TSM and ASML a real weight.
+- **Model quality did not measurably change.** Honest-test IC is the same within noise, because rank features
+  and trees shrug off a few extreme values. The production model was retrained on the corrected panel anyway.
+- **The index-minus result did change:** see the update under §1.
+
+## 12. What changed in the system (2026-11-13)
+
+*Arka's request: make every component effective and efficient.* What the evidence supports is a system that is
+correct, honest about its edge, and set up to find out. It does not support a claim of a market-beating picker.
+
+| component | evidence | time | change |
+|---|---|---|---|
+| Whole-market data | current, complete, accumulating | crawler idle | none needed |
+| Fundamentals | 5.2% of filings mis-scaled | 28 s/day | **repaired** (§11) |
+| Feature panel | 58 features, rebuilt on corrected data | 25–40 s/day | **rebuilt** |
+| Production model | honest test **+1.8%/yr** vs SPY +13.9%; last 12 months −4.8%. Live IC −0.05 (5d) and −0.11 (21d), verdict GREEN but uninformative | 39 s/week | retrained on corrected data; otherwise unchanged |
+| **Challenger model** (new) | honest IC +.060 vs +.031 for production (21d); same recipe in the top-20 book +8.9%/yr | about 40 s/day; refit every 63 sessions | **runs daily beside production** |
+| Book construction | start day alone moved results by ±2–3%/yr | | **index-minus with 4 weekly tranches**, as paper books `index_minus` and `top300_cap` (control) |
+| Honest test | was one frozen number from October | 6.4 min/week | **re-run weekly**; the picks card, digest and challenger status quote it |
+| Expected returns shown | live calibration slope is negative, so they are overstated | | flagged on the card; not changed |
+| tev1 judgments, flags, regime, playbook | informational; not shown to add return | 71 s/day for flags | unchanged |
+| Daily job | clean since the 11-10 fix | 3.7 min → about 4.4 min | one new step |
+
+How to read the challenger: compare `index_minus` with `top300_cap` in the scoreboard. The honest backtest says
++3.5%/yr over two years (95% CI +0.1 to +6.9) and −0.8% over the last 12 months, so it could easily show nothing.
+A fair first look is after about 12 independent months. One known risk: the book drops whole mega-caps (Apple, 7.5%
+of the index, this week), so it can differ from the index by several points in a month.
+
+Not done, and why:
+- **Promoting the challenger to the picks card.** Its last 12 months show no edge; it has to earn that live.
+- **Full re-run of the 2003→ backtest ledger** on the corrected data. It would move the calibration weights only
+  slightly (0.8% of rows changed).
+- **Kronos.** Still waiting for Arka's OK to run downloaded code.
+
+```bash
+ts alpha challenger                        # daily: refresh, refit when due, score, record a tranche, print status
+python ops/research/honest_weekly.py       # weekly: the honest test on everything to date
+python ops/research/comp_2026_11.py        # §10 training runs (30 min);  ... comp_2026_11.py eval  for the tables
+```
+

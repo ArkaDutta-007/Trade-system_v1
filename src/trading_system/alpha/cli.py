@@ -21,6 +21,23 @@ HONEST_NOTE = ("⚠ honest test incl. failed stocks: −1.3%/yr vs SPY +16.4% (N
                "expected returns backtest-calibrated, likely overstated")
 
 
+def honest_note(cfg) -> str:
+    """The line under the picks card: the latest weekly honest test (ops/research/honest_weekly.py) when there
+    is one, else the frozen October result."""
+    from datetime import date
+    from .challenger import honest
+    h = honest(cfg)
+    try:
+        p, spy = h["production_top20"], h["spy"]
+        w0, w1 = (date.fromisoformat(x).strftime("%b %y") for x in h["window"])
+    except (TypeError, KeyError, ValueError):
+        return HONEST_NOTE
+    verdict = "no proven edge" if p["cagr"] < spy["cagr"] else "ahead on the honest test, unproven live"
+    pct = lambda x: f"{x:+.1%}".replace("-", "−")
+    return (f"⚠ honest test incl. failed stocks: {pct(p['cagr'])}/yr vs SPY {pct(spy['cagr'])} ({w0} → {w1}, re-run weekly) — "
+            f"{verdict}; expected returns backtest-calibrated, likely overstated")
+
+
 def _cfg(config: str):
     from ..config import get_config
     return get_config(config)
@@ -227,7 +244,7 @@ def alpha_picks(config: str = CONFIG_OPT, top: int = typer.Option(20), compact: 
             rprint(f"{i}. *{r['ticker']}*  ${r['price']:.0f} · {r['weight']:.1%} · {r['sector'].replace('_', ' ')}{er} · {act}")
         reg = "risk-on" if meta["regime_on"] else f"risk-OFF (market {meta['mkt_trend_200']:+.1%} vs 200d avg → half gross)"
         rprint(f"_horizon weights {wdesc} · {'calibrated' if meta['calibrated'] else 'uncalibrated'} · {reg}_")
-        rprint(f"_{HONEST_NOTE}_")
+        rprint(f"_{honest_note(cfg)}_")
     else:
         t = Table(title=f"Alpha book · as of {last} · horizon weights {wdesc} · from {meta['source']}")
         for c in ("#", "ticker", "price", "wt", "target", "Δ", "E[r] 21d", "80% band 21d", "E[r] 63d", "vol", "$vol/d", "sector", "drivers"):
@@ -449,6 +466,54 @@ def alpha_judge(config: str = CONFIG_OPT, top: int = typer.Option(20, help="toda
     if ledger:
         J.log_ledger(cfg, sw + mon + scr, date.today())
     print(J.render(date.today(), url, sw, mon, scr, conf))
+
+
+@alpha_app.command("challenger")
+def alpha_challenger(config: str = CONFIG_OPT,
+                     retrain: bool = typer.Option(False, help="refit now (otherwise every 63 sessions)"),
+                     days: int = typer.Option(1, help="score the last N panel dates"),
+                     status_only: bool = typer.Option(False, "--status", help="print the status without updating")):
+    """Challenger (paper only): point-in-time model + index-minus book, run beside production.
+
+    Refreshes its point-in-time panel, refits when due, scores today's names and records a weekly tranche of
+    target weights for the paper books ``index_minus`` and ``top300_cap`` (its control). Production is untouched."""
+    import time as _t
+    from . import challenger as C
+    cfg = _cfg(config)
+    t0 = _t.time()
+    info = None if status_only else C.update(cfg, retrain=retrain, days=days)
+    man, snaps = C.manifest(cfg), C.load_snapshots(cfg)
+    if man is None or snaps.height == 0:
+        rprint("[yellow]challenger not initialised — run `ts alpha challenger`[/yellow]")
+        raise typer.Exit(code=0)
+    nd = snaps["date"].n_unique()
+    w, c = C.book_weights(cfg, "index_minus"), C.book_weights(cfg, "top300_cap")
+    rprint("Challenger · paper only · production model and picks are unchanged")
+    rprint(f"design   train on point-in-time data (failures included) + each day's top {C.TRAIN_TOP}; hold the {C.UNIVERSE_TOP} "
+           f"most liquid names at market-cap weight minus the worst {C.DROP:.0%} by score; {C.TRANCHES} tranches, one traded every {C.TRANCHE_GAP} sessions")
+    rprint(f"model    trained through {man['trained_through']} · point-in-time rows used: "
+           + " · ".join(f"{h}d {n:,}" for h, n in man.get('pit_rows', {}).items())
+           + (f" · refit today in {_t.time() - t0:.0f}s" if info and info["trained"] else ""))
+    rprint(f"book     {len(w)} names held of {len(c)} · {nd} tranche{'s' if nd != 1 else ''} recorded, latest {snaps['date'].max()}"
+           + (" (new today)" if info and info["snapshot"] else ""))
+    top = sorted(w.items(), key=lambda kv: -kv[1])[:8]
+    rprint("largest  " + " · ".join(f"{t} {x:.1%}" for t, x in top))
+    av = C.avoid_list(cfg)
+    if av:
+        rprint(f"dropped  largest names the model left out this week (index weight): " + " · ".join(f"{t} {x:.1%}" for t, x in av))
+    ic = C.live_ic(cfg)
+    if ic.get("dates"):
+        rprint(f"live     21-day rank IC {ic['ic']:+.3f} over {ic['dates']} dates ({ic['independent']} independent) · {ic['first']} → {ic['last']} — "
+               "too few to judge before ~12 independent periods")
+    else:
+        rprint("live     no 21-day forecast has matured yet")
+    hb = C.honest(cfg)
+    if hb:
+        im, ct = hb.get("index_minus", {}), hb.get("control", {})
+        rprint(f"backtest honest test {hb.get('window', ['?', '?'])[0]} → {hb.get('window', ['?', '?'])[1]}: index-minus {im.get('cagr', 0):+.1%}/yr vs control "
+               f"{ct.get('cagr', 0):+.1%} · last 12 months {im.get('last_year', 0):+.1%} vs {ct.get('last_year', 0):+.1%} · SPY {hb.get('spy', {}).get('cagr', 0):+.1%}/yr "
+               f"(refreshed {hb.get('run', '?')})")
+    rprint("judge    index_minus against top300_cap in the scoreboard below, not against SPY; this is a shadow test, not advice")
 
 
 @alpha_app.command("status")

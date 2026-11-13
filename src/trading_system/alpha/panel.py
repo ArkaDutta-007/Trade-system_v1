@@ -236,7 +236,44 @@ def price_features(px: pl.DataFrame) -> pl.DataFrame:
 
 # ── fundamentals (point-in-time on filing date) ───────────────────────────────
 
-def fundamental_features(fin: pl.DataFrame) -> pl.DataFrame:
+def repair_share_units(q: pl.DataFrame, ref: pl.DataFrame | None = None) -> pl.DataFrame:
+    """Undo share counts filed 1,000× (or 1,000,000×) off.
+
+    Filings often tag average shares with the wrong scale. Thousands of older ones give the count in thousands
+    (NVDA 2011: 588,684), and a few overshoot: Waters' 2026-05 and 2026-08 10-Qs report 8.2e10 and 9.8e10 shares
+    against 6.0e7 the quarter before, which made its market cap $45 trillion. Either way market cap and every
+    price ratio are off by that factor. Three yardsticks each say by which power of 1,000 a count is off (0 when
+    it is within 300×; splits never reach that):
+
+      eps    net income ÷ EPS of the same filing
+      ref    an independent count per ticker (``ref``: ``ticker, ref_shares`` — Massive's current company shares;
+             used for the order of magnitude only, so it carries no look-ahead that matters)
+      hist   the median of the ticker's previous eight filings
+
+    eps and ref decide when they agree; when they differ, hist breaks the tie in favour of eps, else ref wins
+    (an EPS can be mis-scaled too: BBOT 2026-08 reports −705.2 for −0.705). With one of the two missing the other
+    decides — eps over hist, because a company that always files in thousands has a consistently wrong history.
+    hist decides only when it is all there is. Needs ``ticker, shares, ni, eps`` sorted by ticker and time."""
+    def k_of(yard: pl.Expr) -> pl.Expr:
+        r = pl.col("shares") / yard
+        k = pl.when((r > 300) | (r < 1 / 300)).then((r.log() / math.log(1000.0)).round()).otherwise(0.0)
+        return pl.when((yard > 0) & (pl.col("shares") > 0) & r.is_finite()).then(k)
+
+    if ref is not None and ref.height:
+        q = q.join(ref.select("ticker", pl.col("ref_shares").cast(pl.Float64)).unique(subset=["ticker"]), on="ticker", how="left")
+    else:
+        q = q.with_columns(ref_shares=pl.lit(None, dtype=pl.Float64))
+    implied = pl.when(pl.col("eps").abs() > 1e-4).then((pl.col("ni") / pl.col("eps")).abs())
+    q = q.with_columns(_ke=k_of(implied), _kr=k_of(pl.col("ref_shares")),
+                       _kh=k_of(pl.col("shares").shift(1).rolling_median(8, min_samples=3).over("ticker")))
+    ke, kr, kh = pl.col("_ke"), pl.col("_kr"), pl.col("_kh")
+    k = (pl.when(ke.is_not_null() & kr.is_not_null())
+           .then(pl.when((ke == kr) | (kh.is_not_null() & (kh == ke))).then(ke).otherwise(kr))
+           .otherwise(pl.coalesce(ke, kr, kh, pl.lit(0.0))))
+    return q.with_columns(shares=pl.col("shares") / (1000.0 ** k)).drop("_ke", "_kr", "_kh", "ref_shares")
+
+
+def fundamental_features(fin: pl.DataFrame, ref_shares: pl.DataFrame | None = None) -> pl.DataFrame:
     """Per-filing fundamental ratios (before the price scaling), keyed by ``avail_date``.
 
     TTM flows = sum of the last four quarterly filings when they span ~a year, else
@@ -254,9 +291,11 @@ def fundamental_features(fin: pl.DataFrame) -> pl.DataFrame:
                     rev=col(I + "revenues"), ni=col(I + "net_income_loss"), gp=col(I + "gross_profit"),
                     ocf=col(C + "net_cash_flow_from_operating_activities"),
                     assets=col(B + "assets"), equity=col(B + "equity"), liab=col(B + "liabilities"),
-                    shares=pl.coalesce(col(I + "diluted_average_shares"), col(I + "basic_average_shares")))
+                    shares=pl.coalesce(col(I + "diluted_average_shares"), col(I + "basic_average_shares")),
+                    eps=pl.coalesce(col(I + "diluted_earnings_per_share"), col(I + "basic_earnings_per_share")))
             .drop_nulls(["end_date", "filing_date"])
             .sort(["ticker", "end_date", "filing_date"]))
+    q = repair_share_units(q, ref_shares).drop("eps")
     T = "ticker"
     qq = q.filter(pl.col("timeframe") == "quarterly")
     span = (pl.col("end_date") - pl.col("end_date").shift(3).over(T)).dt.total_days()
@@ -539,6 +578,15 @@ def _norm_ppf(u: np.ndarray) -> np.ndarray:
 
 # ── orchestration ─────────────────────────────────────────────────────────────
 
+def _ref_shares(cfg) -> pl.DataFrame | None:
+    """Massive's current company share count per ticker — the independent yardstick of ``repair_share_units``."""
+    p = cfg.path("data_bronze") / "massive" / "details.parquet"
+    if not p.exists():
+        return None
+    return (pl.read_parquet(p, columns=["ticker", "weighted_shares_outstanding"])
+              .select("ticker", ref_shares=pl.col("weighted_shares_outstanding").cast(pl.Float64)).drop_nulls())
+
+
 def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "1998-01-01",
                 end: date | None = None, horizons: Iterable[int] = HORIZONS,
                 min_dollar_vol: float = 1e6, deep_path: Path | None = None,
@@ -553,7 +601,7 @@ def build_panel(cfg, tickers: Iterable[str] | None = None, start: str | date = "
     panel = panel.join(_sector_map(cfg), on="ticker", how="left").with_columns(pl.col("sector").fill_null("unknown"))
     from ..ingestion.edgar_fundamentals import fundamentals_path      # SEC EDGAR ⊕ Massive history (2026-10-08)
     fin_p, news_p, si_p, sv_p = fundamentals_path(cfg), B / "news.parquet", B / "short_interest.parquet", B / "short_volume.parquet"
-    fund = fundamental_features(pl.read_parquet(fin_p)) if fin_p.exists() else pl.DataFrame()
+    fund = fundamental_features(pl.read_parquet(fin_p), _ref_shares(cfg)) if fin_p.exists() else pl.DataFrame()
     panel = _join_fundamentals(panel, fund)
     panel = _join_earnings(panel, earnings_events(pl.read_parquet(fin_p)) if fin_p.exists() else pl.DataFrame())
     nd = news_daily(pl.read_parquet(news_p, columns=["ticker", "published_utc", "sentiment"])) if news_p.exists() else pl.DataFrame()

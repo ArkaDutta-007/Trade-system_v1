@@ -890,6 +890,11 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
     CAGR 16.5% → 29.1%, Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr at beta 0.72 → 0.90,
     excess +11.0%/yr CI [+6.3%, +15.8%], 12/15 years better → **adopted** as the production
     objective. MaxDD rose −28% → −39%.
+* **Challenger + weekly honest test (2026-11-13, `docs/RESEARCH_2026-11.md` §10–§12).** `ts alpha challenger` runs a
+  point-in-time-trained model and an index-minus book (top-300 cap-weighted minus the worst 30%, 4 weekly tranches)
+  as paper books `index_minus` / `top300_cap` beside production. `ops/research/honest_weekly.py` re-runs the honest
+  test every week and the picks card quotes it. `panel.repair_share_units` fixes SEC share counts filed 1,000× off
+  (5.2% of filings). Competition designs tested (frequent refits, recency weights, neutralisation): none adopted.
 * **Second research pass (2026-11-04, `docs/RESEARCH_2026-11.md`).** Compute is not the constraint. Top-20 books
   stayed below SPY. Best new idea: cap-weighted top-300 minus the worst 30% by model score beat its control on all
   four rebalance days tested (+3.0 to +6.7%/yr), nearly all in year 1. Quote book results as medians across start

@@ -169,7 +169,11 @@ digest_step "Regime & fragility — where are we, when was it like this" 300 ts 
 
 # Competing $10k paper books (spy_benchmark / momentum / alpha_v2; the four legacy-model books are
 # retired and shown frozen). Rebalance is monthly and self-guarding, so calling it daily is safe.
-heavy_step "Dummy portfolios rebalance+mark" 1200 python3 $CODE/portfolio/portfolios.py --rebalance --mark
+# Challenger (2026-11-13): point-in-time-trained model + index-minus book, run beside production as paper books
+# (docs/RESEARCH_2026-11.md §10). ~40 s; refits itself every 63 sessions; `--init` seeds its two books once a
+# tranche exists and leaves existing books untouched.
+digest_step "🧪 Challenger — point-in-time model + index-minus book (shadow, paper only)" 1200 ts alpha challenger
+heavy_step "Dummy portfolios rebalance+mark" 1200 python3 $CODE/portfolio/portfolios.py --init --rebalance --mark
 digest_step "Dummy portfolios — long-run scoreboard" 300 python3 $CODE/portfolio/portfolios.py --report
 
 # Playbook briefing needs the broker snapshot, which is gitignored and may not

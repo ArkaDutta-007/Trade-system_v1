@@ -168,7 +168,8 @@ def test_persisted_books_are_valid_json_with_required_keys():
 # ── book set after the legacy retirement (2026-10-09) ───────────────────────
 def test_legacy_books_are_retired_not_deleted():
     """The four legacy-model books leave the active set but keep their history (shown frozen)."""
-    assert pf.BOOKS == ["spy_benchmark", "momentum", "alpha_v2"]
+    assert pf.BOOKS == ["spy_benchmark", "momentum", "alpha_v2", "index_minus", "top300_cap"]
+    assert set(pf.TRANCHE_BOOKS) <= set(pf.BOOKS)
     assert set(pf.RETIRED) == {"ml_raw", "ml_v2", "blend", "ml_v2_gp"}
     assert not set(pf.RETIRED) & set(pf.BOOKS)
     for name in pf.RETIRED:
@@ -257,3 +258,15 @@ def test_gp_rebalance_exits_dropped_names():
     for i in range(12):
         pf.rebalance_book_gp(b, {"NEW": 1.0}, px, f"2020-{i+1:02d}-02")
     assert b["holdings"].get("OLD", 0.0) * px["OLD"] / pf.equity(b, px) < 0.01
+
+
+def test_tranche_books_trade_once_per_tranche_at_the_next_close():
+    from datetime import date
+    b = {"last_tranche": None}
+    assert not pf.tranche_due(b, date(2026, 11, 12), None)                      # challenger has not run yet
+    assert not pf.tranche_due(b, date(2026, 11, 12), date(2026, 11, 12))        # same close as the scores: wait
+    assert pf.tranche_due(b, date(2026, 11, 13), date(2026, 11, 12))            # first close after the tranche
+    b["last_tranche"] = "2026-11-12"
+    assert not pf.tranche_due(b, date(2026, 11, 16), date(2026, 11, 12))        # already traded this tranche
+    assert pf.tranche_due(b, "2026-11-20", date(2026, 11, 19))                  # next tranche
+

@@ -69,7 +69,12 @@ START_CASH = 10_000.0
 N_HOLD = 10
 COST_BPS = 4.0
 IMPACT_BPS = 10.0
-BOOKS = ["spy_benchmark", "momentum", "alpha_v2"]
+BOOKS = ["spy_benchmark", "momentum", "alpha_v2", "index_minus", "top300_cap"]
+# Challenger shadow books (2026-11-13, trading_system.alpha.challenger): the 300 most liquid names at market-cap
+# weight minus the worst 30% by the challenger's score, and the same 300 with nothing dropped (the control).
+# Their target is the mean of the last 4 weekly tranches; they trade the session AFTER a tranche is recorded,
+# as in the backtest (scores from one close, trades at the next).
+TRANCHE_BOOKS = ("index_minus", "top300_cap")
 # Legacy-model books, retired with the legacy pipeline: never marked or traded again; their JSON
 # (holdings, equity log, trades) stays on disk unchanged and the report shows their final numbers.
 RETIRED = {"ml_raw": "2026-10-09", "ml_v2": "2026-10-09", "blend": "2026-10-09", "ml_v2_gp": "2026-10-09"}
@@ -131,11 +136,31 @@ def select(book: str, n: int = N_HOLD) -> list[str]:
 
 def select_weighted(book: str) -> dict[str, float]:
     """Target WEIGHTS (not just names) — needed for partial trading."""
+    from trading_system.config import get_config
+    cfg = get_config(str(REPO / "configs/default.yaml"))
+    if book in TRANCHE_BOOKS:
+        from trading_system.alpha.challenger import book_weights
+        return book_weights(cfg, book)
     if book != "alpha_v2":
         raise ValueError(f"{book}: not an active weighted book")
     from trading_system.alpha.live import targets_as_dict
+    return targets_as_dict(cfg, ALPHA_TOP)
+
+
+def _latest_tranche():
+    """Date of the newest tranche the challenger recorded (None before its first run)."""
+    from trading_system.alpha.challenger import last_snapshot
     from trading_system.config import get_config
-    return targets_as_dict(get_config(str(REPO / "configs/default.yaml")), ALPHA_TOP)
+    return last_snapshot(get_config(str(REPO / "configs/default.yaml")))
+
+
+def _as_date(d):
+    return d if isinstance(d, date) and not isinstance(d, datetime) else datetime.fromisoformat(str(d)[:10]).date()
+
+
+def tranche_due(b: dict, d, tranche) -> bool:
+    """A tranche book trades once per tranche, at the first close after the tranche was recorded."""
+    return tranche is not None and str(tranche) != b.get("last_tranche") and _as_date(tranche) < _as_date(d)
 
 
 # ── book state ──────────────────────────────────────────────────────────────
@@ -239,7 +264,12 @@ def rebalance_book_gp(b: dict, target_w: dict[str, float], px: dict[str, float],
 
 def _rebalance(b: dict, name: str, p: dict[str, float], d) -> None:
     """Dispatch: the GP book trades toward weights; the others equal-weight names."""
-    if name == "alpha_v2":
+    if name in TRANCHE_BOOKS:
+        w = select_weighted(name)
+        if w:
+            rebalance_book_gp(b, w, p, d, rate=1.0, note="mean of the last 4 weekly tranches")
+            b["last_tranche"] = str(_latest_tranche())
+    elif name == "alpha_v2":
         rebalance_book_gp(b, select_weighted(name), p, d)
     else:
         rebalance_book(b, select(name), p, d)
@@ -267,6 +297,9 @@ def do_init(px: pl.DataFrame) -> None:
         b = load_book(name)
         if b["created"]:
             print(f"  {name}: exists (created {b['created']}) — untouched")
+            continue
+        if name in TRANCHE_BOOKS and not tranche_due(b, d, _latest_tranche()):
+            print(f"  {name}: waiting for the first close after a challenger tranche — not seeded yet")
             continue
         b["created"] = str(d)
         _rebalance(b, name, p, d)
@@ -297,6 +330,12 @@ def do_rebalance(px: pl.DataFrame, force: bool = False) -> None:
     for name in BOOKS:
         b = load_book(name)
         if not b["created"]:
+            continue
+        if name in TRANCHE_BOOKS:
+            if tranche_due(b, d, _latest_tranche()):
+                _rebalance(b, name, p, d)
+                save_book(b)
+                print(f"  rebalanced {name} → {len(b['holdings'])} names (tranche {b.get('last_tranche')})")
             continue
         last = b.get("last_rebalance")
         if last and not force:
@@ -366,6 +405,11 @@ def do_report() -> str:
         L.append(f"{name:<15}{m['equity']:>10,.0f}{m['total_ret']*100:>8.1f}%"
                  f"{rel}{m['sharpe']:>8.2f}{m['maxdd']*100:>7.1f}%  {hold}")
     L.append("(vs SPY = SPY over the same dates as the book; alpha_v2 started 2026-09-18)")
+    by = {name: (b, m) for name, b, m in rows}
+    if "index_minus" in by and "top300_cap" in by:
+        (bi, mi), (bc, mc) = by["index_minus"], by["top300_cap"]
+        L.append(f"index_minus vs its control top300_cap: {(mi['total_ret'] - mc['total_ret']) * 100:+.1f}% over {mi['days']} sessions "
+                 f"since {bi['created']} — challenger shadow books (4 weekly tranches); judge them against each other, not SPY")
     if rows[0][2]["days"] < 20:
         L.append("")
         L.append("⚠ Too early to judge — these need months, not days. "

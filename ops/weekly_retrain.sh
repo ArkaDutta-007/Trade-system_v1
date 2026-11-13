@@ -34,6 +34,9 @@ step 1800 ts data insiders
 # causal walk-forward with the new dates only.
 step 3600 ts alpha train
 step 3600 ts alpha backtest --extend
+# The honest test (failures included), re-run on everything we have: the picks card and the challenger status
+# quote its result (reports/alpha/honest_latest.json). ~6 min on the GPU.
+step 3600 python ops/research/honest_weekly.py
 echo "=== weekly retrain done fail=$FAIL $(date -Is) ===" >> "$LOG"
 tail -4 "$LOG"
 find $OPS/logs -name 'retrain-*.log' -mtime +60 -delete 2>/dev/null
