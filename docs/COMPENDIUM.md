@@ -890,6 +890,10 @@ day, CHRD, BNY…) is cut at the last series break in `sanitize_prices`.
     CAGR 16.5% → 29.1%, Sharpe 1.09 → 1.42, alpha +5.2% → +13.6%/yr at beta 0.72 → 0.90,
     excess +11.0%/yr CI [+6.3%, +15.8%], 12/15 years better → **adopted** as the production
     objective. MaxDD rose −28% → −39%.
+* **Kronos, training targets, LLM inputs (2026-11-13, `docs/RESEARCH_2026-11.md` §13).** Kronos (zero-shot), a
+  news-embedding probe and an LLM reading of 4,206 earnings releases added nothing. A factor-neutral training target
+  gave the first score positive in both years; the challenger now trains it as a second model and runs a third paper
+  book, `top20_fn`. Volatility-managed exposure cost 1.1%/yr since 2005 against 3.0%/yr for the 200-day trend rule.
 * **Challenger + weekly honest test (2026-11-13, `docs/RESEARCH_2026-11.md` §10–§12).** `ts alpha challenger` runs a
   point-in-time-trained model and an index-minus book (top-300 cap-weighted minus the worst 30%, 4 weekly tranches)
   as paper books `index_minus` / `top300_cap` beside production. `ops/research/honest_weekly.py` re-runs the honest

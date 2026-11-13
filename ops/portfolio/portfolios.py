@@ -69,12 +69,13 @@ START_CASH = 10_000.0
 N_HOLD = 10
 COST_BPS = 4.0
 IMPACT_BPS = 10.0
-BOOKS = ["spy_benchmark", "momentum", "alpha_v2", "index_minus", "top300_cap"]
+BOOKS = ["spy_benchmark", "momentum", "alpha_v2", "index_minus", "top300_cap", "top20_fn"]
 # Challenger shadow books (2026-11-13, trading_system.alpha.challenger): the 300 most liquid names at market-cap
 # weight minus the worst 30% by the challenger's score, and the same 300 with nothing dropped (the control).
 # Their target is the mean of the last 4 weekly tranches; they trade the session AFTER a tranche is recorded,
 # as in the backtest (scores from one close, trades at the next).
-TRANCHE_BOOKS = ("index_minus", "top300_cap")
+# top20_fn (same day): the production top-20 rules on the challenger's factor-neutral score, inside the top-300.
+TRANCHE_BOOKS = ("index_minus", "top300_cap", "top20_fn")
 # Legacy-model books, retired with the legacy pipeline: never marked or traded again; their JSON
 # (holdings, equity log, trades) stays on disk unchanged and the report shows their final numbers.
 RETIRED = {"ml_raw": "2026-10-09", "ml_v2": "2026-10-09", "blend": "2026-10-09", "ml_v2_gp": "2026-10-09"}

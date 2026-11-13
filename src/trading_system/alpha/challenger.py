@@ -15,9 +15,16 @@ top of this (RESEARCH_2026-11 §10): refitting every 5 or 21 sessions instead of
 half-life, and Numerai-style neutralisation of the scores. None passed the rule set in advance, so the model is
 refit every 63 sessions with the production weighting, exactly as tested.
 
+A second model, ``fn`` (factor-neutral, RESEARCH_2026-11 §13), is trained the same way on a different target: the
+part of each stock's forward return that beta, volatility, size, momentum, last month's return and sector do not
+explain. On the honest test it is the first score with a positive IC in both years (the base model's fell to zero
+in the second), and through the production top-20 rules inside the top-300 it gave the steadiest book. It feeds
+a third paper book, ``top20_fn``.
+
 Nothing here touches the production model, its ledger or the picks card. The engine keeps its own panel, models,
-scores and weekly target snapshots under ``data/gold/challenger`` and feeds two paper books: ``index_minus`` and
-its control ``top300_cap`` (the same 300 names with nothing dropped). The control, not SPY, is the comparison.
+scores and weekly target snapshots under ``data/gold/challenger`` and feeds three paper books: ``index_minus``,
+its control ``top300_cap`` (the same 300 names with nothing dropped; the control, not SPY, is the comparison)
+and ``top20_fn``.
 """
 from __future__ import annotations
 
@@ -31,6 +38,7 @@ import polars as pl
 from ..utils import get_logger
 from . import model as M
 from . import panel as P
+from .portfolio import BookConfig, market_regime_on, target_weights
 
 logger = get_logger(__name__)
 
@@ -43,7 +51,9 @@ DROP = 0.30               # share of the universe dropped (lowest scores)
 TRANCHES = 4              # sub-books …
 TRANCHE_GAP = 5           # … rebalanced this many sessions apart
 RETRAIN_EVERY = 63        # sessions between refits (5 and 21 were tested and were no better)
-BOOKS = ("index_minus", "top300_cap")
+BOOKS = ("index_minus", "top300_cap", "top20_fn")
+MODELS = {"base": "y", "fn": "yn"}          # model → label column (y = rank of the return, yn = factor-neutral)
+RISK = ("beta_63", "vol_63", "log_mcap", "mom_12_1", "ret_21")
 
 
 def root(cfg) -> Path:
@@ -92,8 +102,40 @@ def load_panel(cfg) -> pl.DataFrame:
 
 # ── model ─────────────────────────────────────────────────────────────────────
 
-def spec() -> M.TrainSpec:
-    return M.TrainSpec(horizons=H, train_top=TRAIN_TOP)
+def spec(label: str = "y") -> M.TrainSpec:
+    return M.TrainSpec(horizons=H, train_top=TRAIN_TOP, label=label)
+
+
+def models_dir(cfg, name: str = "base") -> Path:
+    return root(cfg) / "models" if name == "base" else root(cfg) / "models" / name
+
+
+def neutral_labels(df: pl.DataFrame) -> pl.DataFrame:
+    """Add ``yn_h``: the gaussian rank of each day's forward return after removing what beta, 63-day volatility,
+    size, 12-1 momentum, the last month's return and sector explain (a per-day least-squares fit)."""
+    from scipy.stats import rankdata
+
+    def z(c: str) -> pl.Expr:
+        x = pl.when(pl.col(c).is_finite()).then(pl.col(c))
+        return ((x - x.mean().over("date")) / (x.std().over("date") + 1e-9)).clip(-3, 3).fill_null(0.0)
+
+    ex = df.select("date", "ticker", "sector", *[z(c).alias("x_" + c) for c in RISK], *[f"fwd_{h}" for h in H])
+    parts = []
+    for g in ex.partition_by("date"):
+        sec = g["sector"].to_numpy()
+        X = np.column_stack([g.select(["x_" + c for c in RISK]).to_numpy().astype(np.float64)]
+                            + [(sec == u).astype(np.float64) for u in np.unique(sec)])
+        cols = {"date": g["date"], "ticker": g["ticker"]}
+        for h in H:
+            y = g[f"fwd_{h}"].to_numpy().astype(np.float64)
+            ok, r = np.isfinite(y), np.full(len(y), np.nan)
+            if ok.sum() >= 50:
+                res = y[ok] - X[ok] @ np.linalg.lstsq(X[ok], y[ok], rcond=None)[0]
+                r[ok] = P._norm_ppf((rankdata(res) - 0.5) / ok.sum())
+            cols[f"yn_{h}"] = r
+        parts.append(pl.DataFrame(cols))
+    lab = pl.concat(parts).with_columns([pl.col(f"yn_{h}").cast(pl.Float32).fill_nan(None) for h in H])
+    return df.drop([c for c in df.columns if c.startswith("yn_")]).join(lab, on=["date", "ticker"], how="left")
 
 
 def training_set(hf: pl.DataFrame, wf: pl.DataFrame, rcols: list[str], h: int, ci: int, wi: int, pit_start: date,
@@ -112,21 +154,23 @@ def training_set(hf: pl.DataFrame, wf: pl.DataFrame, rcols: list[str], h: int, c
 
 
 def train(cfg, pw: pl.DataFrame | None = None) -> dict:
-    pw = pw if pw is not None else load_panel(cfg)
-    hist = P.load_panel(cfg)
-    sp = spec()
-    hf, rcols = M.prepare(hist, sp.features)
-    wf, _ = M.prepare(pw, sp.features)
+    pw = neutral_labels(pw if pw is not None else load_panel(cfg))
+    hist = neutral_labels(P.load_panel(cfg))
+    hf, rcols = M.prepare(hist, spec().features)
+    wf, _ = M.prepare(pw, spec().features)
     last = pw["date"].max()
     ci = int(hf.filter(pl.col("date") <= last)["didx"].max())
     wi = int(wf["didx"].max())
-    out = {"horizons": list(H), "trained_through": str(last), "features": len(rcols), "rows": {}, "pit_rows": {}}
-    for h in H:
-        X, y, w, n_pit = training_set(hf, wf, rcols, h, ci, wi, pw["date"].min(), sp)
-        m = M.AlphaGBM(sp, h, rcols).fit(X, y, w)
-        m.trained_through, m.n_rows = str(last), int(len(y))
-        m.save(root(cfg) / "models" / f"{h}d")
-        out["rows"][h], out["pit_rows"][h] = int(len(y)), int(n_pit)
+    out = {"horizons": list(H), "models": list(MODELS), "trained_through": str(last), "features": len(rcols), "rows": {}, "pit_rows": {}}
+    for name, label in MODELS.items():
+        sp = spec(label)
+        for h in H:
+            X, y, w, n_pit = training_set(hf, wf, rcols, h, ci, wi, pw["date"].min(), sp)
+            m = M.AlphaGBM(sp, h, rcols).fit(X, y, w)
+            m.trained_through, m.n_rows = str(last), int(len(y))
+            m.save(models_dir(cfg, name) / f"{h}d")
+            if name == "base":
+                out["rows"][h], out["pit_rows"][h] = int(len(y)), int(n_pit)
     (root(cfg) / "models" / "manifest.json").write_text(json.dumps(out, indent=1))
     return out
 
@@ -174,15 +218,17 @@ def score(cfg, pw: pl.DataFrame, days: int = 1) -> pl.DataFrame:
     man = manifest(cfg)
     if man is None:
         raise FileNotFoundError("challenger models missing — run `ts alpha challenger --retrain`")
-    models = {h: M.AlphaGBM.load(root(cfg) / "models" / f"{h}d") for h in H}
-    wf, rcols = M.prepare(pw, models[H[0]].spec.features)
+    models = {name: {h: M.AlphaGBM.load(models_dir(cfg, name) / f"{h}d") for h in H} for name in MODELS}
+    wf, rcols = M.prepare(pw, models["base"][H[0]].spec.features)
     dates = sorted(wf["date"].unique().to_list())[-days:]
     sub = wf.filter(pl.col("date").is_in(dates))
     X = sub.select(rcols).to_numpy().astype(np.float32)
-    out = sub.select("date", "ticker", "sector", "close", "log_dv_21", "log_mcap").with_columns(
-        [pl.Series(f"s{h}", np.asarray(models[h].predict(X), dtype=np.float64)) for h in H])
+    col = lambda name, h: f"s{h}" if name == "base" else f"s{h}_{name}"
+    out = sub.select("date", "ticker", "sector", "close", "log_dv_21", "log_mcap", "vol_63", "mkt_trend_200").with_columns(
+        [pl.Series(col(name, h), np.asarray(models[name][h].predict(X), dtype=np.float64)) for name in MODELS for h in H])
     z = lambda c: (pl.col(c) - pl.col(c).mean().over("date")) / (pl.col(c).std().over("date") + 1e-9)
-    out = with_log_cap(cfg, out.with_columns(comp=sum(W[h] * z(f"s{h}") for h in H), model=pl.lit(man["trained_through"])))
+    out = with_log_cap(cfg, out.with_columns(comp=sum(W[h] * z(col("base", h)) for h in H), comp_fn=sum(W[h] * z(col("fn", h)) for h in H),
+                                             model=pl.lit(man["trained_through"])))
     p = root(cfg) / "scores.parquet"
     if p.exists():
         out = pl.concat([pl.read_parquet(p).filter(~pl.col("date").is_in(dates)), out], how="diagonal_relaxed")
@@ -212,7 +258,25 @@ def fresh_targets(xs: pl.DataFrame, top: int = UNIVERSE_TOP, drop: float = DROP)
         v = np.exp(g["mc"].to_numpy().astype(np.float64))
         return dict(zip(g["ticker"].to_list(), (v / v.sum()).tolist()))
 
-    return {"index_minus": cap_w(u.tail(n - int(n * drop))), "top300_cap": cap_w(u)}
+    return {"index_minus": cap_w(u.tail(n - int(n * drop))), "top300_cap": cap_w(u), "top20_fn": top20_targets(xs, top)}
+
+
+def top20_targets(xs: pl.DataFrame, top: int = UNIVERSE_TOP) -> dict[str, float]:
+    """The production top-20 rules (risk-adjusted rank, 5 per sector, ½ equal + ½ inverse-vol, 8% cap, vol brake,
+    half gross below the 200-day trend) on the factor-neutral score, inside the ``top`` most liquid names. Empty
+    when the cross-section carries no ``comp_fn``."""
+    need = {"comp_fn", "vol_63", "sector"}
+    if not need <= set(xs.columns):
+        return {}
+    u = (xs.with_columns(lr=pl.col("log_dv_21").rank(descending=True), dvol=pl.col("vol_63") / 252 ** 0.5)
+           .filter(pl.col("lr") <= top, pl.col("close") >= 5, pl.col("dvol") <= 0.07).drop_nulls(["comp_fn", "dvol"]).sort("ticker"))
+    if u.height == 0:
+        return {}
+    trend = xs["mkt_trend_200"][0] if "mkt_trend_200" in xs.columns else None
+    bk = BookConfig(min_price=0.0, min_dollar_volume=0.0)          # the gates are the filter above, as in the backtest
+    w = target_weights(u["comp_fn"].to_numpy(), {"dvol": u["dvol"].to_numpy()}, bk, sectors=u["sector"].to_numpy(),
+                       regime_on=market_regime_on(trend))
+    return {t: float(x) for t, x in zip(u["ticker"].to_list(), w) if x > 0}
 
 
 def targets_path(cfg) -> Path:
@@ -262,16 +326,16 @@ def last_snapshot(cfg) -> date | None:
 
 # ── daily entry point and reporting ───────────────────────────────────────────
 
-def update(cfg, retrain: bool = False, days: int = 1) -> dict:
+def update(cfg, retrain: bool = False, days: int = 1, force_snapshot: bool = False) -> dict:
     """Refresh the panel, refit when due, score the latest date and record a tranche when due."""
     pw = build_panel(cfg)
     cal = sorted(pw["date"].unique().to_list())
     man = manifest(cfg)
     trained = False
-    if retrain or man is None or sessions_since(cal, man["trained_through"]) >= RETRAIN_EVERY:
+    if retrain or man is None or set(MODELS) - set(man.get("models", ["base"])) or sessions_since(cal, man["trained_through"]) >= RETRAIN_EVERY:
         man, trained = train(cfg, pw), True
     xs = score(cfg, pw, days=days)
-    snapped = snapshot(cfg, xs, cal)
+    snapped = snapshot(cfg, xs, cal, force=force_snapshot)
     return {"as_of": str(cal[-1]), "names": xs.height, "trained": trained, "trained_through": man["trained_through"],
             "pit_rows": man.get("pit_rows", {}), "snapshot": snapped, "last_snapshot": str(last_snapshot(cfg))}
 

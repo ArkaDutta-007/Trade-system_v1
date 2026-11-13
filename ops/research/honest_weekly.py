@@ -7,9 +7,11 @@ digest read its result (reports/alpha/honest_latest.json):
 
   panel     the challenger's point-in-time panel (every stock that traded, 2024-11 → last close)
   models    walk-forward with 63-session refits, purged and embargoed:
-            production recipe (today's survivors only) and challenger recipe (point-in-time rows + top-500)
+            production recipe (today's survivors only), challenger recipe (point-in-time rows + top-500), and the
+            challenger's factor-neutral model (same recipe, target = return net of beta/vol/size/momentum/sector)
   books     production top-20 book in the production universe · index-minus (top-300 cap-weighted minus the worst
-            30% by challenger score) and its control (nothing dropped) · SPY
+            30% by challenger score) and its control (nothing dropped) · top20_fn (the top-20 rules on the
+            factor-neutral score inside the top-300) · SPY
   luck      every book is run on start days 0/5/10/15 and reported as 4 tranches (their mean), with the range
 
 Run by ops/weekly_retrain.sh (~6 min on the GPU). Nothing here changes a model or a book.
@@ -29,6 +31,7 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).parent))
 import panel_2026_11 as PP  # noqa: E402
 import tilts_2026_11 as TT  # noqa: E402
+import train_2026_11 as T  # noqa: E402
 
 LAB, P = PP.LAB, PP.P
 from trading_system.alpha import challenger as C  # noqa: E402
@@ -51,7 +54,7 @@ def main() -> int:
     work = cfg.path("reports") / "alpha" / "honest_work"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
-    PP.OUT = work                                       # PP.walk caches its scores here
+    PP.OUT = T.OUT = work                               # PP.walk / T.walk cache their scores here
     pw = C.load_panel(cfg)
     hist = P.load_panel(cfg)
     px, _ = C.pit_prices(cfg)
@@ -68,6 +71,12 @@ def main() -> int:
         t = LAB.ic_table(sc, labels)
         last = t.filter(pl.col("date") >= cal[max(0, len(cal) - 252)])
         ics[key] = {"all": {h: v["ic"] for h, v in LAB.ic_summary(t).items()}, "last_year": {h: v["ic"] for h, v in LAB.ic_summary(last).items()}}
+    T.walk("resid", C.neutral_labels(pw), C.neutral_labels(hist))        # the factor-neutral model
+    sc = pl.read_parquet(work / "wf2_resid.parquet")
+    fn = LAB.zcomp(sc)
+    t = LAB.ic_table(sc, labels)
+    last = t.filter(pl.col("date") >= cal[max(0, len(cal) - 252)])
+    ics["factor-neutral"] = {"all": {h: v["ic"] for h, v in LAB.ic_summary(t).items()}, "last_year": {h: v["ic"] for h, v in LAB.ic_summary(last).items()}}
     # index-minus and its control, 4 start days
     r1 = allpx.sort(["ticker", "date"]).with_columns(r=pl.col("adj_close") / pl.col("adj_close").shift(1).over("ticker") - 1)
     R = {(d, t): r for d, t, r in r1.select("date", "ticker", "r").iter_rows() if r is not None}
@@ -99,13 +108,19 @@ def main() -> int:
         rs = [LAB.book_run(pdata, comps[key], gate, sector_of, regime, cal[3 + off], key).returns() for off in OFFSETS]
         m = min(len(r) for r in rs)
         out[label] = {**stats(np.mean([r[-m:] for r in rs], axis=0)), "by_start_day": [cagr(r) for r in rs], "median": float(np.median([cagr(r) for r in rs]))}
+    liq = pw.with_columns(lr=pl.col("log_dv_21").rank(descending=True).over("date"))
+    gate300 = liq.select("date", "ticker", "adj_close", elig=(pl.col("close") >= 5) & (pl.col("vol_63") / 252 ** 0.5 <= 0.07) & (pl.col("lr") <= 300))
+    rs = [LAB.book_run(pdata, fn, gate300, sector_of, regime, cal[3 + off], "fn").returns() for off in OFFSETS]
+    m = min(len(r) for r in rs)
+    out["challenger_top20_fn"] = {**stats(np.mean([r[-m:] for r in rs], axis=0)), "by_start_day": [cagr(r) for r in rs], "median": float(np.median([cagr(r) for r in rs]))}
     out["minutes"] = round((time.time() - t0) / 60, 1)
     C.honest_path(cfg).write_text(json.dumps(out, indent=1, default=str))
     shutil.rmtree(work, ignore_errors=True)
-    p, c, i, k = out["production_top20"], out["challenger_top20"], out["index_minus"], out["control"]
+    p, c, i, k, f = out["production_top20"], out["challenger_top20"], out["index_minus"], out["control"], out["challenger_top20_fn"]
     print(f"honest test {out['window'][0]} → {out['window'][1]} ({out['sessions']} sessions, {out['minutes']} min)")
     print(f"  production top-20   {p['cagr']:+.1%}/yr (start days {min(p['by_start_day']):+.1%} … {max(p['by_start_day']):+.1%}) · last 12 months {p['last_year']:+.1%}")
     print(f"  challenger top-20   {c['cagr']:+.1%}/yr (start days {min(c['by_start_day']):+.1%} … {max(c['by_start_day']):+.1%}) · last 12 months {c['last_year']:+.1%}")
+    print(f"  top20_fn (top-300)  {f['cagr']:+.1%}/yr (start days {min(f['by_start_day']):+.1%} … {max(f['by_start_day']):+.1%}) · last 12 months {f['last_year']:+.1%} · Sharpe {f['sharpe']:.2f} · max drawdown {f['maxdd']:+.1%}")
     print(f"  index-minus         {i['cagr']:+.1%}/yr · last 12 months {i['last_year']:+.1%} · vs control {i['vs_control']['excess']:+.1%}/yr "
           f"[{i['vs_control']['lo']:+.1%}, {i['vs_control']['hi']:+.1%}] · last 12 months {i['vs_control_last_year']['excess']:+.1%}")
     print(f"  control (all 300)   {k['cagr']:+.1%}/yr · last 12 months {k['last_year']:+.1%}      SPY {out['spy']['cagr']:+.1%}/yr · last 12 months {out['spy']['last_year']:+.1%}")

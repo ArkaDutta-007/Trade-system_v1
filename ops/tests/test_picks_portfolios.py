@@ -168,7 +168,7 @@ def test_persisted_books_are_valid_json_with_required_keys():
 # ── book set after the legacy retirement (2026-10-09) ───────────────────────
 def test_legacy_books_are_retired_not_deleted():
     """The four legacy-model books leave the active set but keep their history (shown frozen)."""
-    assert pf.BOOKS == ["spy_benchmark", "momentum", "alpha_v2", "index_minus", "top300_cap"]
+    assert pf.BOOKS == ["spy_benchmark", "momentum", "alpha_v2", "index_minus", "top300_cap", "top20_fn"]
     assert set(pf.TRANCHE_BOOKS) <= set(pf.BOOKS)
     assert set(pf.RETIRED) == {"ml_raw", "ml_v2", "blend", "ml_v2_gp"}
     assert not set(pf.RETIRED) & set(pf.BOOKS)

@@ -472,7 +472,8 @@ def alpha_judge(config: str = CONFIG_OPT, top: int = typer.Option(20, help="toda
 def alpha_challenger(config: str = CONFIG_OPT,
                      retrain: bool = typer.Option(False, help="refit now (otherwise every 63 sessions)"),
                      days: int = typer.Option(1, help="score the last N panel dates"),
-                     status_only: bool = typer.Option(False, "--status", help="print the status without updating")):
+                     status_only: bool = typer.Option(False, "--status", help="print the status without updating"),
+                     snapshot: bool = typer.Option(False, help="record today's targets as a tranche even if one is not due")):
     """Challenger (paper only): point-in-time model + index-minus book, run beside production.
 
     Refreshes its point-in-time panel, refits when due, scores today's names and records a weekly tranche of
@@ -481,7 +482,7 @@ def alpha_challenger(config: str = CONFIG_OPT,
     from . import challenger as C
     cfg = _cfg(config)
     t0 = _t.time()
-    info = None if status_only else C.update(cfg, retrain=retrain, days=days)
+    info = None if status_only else C.update(cfg, retrain=retrain, days=days, force_snapshot=snapshot)
     man, snaps = C.manifest(cfg), C.load_snapshots(cfg)
     if man is None or snaps.height == 0:
         rprint("[yellow]challenger not initialised — run `ts alpha challenger`[/yellow]")
@@ -498,6 +499,10 @@ def alpha_challenger(config: str = CONFIG_OPT,
            + (" (new today)" if info and info["snapshot"] else ""))
     top = sorted(w.items(), key=lambda kv: -kv[1])[:8]
     rprint("largest  " + " · ".join(f"{t} {x:.1%}" for t, x in top))
+    t20 = C.book_weights(cfg, "top20_fn")
+    if t20:
+        rprint(f"top20_fn {len(t20)} names from the factor-neutral model · {sum(t20.values()):.0%} invested · "
+               + " · ".join(f"{t} {x:.1%}" for t, x in sorted(t20.items(), key=lambda kv: -kv[1])[:10]))
     av = C.avoid_list(cfg)
     if av:
         rprint(f"dropped  largest names the model left out this week (index weight): " + " · ".join(f"{t} {x:.1%}" for t, x in av))
@@ -513,7 +518,12 @@ def alpha_challenger(config: str = CONFIG_OPT,
         rprint(f"backtest honest test {hb.get('window', ['?', '?'])[0]} → {hb.get('window', ['?', '?'])[1]}: index-minus {im.get('cagr', 0):+.1%}/yr vs control "
                f"{ct.get('cagr', 0):+.1%} · last 12 months {im.get('last_year', 0):+.1%} vs {ct.get('last_year', 0):+.1%} · SPY {hb.get('spy', {}).get('cagr', 0):+.1%}/yr "
                f"(refreshed {hb.get('run', '?')})")
-    rprint("judge    index_minus against top300_cap in the scoreboard below, not against SPY; this is a shadow test, not advice")
+        tf = hb.get("challenger_top20_fn")
+        if tf:
+            rprint(f"         top20_fn {tf.get('cagr', 0):+.1%}/yr · last 12 months {tf.get('last_year', 0):+.1%} · Sharpe {tf.get('sharpe', 0):.2f} · "
+                   f"max drawdown {tf.get('maxdd', 0):+.1%} (production top-20: {hb.get('production_top20', {}).get('cagr', 0):+.1%}/yr, "
+                   f"last 12 months {hb.get('production_top20', {}).get('last_year', 0):+.1%})")
+    rprint("judge    index_minus against top300_cap in the scoreboard below (top20_fn against SPY and alpha_v2); a shadow test, not advice")
 
 
 @alpha_app.command("status")

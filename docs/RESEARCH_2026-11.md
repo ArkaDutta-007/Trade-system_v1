@@ -12,6 +12,10 @@ books only; nothing in this report changes production. Code: `ops/research/*_202
 > "index" from July 2026 and counted Alphabet twice. With correct weights, index-minus beats its control by
 > **+3.5 to +4.0%/yr** (not +5.7%), all of it in year 1: over the last 12 months it trails by 0.5–0.8%. It now
 > runs as a paper book against its control. The numbers in item 2 and in §3's index-minus table are superseded.
+>
+> **Update 2026-11-13, afternoon (§13).** Kronos, a news-embedding probe and an LLM reading of earnings guidance
+> added nothing. One new training target did: a factor-neutral model is the first score with a positive IC in
+> both years, and now runs as a third paper book, `top20_fn`.
 
 1. **More compute is not what is holding us back.** All 13 model comparisons ran on the existing RTX 2070 in
    27 minutes. A five-seed neural network ensemble did not beat XGBoost in the book, and blending four engines
@@ -377,5 +381,101 @@ Not done, and why:
 ts alpha challenger                        # daily: refresh, refit when due, score, record a tranche, print status
 python ops/research/honest_weekly.py       # weekly: the honest test on everything to date
 python ops/research/comp_2026_11.py        # §10 training runs (30 min);  ... comp_2026_11.py eval  for the tables
+```
+
+## 13. Kronos, new training targets and language-model inputs (2026-11-13, afternoon)
+
+*Arka: "Try Kronos; try more of the things to make it better. Use more innovative training, any kind of LLM
+inclusion or post-training and other ways."* Everything ran on the corrected point-in-time panel (failures
+included, 2024-11-27 → 2026-11-12), with books held as four tranches and settings fixed before each run. Code:
+`ops/research/{kronos,train,newsprobe,guidance,llm_checks,volmanaged}_2026_11.py`.
+
+### Results
+
+Base = the challenger model. Rule for replacing it, as in §10: IC no lower in either year and a higher
+index-minus excess. SPY made +13.9%/yr and +12.0% over the last 12 months, with a −18.8% drawdown.
+
+| idea | 21d IC yr 1 / yr 2 | 63d IC yr 1 / yr 2 | index-minus vs control (95% CI) | top-20 inside top-300: return/yr, Sharpe, drawdown, last 12 months |
+|---|---|---|---|---|
+| **Base** (challenger) | +.098 / +.007 | +.127 / −.014 | **+3.5% (+0.1, +6.9)** | +12.2%, .86, −11.3%, +0.5% |
+| **Factor-neutral target** | +.035 / +.025 | +.042 / +.052 | 0.0% (−2.2, +2.3) | +9.9%, **1.18**, −7.1%, **+13.5%** |
+| Bottom-30% target | +.029 / +.041 | +.041 / +.067 | 0.0% (−4.6, +4.7) | +7.1%, .86, −6.5%, +11.3% |
+| Risk-adjusted target | +.077 / .000 | +.115 / −.006 | +2.9% (−0.3, +6.4) | +10.3%, 1.28, −5.5%, +10.8% |
+| Supervised autoencoder (Jane Street 2021) | +.049 / +.004 | +.071 / +.007 | +1.9% (−2.0, +5.4) | +8.6%, .63, −14.8%, 0.0% |
+| Base − drop-out probability | +.095 / +.012 | +.116 / −.002 | +3.2% (−0.2, +6.6) | +11.8%, .84, −11.7%, +0.5% |
+| Base + news probe | +.095 / +.012 | +.122 / −.005 | +2.9% (−0.4, +6.2) | +12.6%, .99, −9.3%, +4.1% |
+| Base + LLM guidance | +.096 / +.008 | +.123 / −.011 | +3.3% (−0.2, +6.7) | +11.9%, .89, −9.5%, +3.4% |
+| Kronos alone (19 month-ends) | −.006 / +.005 | −.033 / +.025 | +1.2% (−5.9, +10.7); base on the same dates +3.3% | not run |
+| Base + Kronos | +.052 / −.012 | +.039 / +.006 | +1.1% (−4.7, +7.9) | not run |
+| News probe alone (30% of stock-days) | −.007 / +.030 | −.012 / +.061 | −1.2% (−5.6, +3.2) | +6.2%, .91, −5.7%, +9.2% |
+
+### What each test showed
+
+- **Kronos has no usable signal here.** Zero-shot 21-session forecasts for about 990 names on 20 month-ends
+  (52 minutes on the RTX 2070). Its rank IC is about zero in both years, and −.009 at 21 days over the 13 dates
+  after its weights were published. Adding it to the base lowered the base's IC and its index-minus excess. The
+  paper's ranking gains do not carry over to US stocks at a one-month horizon on honest data.
+- **A factor-neutral target gives the first score that is positive in both years.** The model is trained on the
+  part of each return that beta, volatility, size, momentum, last month's return and sector do not explain. Its IC
+  is lower than the base's in year 1 and clearly higher in year 2 and over the last 12 months (+.027 at 21 days and
+  +.053 at 63, against +.005 and −.013). This agrees with §10, where stripping the same exposures after training
+  left a steady +.02.
+- **It does not help index-minus, and does help a top-20 book.** In the cap-weighted book its excess is zero in
+  both years: that book lives on spotting losers among the very largest names. Through the production top-20
+  rules it gave the steadiest book of the pass, and the only top-20 book that kept up with SPY over the last 12
+  months (+13.5% against +12.0%) with a −7.1% worst drawdown.
+- **Caveats on that result.** It fails the pre-set rule (year-1 IC below the base), so it does not replace the base
+  model. It is the best of about a dozen variants tried today, on two years, and its Sharpe has a 95% interval of
+  0.1 to 2.4. Over the full two years it made 9.9%/yr against SPY's 13.9%, because it ran at half the market's
+  volatility (8.3% against 16.6%).
+- **A model can tell which stocks are about to drop out of the universe, and that says nothing about returns.**
+  AUC 0.92–0.94 against a 7–8% base rate, yet names it flagged did slightly better, not worse, in year 1.
+- **The Jane Street 2021 network was worse than XGBoost** on every measure.
+- **News embeddings (Chen-Kelly-Xiu design) did not work.** 402,354 articles embedded with an open sentence
+  model; a ridge head trained on 2021 → 2024-08 returns scored about zero in validation, zero in test year 1 and
+  +.03 in year 2. Blended into the base it changed nothing in index-minus.
+- **Reading earnings guidance with an LLM did not work at scale.** Qwen read 4,206 earnings releases for 494
+  names with the company's name hidden ($0.17). Guidance was raised in 22% and lowered in 5%. Over the next 63
+  sessions "lowered" names lagged by 1.2% and "raised" names led by 0.5%, but the "lowered" result flips by year
+  (−3.0%, then +2.5%). October's lead rested on a few dozen cases and does not hold.
+- **One unplanned pattern to watch, not act on:** companies whose release gives a numeric outlook without saying
+  how it changed (37% of releases) led by 3.4% over 63 sessions, and by 2.2% after removing sector, size, beta,
+  volatility and momentum (t 2.6, positive in both years). It is one of about eleven patterns looked at.
+- **The local model's live stock screen cannot be judged yet.** 777 verdicts over 26 days: "avoid" names made
+  −0.55% over the next 5 sessions against −0.40% for "ok", and "caution" names +2.83%. That is 4 independent periods.
+- **Massive's news sentiment adds nothing on the complete panel:** IC −.004 alone and +.009 after the challenger
+  (t 0.7). October's +.020 came from the panel with missing rows.
+
+### Another way to cut risk: volatility-managed exposure
+
+Ken French daily US market, 1926 → 2026-09. Exposure = min(cap, 15% ÷ the last 21 days' volatility), two days old
+when traded, rest in T-bills, 5 bps per unit traded ([Moreira & Muir 2017](https://onlinelibrary.wiley.com/doi/abs/10.1111/jofi.12513)).
+
+| rule | CAGR | Sharpe | max drawdown | since 2005: CAGR, Sharpe, drawdown | since 2015: CAGR, Sharpe |
+|---|---|---|---|---|---|
+| 1× always | 9.8% | .63 | −84% | 11.1%, .64, −55% | 13.6%, .80 |
+| 1× + 200-day trend (§4) | 9.9% | .89 | −40% | 8.1%, .71, −23% | 9.7%, .83 |
+| **Volatility-managed, no leverage** | 9.3% | .77 | −67% | **10.0%, .79, −32%** | 11.1%, .86 |
+| Volatility-managed, cap 1.5 | 9.9% | .70 | −68% | 10.0%, .69, −34% | 10.9%, .74 |
+| Volatility-managed inside the trend rule | 9.4% | .97 | −32% | 7.5%, .73, −19% | 8.6%, .81 |
+
+Since 2005 the trend rule has cost 3.0%/yr for its protection; volatility scaling cost 1.1%/yr, about six trades a
+year. Over the century the trend rule protected more (−40% against −67%). Nothing in the books was changed.
+
+### What changed in the system
+
+- The challenger now trains a second, factor-neutral model beside its base model (84 s per refit for both) and
+  records a third paper book, **`top20_fn`**: the production top-20 rules on that score, inside the 300 most liquid
+  names, as four weekly tranches. Today it holds 20 names at 50% invested (the market is below its 200-day trend).
+- The weekly honest test now includes that model and book (about 6 minutes a week on the GPU).
+- Cost of the pass: $0.17 of Qwen, about 2 GPU-hours.
+
+```bash
+python ops/research/kronos_2026_11.py                      # Kronos scores (52 min); needs ~/Desktop/Kronos
+python ops/research/train_2026_11.py walk|eval|extra       # training targets; Kronos and news verdicts
+python ops/research/newsprobe_2026_11.py                   # news embeddings + ridge head
+python ops/research/guidance_2026_11.py fetch|read|analyze # earnings releases → Qwen → event study
+python ops/research/llm_checks_2026_11.py                  # tev1 live record, sentiment
+python ops/research/volmanaged_2026_11.py                  # volatility-managed exposure
 ```
 

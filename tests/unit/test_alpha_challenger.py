@@ -36,7 +36,7 @@ def test_fresh_targets_missing_score_is_never_dropped_and_missing_cap_is_estimat
     t = C.fresh_targets(xs, top=10, drop=0.30)
     assert "T00" in t["index_minus"]                                             # median score, not last
     assert t["top300_cap"]["T00"] > 0                                            # cap estimated from dollar volume
-    assert C.fresh_targets(_xs(close=[2.0] * 10), top=10) == {"index_minus": {}, "top300_cap": {}}   # nothing ≥ $5
+    assert C.fresh_targets(_xs(close=[2.0] * 10), top=10) == {"index_minus": {}, "top300_cap": {}, "top20_fn": {}}   # nothing ≥ $5
 
 
 def test_blend_is_the_mean_of_the_last_tranches():
@@ -98,4 +98,35 @@ def test_honest_note_quotes_the_weekly_test_and_falls_back(monkeypatch):
     assert "−1.2%/yr vs SPY +14.1% (Nov 24 → Nov 26, re-run weekly)" in note and "no proven edge" in note
     monkeypatch.setattr(C, "honest", lambda cfg: None)
     assert cli.honest_note(None) == cli.HONEST_NOTE
+
+
+
+def test_top20_fn_follows_the_production_book_rules():
+    n = 40
+    xs = pl.DataFrame({"date": [date(2026, 11, 12)] * n, "ticker": [f"T{i:02d}" for i in range(n)], "close": [50.0] * n,
+                       "log_dv_21": [20.0 - i * 0.01 for i in range(n)], "log_cap": [25.0] * n, "comp": [0.0] * n,
+                       "comp_fn": [float(i) for i in range(n)], "vol_63": [0.25] * n, "sector": ["a", "b", "c", "d"] * 10,
+                       "mkt_trend_200": [0.02] * n})
+    w = C.fresh_targets(xs, top=40)["top20_fn"]
+    assert len(w) == 20 and sum(w.values()) == pytest.approx(1.0)                 # risk-on, equal vols → fully invested
+    assert set(w) == {f"T{i:02d}" for i in range(20, 40)}                        # the 20 best scores (5 per sector fits)
+    assert max(w.values()) <= 0.08 + 1e-9
+    off = C.fresh_targets(xs.with_columns(mkt_trend_200=pl.lit(-0.05)), top=40)["top20_fn"]
+    assert sum(off.values()) == pytest.approx(0.5)                               # below the 200-day trend → half gross
+    assert C.fresh_targets(xs.drop("comp_fn"), top=40)["top20_fn"] == {}
+
+
+def test_neutral_labels_remove_the_factor_part():
+    import numpy as np
+    rng = np.random.default_rng(0)
+    n = 300
+    beta = rng.normal(size=n)
+    spec_ret = rng.normal(size=n) * 0.02
+    df = pl.DataFrame({"date": [date(2026, 1, 5)] * n, "ticker": [f"T{i}" for i in range(n)], "sector": ["a", "b", "c"] * 100,
+                       "beta_63": beta, "vol_63": rng.normal(size=n), "log_mcap": rng.normal(size=n), "mom_12_1": rng.normal(size=n),
+                       "ret_21": rng.normal(size=n), "fwd_21": 0.10 * beta + spec_ret, "fwd_63": 0.10 * beta + spec_ret})
+    out = C.neutral_labels(df)
+    y = out["yn_21"].to_numpy()
+    assert abs(np.corrcoef(y, beta)[0, 1]) < 0.05                                # the beta bet is gone
+    assert np.corrcoef(y, spec_ret)[0, 1] > 0.9                                  # the stock-specific part remains
 
