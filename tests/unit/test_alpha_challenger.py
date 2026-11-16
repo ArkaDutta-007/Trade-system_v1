@@ -95,10 +95,12 @@ def test_honest_note_quotes_the_weekly_test_and_falls_back(monkeypatch):
     monkeypatch.setattr(C, "honest", lambda cfg: {"window": ["2024-11-26", "2026-11-12"], "production_top20": {"cagr": -0.012},
                                                   "spy": {"cagr": 0.141}})
     note = cli.honest_note(None)
-    assert "−1.2%/yr vs SPY +14.1% (Nov 24 → Nov 26, re-run weekly)" in note and "no proven edge" in note
+    assert "−1.2%/yr vs SPY +14.1% (Nov 24 → Nov 26, weekly)" in note and "no proven edge" in note
     monkeypatch.setattr(C, "honest", lambda cfg: {"window": ["2024-11-26", "2026-11-12"], "production_top20": {"cagr": -0.012},
                                                   "spy": {"cagr": 0.141}, "production_top_decile_21d": {"all": 0.006}})
-    assert "top-decile picks beat the average stock by +0.6% per 21 days there" in cli.honest_note(None)
+    note = cli.honest_note(None)
+    assert "top picks beat the average stock by +0.6% per 21d there" in note
+    assert len(note) < 190 and "[" not in note                                   # one digest line, no rich markup
     monkeypatch.setattr(C, "honest", lambda cfg: None)
     assert cli.honest_note(None) == cli.HONEST_NOTE
 

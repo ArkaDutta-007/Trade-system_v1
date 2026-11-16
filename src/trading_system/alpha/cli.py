@@ -35,9 +35,11 @@ def honest_note(cfg) -> str:
     verdict = "no proven edge" if p["cagr"] < spy["cagr"] else "ahead on the honest test, unproven live"
     pct = lambda x: f"{x:+.1%}".replace("-", "−")
     td = (h.get("production_top_decile_21d") or {}).get("all")
-    tail = (f"top-decile picks beat the average stock by {pct(td)} per 21 days there, so the E[r] shown are overstated" if td is not None
+    # one line under 200 characters (the digest is rendered 200 wide and the brief copies this footer as italics),
+    # and no square brackets (rich would read them as markup)
+    tail = (f"top picks beat the average stock by {pct(td)} per 21d there; shown returns overstated" if td is not None
             else "expected returns backtest-calibrated, likely overstated")
-    return (f"⚠ honest test incl. failed stocks: {pct(p['cagr'])}/yr vs SPY {pct(spy['cagr'])} ({w0} → {w1}, re-run weekly) — "
+    return (f"⚠ honest test incl. failed stocks: {pct(p['cagr'])}/yr vs SPY {pct(spy['cagr'])} ({w0} → {w1}, weekly) — "
             f"{verdict}; {tail}")
 
 
