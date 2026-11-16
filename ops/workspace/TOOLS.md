@@ -101,10 +101,18 @@ What Arka says → what you run:
   (weekly via cron `trade-weekly-retrain`; the report is
   `~/Desktop/Trade-system_v1/reports/alpha/backtest.md`). Read the
   "Read this before believing any of it" section before quoting numbers.
+- "what is the challenger / index-minus / top20_fn / is the new model better" → `~/ops/bin/ts-run alpha challenger --status`
+  A second engine that runs BESIDE production as paper books only (since 2026-11-13); production picks are unchanged.
+  It trains on point-in-time data that includes failed stocks and feeds three paper books: **index_minus** (the 300
+  most liquid names at market-cap weight minus the worst 30% by its score), its control **top300_cap** (same 300,
+  nothing dropped — compare these two with each other, not with SPY) and **top20_fn** (top-20 rules on a
+  factor-neutral score). The status prints the latest weekly honest test (failures included): quote those numbers
+  as a backtest, never as a promise. None of these has live evidence yet; say so. Details: docs/RESEARCH_2026-11.md §10–§13.
 - "how are the paper books / which strategy is winning" →
   `… ~/Desktop/Trade-system_v1/ops/portfolio/portfolios.py --report`
-  Three ACTIVE $10k books: spy_benchmark, momentum (top-10 by 120-day momentum,
-  monthly) and **alpha_v2** (the alpha engine book, GP partial trading at 0.35).
+  Six ACTIVE $10k books: spy_benchmark, momentum (top-10 by 120-day momentum,
+  monthly), **alpha_v2** (the alpha engine book, GP partial trading at 0.35) and the
+  three challenger books index_minus, top300_cap and top20_fn (seeded 2026-11-13, see above).
   "vs SPY" is SPY over the same dates as each book. The four legacy-model books
   (ml_raw, ml_v2, blend, ml_v2_gp) were retired 2026-10-09 and are listed frozen
   at their last mark below the table. Ignore the ranking until ~60 sessions.

@@ -17,6 +17,19 @@ Fixed before the first run:
              +0.5 for a raised one; judged like every other variant (train_2026_11.verdicts)
 Stages: fetch → read → analyze. Cost is logged; the key comes from the repo's LLM config and is never printed.
 Results → reports/alpha/lab_2026_11/guidance.json
+
+Forward test (stage `refresh`, run weekly by ops/weekly_retrain.sh). The analysis turned up one pattern nobody
+had predicted: releases that give a numeric outlook without saying how it changed ("provided") were followed by
++2.2% over 63 sessions after removing sector, size, beta, volatility and momentum (t 2.6, both years). It was one
+of about eleven patterns looked at, so it counts for nothing until it repeats on data that did not exist when it
+was found. Registered on 2026-11-16, before any such data:
+  events     releases filed after 2026-11-13 (the discovery date), same names, same reading, same prompt
+  measure    63-session return after the entry day minus what sector, size, beta, volatility and momentum explain
+  test       "provided" minus all other releases, t-statistic across filing months; read ONCE, when at least 150
+             "provided" events have matured (about mid-2027). Positive with t ≥ 2 → build it into the challenger
+             as a feature and test that on the honest panel; anything else → drop the idea.
+  cost       at most $0.05 of Qwen per weekly run
+Result → reports/alpha/guidance_live.json (the challenger status prints one line from it).
 """
 from __future__ import annotations
 
@@ -54,6 +67,9 @@ results — the quarter against expectations or the company's own guidance, only
   "beat", "inline", "miss", "unclear".
 tone — integer from -2 (very negative) to 2 (very positive) for management's overall tone."""
 CATS = ("raised", "lowered", "reaffirmed", "provided", "withdrawn", "none")
+DISCOVERED = date(2026, 11, 13)             # the forward test only counts releases filed after this day
+NEED = 150                                  # matured "provided" events before the one reading of the test
+RISK = ("beta_63", "vol_63", "log_mcap", "mom_12_1", "ret_21")
 _STOP = {"inc", "corp", "corporation", "company", "holdings", "group", "ltd", "plc", "the", "and", "class", "common", "stock", "technologies", "co"}
 
 
@@ -92,14 +108,16 @@ def universe(pw: pl.DataFrame) -> list[str]:
     return sorted(u["ticker"].unique().to_list())
 
 
-def fetch(workers: int = 6) -> None:
+def fetch(workers: int = 6, refresh: bool = False) -> None:
     from trading_system.ingestion.edgar_fundamentals import store
     REL.mkdir(parents=True, exist_ok=True)
     st = store(LAB.cfg)
     ciks = st.cik_map()
     names = universe(C.load_panel(LAB.cfg))
     idx_p = WORK / "filings.jsonl"
-    done = {json.loads(l)["ticker"] for l in idx_p.open()} if idx_p.exists() else set()
+    old = [json.loads(l) for l in idx_p.open()] if idx_p.exists() else []
+    done = set() if refresh else {r["ticker"] for r in old}          # refresh: look at every name again for new filings
+    have = {r["acc"] for r in old if "acc" in r}
 
     def filings(t: str) -> list[dict]:
         cik = ciks.get(t) or ciks.get(t.replace(".", "-"))
@@ -123,6 +141,10 @@ def fetch(workers: int = 6) -> None:
         for i, fu in enumerate(as_completed([ex.submit(filings, t) for t in todo]), 1):
             try:
                 for r in fu.result():
+                    if "acc" in r and r["acc"] in have:
+                        continue
+                    if refresh and "acc" not in r:
+                        continue                                  # "no CIK" / "no 8-K" notes are only worth recording once
                     fo.write(json.dumps(r) + "\n")
             except Exception as e:  # noqa: BLE001
                 LAB.log(f"index failed: {type(e).__name__}: {str(e)[:100]}")
@@ -148,6 +170,54 @@ def fetch(workers: int = 6) -> None:
             if i % 250 == 0:
                 LAB.log(f"  downloaded {i}/{len(fl)}")
     LAB.log(f"releases on disk: {len(list(REL.glob('*.txt')))}")
+
+
+def residual_returns(pw: pl.DataFrame, days: list, h: int = 63) -> pl.DataFrame:
+    """``date, ticker, res``: the ``h``-session forward return minus the day's least-squares fit on sector, size,
+    beta, volatility, momentum and the last month's return (only for the given days)."""
+    ex = pw.filter(pl.col("date").is_in(days)).select("date", "ticker", "sector", f"fwd_{h}", *[T.PP.z(c).alias("x_" + c) for c in RISK])
+    parts = []
+    for g in ex.partition_by("date"):
+        y = g[f"fwd_{h}"].to_numpy().astype(np.float64)
+        ok = np.isfinite(y)
+        if ok.sum() < 50:
+            continue
+        sec = g["sector"].to_numpy()
+        X = np.column_stack([g.select(["x_" + c for c in RISK]).to_numpy().astype(np.float64)] + [(sec == u).astype(np.float64) for u in np.unique(sec)])
+        r = np.full(len(y), np.nan)
+        r[ok] = y[ok] - X[ok] @ np.linalg.lstsq(X[ok], y[ok], rcond=None)[0]
+        parts.append(pl.DataFrame({"date": g["date"], "ticker": g["ticker"], "res": r}))
+    if not parts:
+        return pl.DataFrame(schema={"date": pl.Date, "ticker": pl.Utf8, "res": pl.Float64})
+    return pl.concat(parts).filter(pl.col("res").is_finite())
+
+
+def track() -> dict:
+    """The forward test's running count (and, once NEED events have matured, its one reading)."""
+    import bisect
+    pw = C.load_panel(LAB.cfg).select("date", "ticker", "sector", "fwd_63", *RISK)
+    cal = sorted(pw["date"].unique().to_list())
+    rd = pl.DataFrame([json.loads(l) for l in (WORK / "readings.jsonl").open()]).unique(subset=["ticker", "fdate"])
+    rd = rd.with_columns(fdate=pl.col("fdate").str.to_date()).filter(pl.col("fdate") > DISCOVERED)
+    out = {"registered": "2026-11-16", "counts_from": str(DISCOVERED), "need": NEED, "read": rd.height,
+           "provided_read": rd.filter(pl.col("guidance") == "provided").height, "matured": 0, "provided_matured": 0, "verdict": None}
+    if rd.height:
+        entry = [cal[i] if (i := bisect.bisect_right(cal, d)) < len(cal) else None for d in rd["fdate"].to_list()]
+        rd = rd.with_columns(entry=pl.Series(entry, dtype=pl.Date)).drop_nulls("entry")
+        ev = rd.join(residual_returns(pw, sorted(rd["entry"].unique().to_list())), left_on=["entry", "ticker"], right_on=["date", "ticker"])
+        prov, rest = ev.filter(pl.col("guidance") == "provided"), ev.filter(pl.col("guidance") != "provided")
+        out.update(matured=ev.height, provided_matured=prov.height)
+        if prov.height >= NEED and rest.height >= NEED:
+            m = (ev.with_columns(p=pl.col("guidance") == "provided").group_by(pl.col("entry").dt.strftime("%Y-%m"))
+                   .agg(d=pl.col("res").filter(pl.col("p")).mean() - pl.col("res").filter(~pl.col("p")).mean()).drop_nulls()["d"].to_numpy())
+            t = float(m.mean() / (m.std(ddof=1) + 1e-12) * np.sqrt(len(m))) if len(m) > 2 else float("nan")
+            gap = float(prov["res"].mean() - rest["res"].mean())
+            out.update(provided=float(prov["res"].mean()), others=float(rest["res"].mean()), gap=gap, t_by_month=t, months=len(m),
+                       verdict="repeats — test it as a challenger feature" if (gap > 0 and t >= 2) else "does not repeat — drop the idea")
+    (LAB.cfg.path("reports") / "alpha" / "guidance_live.json").write_text(json.dumps(out, indent=1, default=str))
+    print(f"guidance forward test: {out['read']} releases read since {DISCOVERED} · {out['provided_matured']} of {NEED} 'provided' events matured"
+          + (f" · verdict: {out['verdict']} (gap {out['gap']:+.2%}, t {out['t_by_month']:+.1f})" if out["verdict"] else " · no reading yet"))
+    return out
 
 
 def read(workers: int = 8, limit: int = 0, budget: float = 3.0) -> None:
@@ -271,7 +341,13 @@ def analyze() -> None:
 
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else "fetch"
-    if stage == "fetch":
+    if stage == "refresh":                       # weekly: new filings → read them → update the forward test
+        fetch(refresh=True)
+        read(budget=0.05)
+        track()
+    elif stage == "track":
+        track()
+    elif stage == "fetch":
         fetch()
     elif stage == "read":
         read(limit=int(sys.argv[2]) if len(sys.argv) > 2 else 0)

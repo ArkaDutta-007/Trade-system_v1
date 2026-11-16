@@ -479,3 +479,37 @@ python ops/research/llm_checks_2026_11.py                  # tev1 live record, s
 python ops/research/volmanaged_2026_11.py                  # volatility-managed exposure
 ```
 
+## 14. Finishing work (2026-11-16)
+
+*Arka: "Start building if anything left to build."* The system ran cleanly over the weekend: the daily job, the
+weekly retrain with the honest test, the brief and the weekly email. The three challenger books were seeded at the
+2026-11-13 close. What was still open, and is now built:
+
+- **Rules for judging the paper books, registered before they had a second mark** (`challenger.book_evidence`,
+  printed daily in the challenger status). Pairs: `index_minus` against `top300_cap`, `top20_fn` against `alpha_v2`
+  and against SPY. No verdict before 252 sessions. From then on: a 95% interval of the yearly excess above zero →
+  propose promotion to Arka; below zero → retire the book; at 504 sessions with neither → "no evidence after two
+  years". With a 3.5–4%/yr edge at about 4% tracking error, one year gives t ≈ 0.9, so the likely first verdict is
+  "keep running".
+- **A forward test of the one lead from §13** (`guidance_2026_11.py refresh`, weekly, at most $0.05 of Qwen a run).
+  Registered now: only earnings releases filed after 2026-11-13 count; "numeric outlook provided" against all other
+  releases on the 63-session return net of sector, size, beta, volatility and momentum; read once, when 150 such
+  events have matured (about mid-2027). It repeats with t ≥ 2 or the idea is dropped.
+- **The picks card now says what a top pick was worth in the honest test.** The production score's top decile beat
+  the average stock by +0.49% per 21 days over two years (−0.28% over the last 12 months), measured weekly. The
+  card quotes that next to its calibrated expected returns.
+- **The 2003 → backtest record was re-run on the corrected share counts.** It feeds the calibration only. On
+  today's survivors the book went from 14.6%/yr (Sharpe 0.97) to 16.4% (1.04); that universe has no failed stocks,
+  so the number is an upper bound and not evidence of an edge.
+- **Smaller things:** the scoreboard lists books that are seeded but not yet marked twice; the challenger's log
+  chatter no longer lands in the digest; its live IC is tracked for both models; the Telegram agent's tools
+  document explains the challenger and the six books.
+
+Today's weekly honest test (through 2026-11-13): production top-20 +3.1%/yr, `top20_fn` +9.4%/yr (Sharpe 1.14, last
+12 months +13.3%), index-minus +4.0%/yr over its control (95% CI +0.7 to +7.6; last 12 months +0.2%), SPY +13.7%/yr.
+Two runs three days apart moved the top-20 numbers by about 1.5%/yr, from GPU training noise changing a few picks:
+read every top-20 figure with that much slack.
+
+What is deliberately not built: the challenger's names are not in the morning brief (they have no live record yet),
+and nothing was promoted to production.
+

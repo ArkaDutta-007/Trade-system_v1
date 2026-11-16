@@ -71,6 +71,15 @@ def main() -> int:
         t = LAB.ic_table(sc, labels)
         last = t.filter(pl.col("date") >= cal[max(0, len(cal) - 252)])
         ics[key] = {"all": {h: v["ic"] for h, v in LAB.ic_summary(t).items()}, "last_year": {h: v["ic"] for h, v in LAB.ic_summary(last).items()}}
+    # what a top pick was actually worth here: 21-day return of the production score's top decile minus the
+    # day's average stock, on non-overlapping days. The picks card quotes it next to its calibrated E[r].
+    j = (comps["production"].join(pw.select("date", "ticker", "fwd_21"), on=["date", "ticker"]).drop_nulls("fwd_21")
+         .with_columns(dec=((pl.col("comp").rank("ordinal").over("date") - 1) * 10 // pl.col("comp").count().over("date")),
+                       rx=pl.col("fwd_21") - pl.col("fwd_21").mean().over("date")))
+    td = j.filter(pl.col("dec") == 9).group_by("date").agg(rx=pl.col("rx").mean()).sort("date")
+    keep = set(cal[::21])
+    td = td.filter(pl.col("date").is_in(list(keep)))
+    top_decile = {"all": float(td["rx"].mean()), "last_year": float(td.filter(pl.col("date") >= cal[max(0, len(cal) - 252)])["rx"].mean()), "dates": td.height}
     T.walk("resid", C.neutral_labels(pw), C.neutral_labels(hist))        # the factor-neutral model
     sc = pl.read_parquet(work / "wf2_resid.parquet")
     fn = LAB.zcomp(sc)
@@ -89,7 +98,7 @@ def main() -> int:
         ser["index_minus"].append(TT.run(rets_of, first, prev, by, "drop30", "cap")[0])
         ser["control"].append(TT.run(rets_of, first, prev, by, "all", "cap")[0])
     cagr = lambda r: float(np.prod(1 + r) ** (252 / len(r)) - 1)
-    out = {"run": str(date.today()), "window": [str(days[0]), str(days[-1])], "sessions": len(days), "ic": ics}
+    out = {"run": str(date.today()), "window": [str(days[0]), str(days[-1])], "sessions": len(days), "ic": ics, "production_top_decile_21d": top_decile}
     tr = {k: np.mean(v, axis=0) for k, v in ser.items()}
     for k in ser:
         out[k] = {**stats(tr[k]), "by_start_day": [cagr(r) for r in ser[k]]}
@@ -124,6 +133,7 @@ def main() -> int:
     print(f"  index-minus         {i['cagr']:+.1%}/yr · last 12 months {i['last_year']:+.1%} · vs control {i['vs_control']['excess']:+.1%}/yr "
           f"[{i['vs_control']['lo']:+.1%}, {i['vs_control']['hi']:+.1%}] · last 12 months {i['vs_control_last_year']['excess']:+.1%}")
     print(f"  control (all 300)   {k['cagr']:+.1%}/yr · last 12 months {k['last_year']:+.1%}      SPY {out['spy']['cagr']:+.1%}/yr · last 12 months {out['spy']['last_year']:+.1%}")
+    print(f"  production top decile: {top_decile['all']:+.2%} per 21 days over the average stock ({top_decile['dates']} non-overlapping days; last 12 months {top_decile['last_year']:+.2%})")
     print("  IC " + " · ".join(f"{m} 21d {v['all'][21]:+.3f} (last year {v['last_year'][21]:+.3f}) 63d {v['all'][63]:+.3f} ({v['last_year'][63]:+.3f})" for m, v in ics.items()))
     return 0
 

@@ -37,6 +37,9 @@ step 3600 ts alpha backtest --extend
 # The honest test (failures included), re-run on everything we have: the picks card and the challenger status
 # quote its result (reports/alpha/honest_latest.json). ~6 min on the GPU.
 step 3600 python ops/research/honest_weekly.py
+# Forward test of the one lead from the earnings-guidance reading (registered 2026-11-16, RESEARCH_2026-11 §13):
+# new 8-K earnings releases for the top-300 names → Qwen (≤ $0.05 a run) → reports/alpha/guidance_live.json.
+step 1800 python ops/research/guidance_2026_11.py refresh
 echo "=== weekly retrain done fail=$FAIL $(date -Is) ===" >> "$LOG"
 tail -4 "$LOG"
 find $OPS/logs -name 'retrain-*.log' -mtime +60 -delete 2>/dev/null

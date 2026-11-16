@@ -340,13 +340,14 @@ def update(cfg, retrain: bool = False, days: int = 1, force_snapshot: bool = Fal
             "pit_rows": man.get("pit_rows", {}), "snapshot": snapped, "last_snapshot": str(last_snapshot(cfg))}
 
 
-def live_ic(cfg, pw: pl.DataFrame | None = None, h: int = 21) -> dict:
-    """Rank IC of the recorded composite against the ``h``-day returns that have matured since."""
+def live_ic(cfg, pw: pl.DataFrame | None = None, h: int = 21, col: str = "comp") -> dict:
+    """Rank IC of a recorded composite (``comp`` = base model, ``comp_fn`` = factor-neutral) against the
+    ``h``-day returns that have matured since."""
     p = root(cfg) / "scores.parquet"
-    if not p.exists():
+    if not p.exists() or col not in pl.read_parquet_schema(p):
         return {"dates": 0}
     pw = pw if pw is not None else load_panel(cfg)
-    j = (pl.read_parquet(p).select("date", "ticker", "comp")
+    j = (pl.read_parquet(p).select("date", "ticker", comp=pl.col(col))
            .join(pw.select("date", "ticker", f"fwd_{h}"), on=["date", "ticker"]).drop_nulls([f"fwd_{h}", "comp"]))
     g = j.group_by("date").agg(ic=pl.corr("comp", f"fwd_{h}", method="spearman"), n=pl.len()).filter(pl.col("n") >= 30).sort("date")
     if g.height == 0:
@@ -366,6 +367,52 @@ def avoid_list(cfg, n: int = 12) -> list[tuple[str, float]]:
     kept = set(s.filter(pl.col("book") == "index_minus")["ticker"].to_list())
     c = s.filter((pl.col("book") == "top300_cap") & ~pl.col("ticker").is_in(list(kept))).sort("w", descending=True)
     return list(zip(c["ticker"].to_list()[:n], c["w"].to_list()[:n]))
+
+
+# ── judging the paper books: rules registered 2026-11-16, before any of them had a second mark ────────────────
+# Each pair is "book, the thing it has to beat". The daily line is information only; a decision is read off at
+# a checkpoint and nowhere else, and promotion is always a proposal to Arka, never automatic.
+#   · under 252 sessions: no verdict, whatever the numbers say
+#   · from 252 sessions: if the 95% interval of the yearly excess lies above zero → propose promotion; if it
+#     lies below zero → retire the book; otherwise keep running
+#   · at 504 sessions without an interval above zero → "no evidence after two years": retire or keep as
+#     information, Arka's call
+# With the honest-test excess (3.5%/yr at ~4% tracking error for index_minus) a year of data gives t ≈ 0.9, so
+# the likely outcome at the first checkpoint is "keep running". That is stated here so it surprises nobody.
+PAIRS = (("index_minus", "top300_cap"), ("top20_fn", "alpha_v2"), ("top20_fn", "spy_benchmark"))
+FIRST_READING, LAST_READING = 252, 504
+
+
+def book_evidence(books_dir: Path, pairs=PAIRS, n_boot: int = 1000) -> list[dict]:
+    """Yearly excess of each book over its comparison on their common marked dates, with a stationary-bootstrap
+    95% interval and the registered verdict."""
+    from ..research.stats import bootstrap_ci
+    out = []
+    for a, b in pairs:
+        logs = []
+        for name in (a, b):
+            p = Path(books_dir) / f"{name}.json"
+            logs.append({e["date"]: float(e["equity"]) for e in json.loads(p.read_text()).get("equity_log", [])} if p.exists() else {})
+        days = sorted(set(logs[0]) & set(logs[1]))
+        row = {"book": a, "versus": b, "sessions": max(0, len(days) - 1), "since": days[0] if days else None}
+        if len(days) >= 3:
+            ea, eb = np.array([logs[0][d] for d in days]), np.array([logs[1][d] for d in days])
+            d = ea[1:] / ea[:-1] - eb[1:] / eb[:-1]
+            ci = bootstrap_ci(d, stat=lambda x: float(np.mean(x)) * 252, n_boot=n_boot, rng=np.random.default_rng(0))
+            row.update(excess=ci["point"], lo=ci["lo"], hi=ci["hi"], total=float(ea[-1] / ea[0] - eb[-1] / eb[0]))
+        n = row["sessions"]
+        if n < FIRST_READING or "lo" not in row:
+            row["verdict"] = f"no verdict before {FIRST_READING} sessions ({FIRST_READING - n} to go)"
+        elif row["lo"] > 0:
+            row["verdict"] = "interval above zero — propose promotion to Arka"
+        elif row["hi"] < 0:
+            row["verdict"] = "interval below zero — retire the book"
+        elif n >= LAST_READING:
+            row["verdict"] = "no evidence after two years — retire or keep as information (Arka's call)"
+        else:
+            row["verdict"] = "undecided — keep running"
+        out.append(row)
+    return out
 
 
 def honest_path(cfg) -> Path:

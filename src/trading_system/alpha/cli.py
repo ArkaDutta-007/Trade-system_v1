@@ -34,8 +34,11 @@ def honest_note(cfg) -> str:
         return HONEST_NOTE
     verdict = "no proven edge" if p["cagr"] < spy["cagr"] else "ahead on the honest test, unproven live"
     pct = lambda x: f"{x:+.1%}".replace("-", "−")
+    td = (h.get("production_top_decile_21d") or {}).get("all")
+    tail = (f"top-decile picks beat the average stock by {pct(td)} per 21 days there, so the E[r] shown are overstated" if td is not None
+            else "expected returns backtest-calibrated, likely overstated")
     return (f"⚠ honest test incl. failed stocks: {pct(p['cagr'])}/yr vs SPY {pct(spy['cagr'])} ({w0} → {w1}, re-run weekly) — "
-            f"{verdict}; expected returns backtest-calibrated, likely overstated")
+            f"{verdict}; {tail}")
 
 
 def _cfg(config: str):
@@ -478,9 +481,11 @@ def alpha_challenger(config: str = CONFIG_OPT,
 
     Refreshes its point-in-time panel, refits when due, scores today's names and records a weekly tranche of
     target weights for the paper books ``index_minus`` and ``top300_cap`` (its control). Production is untouched."""
+    import logging
     import time as _t
     from . import challenger as C
     cfg = _cfg(config)
+    logging.getLogger().setLevel(logging.WARNING)       # this command's output goes into the digest: no INFO chatter
     t0 = _t.time()
     info = None if status_only else C.update(cfg, retrain=retrain, days=days, force_snapshot=snapshot)
     man, snaps = C.manifest(cfg), C.load_snapshots(cfg)
@@ -506,12 +511,13 @@ def alpha_challenger(config: str = CONFIG_OPT,
     av = C.avoid_list(cfg)
     if av:
         rprint(f"dropped  largest names the model left out this week (index weight): " + " · ".join(f"{t} {x:.1%}" for t, x in av))
-    ic = C.live_ic(cfg)
+    ic, icf = C.live_ic(cfg), C.live_ic(cfg, col="comp_fn")
     if ic.get("dates"):
-        rprint(f"live     21-day rank IC {ic['ic']:+.3f} over {ic['dates']} dates ({ic['independent']} independent) · {ic['first']} → {ic['last']} — "
+        rprint(f"live     21-day rank IC: base {ic['ic']:+.3f}" + (f" · factor-neutral {icf['ic']:+.3f}" if icf.get("dates") else "")
+               + f" over {ic['dates']} dates ({ic['independent']} independent) · {ic['first']} → {ic['last']} — "
                "too few to judge before ~12 independent periods")
     else:
-        rprint("live     no 21-day forecast has matured yet")
+        rprint("live     no 21-day forecast has matured yet (first on about 2026-12-15)")
     hb = C.honest(cfg)
     if hb:
         im, ct = hb.get("index_minus", {}), hb.get("control", {})
@@ -523,6 +529,18 @@ def alpha_challenger(config: str = CONFIG_OPT,
             rprint(f"         top20_fn {tf.get('cagr', 0):+.1%}/yr · last 12 months {tf.get('last_year', 0):+.1%} · Sharpe {tf.get('sharpe', 0):.2f} · "
                    f"max drawdown {tf.get('maxdd', 0):+.1%} (production top-20: {hb.get('production_top20', {}).get('cagr', 0):+.1%}/yr, "
                    f"last 12 months {hb.get('production_top20', {}).get('last_year', 0):+.1%})")
+    import os
+    from pathlib import Path as _P
+    bdir = _P(os.environ.get("TS_OPS", str(_P.home() / "trade-ops"))) / "portfolio" / "books"
+    for e in C.book_evidence(bdir):
+        num = f"{e['excess']:+.1%}/yr [{e['lo']:+.1%}, {e['hi']:+.1%}] over {e['sessions']} sessions · " if "excess" in e else ""
+        rprint(f"evidence {e['book']} − {e['versus']}: {num}{e['verdict']}")
+    gl = cfg.path("reports") / "alpha" / "guidance_live.json"
+    if gl.exists():
+        import json as _json
+        g = _json.loads(gl.read_text())
+        rprint(f"lead     earnings-outlook forward test (registered {g.get('registered')}): {g.get('read', 0)} new releases read · "
+               f"{g.get('provided_matured', 0)} of {g.get('need', 150)} events matured · " + (g.get("verdict") or "no reading yet"))
     rprint("judge    index_minus against top300_cap in the scoreboard below (top20_fn against SPY and alpha_v2); a shadow test, not advice")
 
 

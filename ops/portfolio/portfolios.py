@@ -374,6 +374,10 @@ def spy_over(spy_log: list[dict], log: list[dict]) -> float | None:
     return sp[z] / sp[a] - 1 if a in sp and z in sp else None
 
 
+def equity_at_seed(b: dict) -> float:
+    return float(b["equity_log"][0]["equity"]) if b.get("equity_log") else START_CASH
+
+
 def do_report() -> str:
     rows, seeded = [], []
     for name in BOOKS:
@@ -406,6 +410,10 @@ def do_report() -> str:
         L.append(f"{name:<15}{m['equity']:>10,.0f}{m['total_ret']*100:>8.1f}%"
                  f"{rel}{m['sharpe']:>8.2f}{m['maxdd']*100:>7.1f}%  {hold}")
     L.append("(vs SPY = SPY over the same dates as the book; alpha_v2 started 2026-09-18)")
+    new = [(name, b) for name, b in seeded if name not in {r[0] for r in rows}]
+    if new:                                  # one mark so far: no P&L yet, but say the book exists
+        L.append("Seeded, first results after the next close: "
+                 + " · ".join(f"{name} ({b['created']}, {len(b['holdings'])} names, {1 - b['cash'] / max(equity_at_seed(b), 1e-9):.0%} invested)" for name, b in new))
     by = {name: (b, m) for name, b, m in rows}
     if "index_minus" in by and "top300_cap" in by:
         (bi, mi), (bc, mc) = by["index_minus"], by["top300_cap"]

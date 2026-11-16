@@ -96,6 +96,9 @@ def test_honest_note_quotes_the_weekly_test_and_falls_back(monkeypatch):
                                                   "spy": {"cagr": 0.141}})
     note = cli.honest_note(None)
     assert "−1.2%/yr vs SPY +14.1% (Nov 24 → Nov 26, re-run weekly)" in note and "no proven edge" in note
+    monkeypatch.setattr(C, "honest", lambda cfg: {"window": ["2024-11-26", "2026-11-12"], "production_top20": {"cagr": -0.012},
+                                                  "spy": {"cagr": 0.141}, "production_top_decile_21d": {"all": 0.006}})
+    assert "top-decile picks beat the average stock by +0.6% per 21 days there" in cli.honest_note(None)
     monkeypatch.setattr(C, "honest", lambda cfg: None)
     assert cli.honest_note(None) == cli.HONEST_NOTE
 
@@ -129,4 +132,35 @@ def test_neutral_labels_remove_the_factor_part():
     y = out["yn_21"].to_numpy()
     assert abs(np.corrcoef(y, beta)[0, 1]) < 0.05                                # the beta bet is gone
     assert np.corrcoef(y, spec_ret)[0, 1] > 0.9                                  # the stock-specific part remains
+
+
+def _book(tmp_path, name, rets, start=10_000.0):
+    import json
+    from datetime import timedelta
+    eq, log, d = start, [], date(2026, 11, 13)
+    log.append({"date": str(d), "equity": eq})
+    for r in rets:
+        d += timedelta(days=1)
+        eq *= 1 + r
+        log.append({"date": str(d), "equity": eq})
+    (tmp_path / f"{name}.json").write_text(json.dumps({"equity_log": log}))
+
+
+def test_book_evidence_gives_no_verdict_early_and_follows_the_registered_rule(tmp_path):
+    import numpy as np
+    rng = np.random.default_rng(1)
+    base = rng.normal(0.0004, 0.01, 300)
+    _book(tmp_path, "top300_cap", base)
+    _book(tmp_path, "index_minus", base + 0.0006 + rng.normal(0, 0.0005, 300))    # a steady +15%/yr edge, tiny tracking error
+    pairs = (("index_minus", "top300_cap"),)
+    e = C.book_evidence(tmp_path, pairs, n_boot=200)[0]
+    assert e["sessions"] == 300 and e["lo"] > 0 and "propose promotion" in e["verdict"]
+    _book(tmp_path, "top300_cap", base[:100])
+    _book(tmp_path, "index_minus", base[:100] + 0.0006)
+    early = C.book_evidence(tmp_path, pairs, n_boot=200)[0]
+    assert early["sessions"] == 100 and early["verdict"].startswith("no verdict before 252")   # however good it looks
+    _book(tmp_path, "index_minus", base - 0.0006 + rng.normal(0, 0.0005, 300))
+    _book(tmp_path, "top300_cap", base)
+    assert "retire the book" in C.book_evidence(tmp_path, pairs, n_boot=200)[0]["verdict"]
+    assert C.book_evidence(tmp_path, (("missing", "top300_cap"),))[0]["sessions"] == 0          # a book that does not exist yet
 
